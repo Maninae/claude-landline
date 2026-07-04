@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+*.egg-info/
+dist/
+build/
+
+# Never commit a real config — it names your machine's paths and Keychain entries.
+landline.json
