@@ -1,12 +1,12 @@
-"""Tests for landline.voice_handler — Cluster 2 (voice dispatch)."""
+"""Tests for landline.media.voice — Cluster 2 (voice dispatch)."""
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from landline.config import VOICE_MAX_DURATION_SECONDS
-from landline.voice_handler import dispatch_voice, process_voice_batch
-from landline.voice_transcribe import TranscribeResult
+from landline.media.voice import dispatch_voice, process_voice_batch
+from landline.media.transcribe import TranscribeResult
 
 
 def _make_daemon_stub():
@@ -43,7 +43,7 @@ class TestDispatchVoiceSuccess:
             "landline.orchestrator.download_file",
             return_value="/tmp/telegram_voice/voice_20260703.ogg",
         ), patch(
-            "landline.voice_handler.transcribe_file",
+            "landline.media.voice.transcribe_file",
             return_value=TranscribeResult(
                 ok=True,
                 text="book me a doctor appointment",
@@ -51,7 +51,7 @@ class TestDispatchVoiceSuccess:
                 error=None,
             ),
         ), patch(
-            "landline.voice_handler.log_conversation",
+            "landline.media.voice.log_conversation",
         ):
             dispatch_voice(daemon, msg, update_id=42, chat_id="12345")
 
@@ -76,12 +76,12 @@ class TestDispatchVoiceSuccess:
             "landline.orchestrator.download_file",
             return_value="/tmp/telegram_voice/x.ogg",
         ), patch(
-            "landline.voice_handler.transcribe_file",
+            "landline.media.voice.transcribe_file",
             return_value=TranscribeResult(
                 ok=True, text=hostile, duration_seconds=1.0, error=None,
             ),
         ), patch(
-            "landline.voice_handler.log_conversation",
+            "landline.media.voice.log_conversation",
         ):
             dispatch_voice(daemon, msg, update_id=1, chat_id="12345")
         prompt_text, _, _ = daemon._inject_and_dispatch.call_args.args
@@ -98,7 +98,7 @@ class TestDispatchVoiceDurationGuard:
         with patch(
             "landline.orchestrator.download_file",
         ) as mock_dl, patch(
-            "landline.voice_handler.transcribe_file",
+            "landline.media.voice.transcribe_file",
         ) as mock_tx:
             dispatch_voice(daemon, msg, update_id=10, chat_id="12345")
         mock_dl.assert_not_called()
@@ -118,7 +118,7 @@ class TestDispatchVoiceTranscribeFailure:
             "landline.orchestrator.download_file",
             return_value="/tmp/telegram_voice/x.ogg",
         ), patch(
-            "landline.voice_handler.transcribe_file",
+            "landline.media.voice.transcribe_file",
             return_value=TranscribeResult(
                 ok=False, text="", duration_seconds=None, error="timeout",
             ),
@@ -138,7 +138,7 @@ class TestDispatchVoiceTranscribeFailure:
             "landline.orchestrator.download_file",
             return_value="/tmp/telegram_voice/x.ogg",
         ), patch(
-            "landline.voice_handler.transcribe_file",
+            "landline.media.voice.transcribe_file",
             return_value=TranscribeResult(
                 ok=False, text="", duration_seconds=1.0,
                 error="exit 1: ffmpeg missing",
@@ -156,7 +156,7 @@ class TestDispatchVoiceTranscribeFailure:
         with patch(
             "landline.orchestrator.download_file", return_value=None,
         ), patch(
-            "landline.voice_handler.transcribe_file",
+            "landline.media.voice.transcribe_file",
         ) as mock_tx:
             dispatch_voice(daemon, msg, update_id=13, chat_id="12345")
         mock_tx.assert_not_called()
@@ -173,7 +173,7 @@ class TestDispatchVoiceLockGate:
         with patch(
             "landline.orchestrator.download_file",
         ) as mock_dl, patch(
-            "landline.voice_handler.transcribe_file",
+            "landline.media.voice.transcribe_file",
         ) as mock_tx:
             dispatch_voice(daemon, msg, update_id=14, chat_id="12345")
         mock_dl.assert_not_called()
@@ -190,7 +190,7 @@ class TestDispatchVoiceLockGate:
         msg = _make_voice_msg(duration=20)
         msg["message_id"] = 7001
         with patch(
-            "landline.voice_handler.reactions.set_reaction_async",
+            "landline.media.voice.reactions.set_reaction_async",
         ) as mock_clear:
             dispatch_voice(daemon, msg, update_id=71, chat_id="12345")
         daemon._inject_and_dispatch.assert_not_called()
@@ -208,7 +208,7 @@ class TestDispatchVoiceLockGate:
         # ``if not field`` branch.
         msg = {"chat": {"id": 12345}, "message_id": 7002}
         with patch(
-            "landline.voice_handler.reactions.set_reaction_async",
+            "landline.media.voice.reactions.set_reaction_async",
         ) as mock_clear:
             dispatch_voice(daemon, msg, update_id=72, chat_id="12345")
         daemon._inject_and_dispatch.assert_not_called()
@@ -231,14 +231,14 @@ class TestPrivacyDiscipline:
             "landline.orchestrator.download_file",
             return_value="/tmp/telegram_voice/x.ogg",
         ), patch(
-            "landline.voice_handler.transcribe_file",
+            "landline.media.voice.transcribe_file",
             return_value=TranscribeResult(
                 ok=True, text=secret, duration_seconds=1.0, error=None,
             ),
         ), patch(
-            "landline.voice_handler.log_conversation",
+            "landline.media.voice.log_conversation",
         ) as mock_lc, patch(
-            "landline.voice_handler.log",
+            "landline.media.voice.log",
         ) as mock_log:
             dispatch_voice(daemon, msg, update_id=15, chat_id="12345")
 
@@ -268,12 +268,12 @@ class TestProcessVoiceBatch:
             "landline.orchestrator.download_file",
             side_effect=lambda t, fid, fn, target_dir=None: f"/tmp/{fn}",
         ), patch(
-            "landline.voice_handler.transcribe_file",
+            "landline.media.voice.transcribe_file",
             return_value=TranscribeResult(
                 ok=True, text="hi", duration_seconds=0.5, error=None,
             ),
         ), patch(
-            "landline.voice_handler.log_conversation",
+            "landline.media.voice.log_conversation",
         ):
             process_voice_batch(daemon, updates)
         assert daemon._inject_and_dispatch.call_count == 2
@@ -304,7 +304,7 @@ class TestProcessVoiceBatchLockedCoalesce:
               "voice": {"file_id": "c", "duration": 7}}, 22, "12345"),
         ]
         with patch(
-            "landline.voice_handler.reactions.set_reaction_async",
+            "landline.media.voice.reactions.set_reaction_async",
         ) as mock_clear:
             process_voice_batch(daemon, updates)
 
@@ -361,12 +361,12 @@ class TestDispatchVoicePauseInterrupt:
             "landline.orchestrator.download_file",
             return_value="/tmp/telegram_voice/x.ogg",
         ), patch(
-            "landline.voice_handler.transcribe_file",
+            "landline.media.voice.transcribe_file",
             return_value=TranscribeResult(
                 ok=False, text="", duration_seconds=1.5, error="paused",
             ),
         ), patch(
-            "landline.voice_handler.reactions.set_reaction_async",
+            "landline.media.voice.reactions.set_reaction_async",
         ) as mock_clear:
             dispatch_voice(daemon, msg, update_id=99, chat_id="12345")
 
@@ -430,13 +430,13 @@ class TestDispatchVoicePauseInterrupt:
             "landline.orchestrator.download_file",
             return_value="/tmp/telegram_voice/x.ogg",
         ), patch(
-            "landline.voice_handler.transcribe_file",
+            "landline.media.voice.transcribe_file",
             return_value=TranscribeResult(
                 ok=True, text="please book my flight",
                 duration_seconds=1.5, error=None,
             ),
         ) as mock_tx, patch(
-            "landline.voice_handler.log_conversation",
+            "landline.media.voice.log_conversation",
         ):
             dispatch_voice(daemon, msg, update_id=88, chat_id="12345")
 
@@ -486,12 +486,12 @@ class TestDispatchVoicePauseInterrupt:
             "landline.orchestrator.download_file",
             return_value="/tmp/telegram_voice/x.ogg",
         ), patch(
-            "landline.voice_handler.transcribe_file",
+            "landline.media.voice.transcribe_file",
             return_value=TranscribeResult(
                 ok=True, text="hi", duration_seconds=0.5, error=None,
             ),
         ) as mock_tx, patch(
-            "landline.voice_handler.log_conversation",
+            "landline.media.voice.log_conversation",
         ):
             dispatch_voice(daemon, msg, update_id=89, chat_id="12345")
 
@@ -519,12 +519,12 @@ class TestDispatchVoicePauseInterrupt:
             "landline.orchestrator.download_file",
             return_value="/tmp/telegram_voice/x.ogg",
         ), patch(
-            "landline.voice_handler.transcribe_file",
+            "landline.media.voice.transcribe_file",
             return_value=TranscribeResult(
                 ok=True, text="ok", duration_seconds=0.5, error=None,
             ),
         ) as mock_tx, patch(
-            "landline.voice_handler.log_conversation",
+            "landline.media.voice.log_conversation",
         ):
             dispatch_voice(daemon, msg, update_id=77, chat_id="12345")
 
@@ -555,7 +555,7 @@ class TestDispatchVoiceRejectionsClearAck:
         daemon = _make_daemon_stub()
         msg = self._make_msg_with_mid(mid=555, duration=VOICE_MAX_DURATION_SECONDS + 5)
         with patch(
-            "landline.voice_handler.reactions.set_reaction_async",
+            "landline.media.voice.reactions.set_reaction_async",
         ) as mock_clear, patch(
             "landline.orchestrator.download_file",
         ) as mock_dl:
@@ -571,7 +571,7 @@ class TestDispatchVoiceRejectionsClearAck:
         daemon = _make_daemon_stub()
         msg = self._make_msg_with_mid(mid=556)
         with patch(
-            "landline.voice_handler.reactions.set_reaction_async",
+            "landline.media.voice.reactions.set_reaction_async",
         ) as mock_clear, patch(
             "landline.orchestrator.download_file", return_value=None,
         ):
@@ -585,12 +585,12 @@ class TestDispatchVoiceRejectionsClearAck:
         daemon = _make_daemon_stub()
         msg = self._make_msg_with_mid(mid=557)
         with patch(
-            "landline.voice_handler.reactions.set_reaction_async",
+            "landline.media.voice.reactions.set_reaction_async",
         ) as mock_clear, patch(
             "landline.orchestrator.download_file",
             return_value="/tmp/x.ogg",
         ), patch(
-            "landline.voice_handler.transcribe_file",
+            "landline.media.voice.transcribe_file",
             return_value=TranscribeResult(
                 ok=False, text="", duration_seconds=None, error="timeout",
             ),

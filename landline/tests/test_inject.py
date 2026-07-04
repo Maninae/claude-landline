@@ -1,11 +1,11 @@
-"""Tests for landline.inject — inject queue draining (two-phase commit)."""
+"""Tests for landline.runtime.inject — inject queue draining (two-phase commit)."""
 
 import json
 from pathlib import Path
 
 import pytest
 
-from landline.inject import commit_inject_queue, drain_inject_queue
+from landline.runtime.inject import commit_inject_queue, drain_inject_queue
 
 
 class TestDrainInjectQueue:

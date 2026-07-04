@@ -1,4 +1,4 @@
-"""Tests for landline.usage_stats — Cluster 4 daily aggregate.
+"""Tests for landline.runtime.usage_stats — Cluster 4 daily aggregate.
 
 Scenarios covered:
     * record_turn writes today's bucket with correct token counts,
@@ -24,7 +24,8 @@ from unittest.mock import patch
 
 import pytest
 
-from landline import config, usage_stats
+from landline import config
+from landline.runtime import usage_stats
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +36,7 @@ from landline import config, usage_stats
 def stats_path(tmp_path, monkeypatch):
     path = tmp_path / "usage-stats.json"
     monkeypatch.setattr("landline.config.USAGE_STATS_FILE", path)
-    monkeypatch.setattr("landline.usage_stats.USAGE_STATS_FILE", path)
+    monkeypatch.setattr("landline.runtime.usage_stats.USAGE_STATS_FILE", path)
     return path
 
 
@@ -291,7 +292,7 @@ class TestNoRaiseOnBrokenLoad:
             raise RuntimeError("simulated io failure")
 
         monkeypatch.setattr(
-            "landline.usage_stats._load_unlocked", boom,
+            "landline.runtime.usage_stats._load_unlocked", boom,
         )
         # Should NOT raise.
         usage_stats.record_turn(

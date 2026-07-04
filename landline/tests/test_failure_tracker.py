@@ -1,11 +1,11 @@
-"""Tests for landline.failure_tracker — ClaudeFailureTracker state machine."""
+"""Tests for landline.claude.failure_tracker — ClaudeFailureTracker state machine."""
 
 import time
 from unittest.mock import patch
 
 import pytest
 
-from landline.failure_tracker import (
+from landline.claude.failure_tracker import (
     ClaudeFailureTracker,
     CLAUDE_FAILURE_BACKOFF_THRESHOLD,
     CLAUDE_FAILURE_ALERT_THRESHOLD,
@@ -237,7 +237,8 @@ class TestConfigCanonicalSource:
     """
 
     def test_failure_tracker_consts_come_from_config(self):
-        from landline import config, failure_tracker
+        from landline import config
+        from landline.claude import failure_tracker
 
         assert (
             failure_tracker.CLAUDE_FAILURE_BACKOFF_THRESHOLD

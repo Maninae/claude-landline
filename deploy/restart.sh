@@ -51,9 +51,9 @@ if [ ! -d "$LANDLINE_REPO/landline" ]; then
     exit 1
 fi
 
-echo "Compile check ($LANDLINE_REPO/landline/*.py)..."
+echo "Compile check ($LANDLINE_REPO/landline/**/*.py)..."
 (cd "$LANDLINE_REPO" && "$PYTHON_BIN" -c \
-    "import py_compile, glob; [py_compile.compile(f, doraise=True) for f in glob.glob('landline/*.py')]; print('OK')")
+    "import py_compile, glob; [py_compile.compile(f, doraise=True) for f in glob.glob('landline/**/*.py', recursive=True)]; print('OK')")
 
 echo "Import check..."
 (cd "$LANDLINE_REPO" && PYTHONPATH="$LANDLINE_REPO" LANDLINE_WORKSPACE="$LANDLINE_WORKSPACE" \

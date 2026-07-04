@@ -12,15 +12,15 @@ import sys
 import time
 import traceback
 
-from landline import outbound_spool
+from landline.telegram import spool as outbound_spool
 from landline.claude import ClaudeStreamShutdownHook, run_claude_streaming
-from landline.client import send_response, send_typing
+from landline.telegram import send_response, send_typing
 from landline.config import AGENT_NAME, FATAL_CRASH_PAUSE_SECONDS, STATE_FILE, WORKSPACE
-from landline.failure_tracker import ClaudeFailureTracker
-from landline.guard import is_allowed, reject_message
-from landline.logging import log
+from landline.claude.failure_tracker import ClaudeFailureTracker
+from landline.runtime.guard import is_allowed, reject_message
+from landline.runtime.logging import log
 from landline.orchestrator import TelegramDaemon
-from landline.state import secure_daily_logs
+from landline.runtime.state import secure_daily_logs
 
 
 _PID_LOCK_FILE = WORKSPACE / "cache" / "telegram-daemon.pid"

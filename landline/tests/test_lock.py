@@ -1,4 +1,4 @@
-"""Tests for landline.lock — LockManager state machine.
+"""Tests for landline.runtime.lock — LockManager state machine.
 
 Critical security invariant: reset() must preserve lockout counters.
 """
@@ -19,7 +19,7 @@ from landline.config import (
     UNLOCK_MAX_ATTEMPTS,
     UNLOCKED,
 )
-from landline.lock import LockManager, _normalize_passphrase
+from landline.runtime.lock import LockManager, _normalize_passphrase
 
 
 # B1/B2/B5 helpers — used by the new regression-tests classes below.
@@ -195,7 +195,7 @@ def _drive_lockout_cycle(lm):
     the failing attempts pass the keychain gate and reach the failure counter.
     """
     with patch(
-        "landline.lock.keychain_get_status",
+        "landline.runtime.lock.keychain_get_status",
         return_value=(FAKE_UNLOCK_HASH, "ok"),
     ):
         for _ in range(UNLOCK_MAX_ATTEMPTS):
@@ -271,7 +271,7 @@ class TestLockoutEscalation:
         lm._lockout_monotonic_until = 0.0
 
         with patch(
-            "landline.lock.keychain_get_status",
+            "landline.runtime.lock.keychain_get_status",
             return_value=(FAKE_UNLOCK_HASH, "ok"),
         ):
             assert lm.try_silent_unlock(FAKE_UNLOCK_PASSPHRASE) is True
@@ -366,9 +366,9 @@ class TestClockSkew:
 
         # Jump the wall clock past the deadline. Monotonic stays put.
         future_wall = lm._unlock_lockout_until + 1.0
-        with patch("landline.lock.time.time", return_value=future_wall), \
+        with patch("landline.runtime.lock.time.time", return_value=future_wall), \
              patch(
-                 "landline.lock.keychain_get_status",
+                 "landline.runtime.lock.keychain_get_status",
                  return_value=(FAKE_UNLOCK_HASH, "ok"),
              ):
             # Lockout must still be considered active by the gate.
@@ -389,9 +389,9 @@ class TestClockSkew:
         _drive_lockout_cycle(lm)
 
         past_wall = time.time() - 3600.0
-        with patch("landline.lock.time.time", return_value=past_wall), \
+        with patch("landline.runtime.lock.time.time", return_value=past_wall), \
              patch(
-                 "landline.lock.keychain_get_status",
+                 "landline.runtime.lock.keychain_get_status",
                  return_value=(FAKE_UNLOCK_HASH, "ok"),
              ):
             assert lm._lockout_remaining() > 0.0
@@ -464,7 +464,7 @@ class TestClockSkew:
         assert lm._lockout_remaining() == 0.0
 
         with patch(
-            "landline.lock.keychain_get_status",
+            "landline.runtime.lock.keychain_get_status",
             return_value=(FAKE_UNLOCK_HASH, "ok"),
         ):
             assert lm.try_silent_unlock(FAKE_UNLOCK_PASSPHRASE) is True
@@ -486,10 +486,10 @@ class TestClockSkew:
         # Drift the wall clock so wall_remaining shrinks by > 60s relative to
         # monotonic_remaining. The lockout is still active (monotonic governs).
         future_wall = time.time() + 120.0
-        with patch("landline.lock.time.time", return_value=future_wall), \
-             patch("landline.lock.log") as mock_log, \
+        with patch("landline.runtime.lock.time.time", return_value=future_wall), \
+             patch("landline.runtime.lock.log") as mock_log, \
              patch(
-                 "landline.lock.keychain_get_status",
+                 "landline.runtime.lock.keychain_get_status",
                  return_value=(FAKE_UNLOCK_HASH, "ok"),
              ):
             lm.try_silent_unlock("wrong")
@@ -508,10 +508,10 @@ class TestClockSkew:
         _drive_lockout_cycle(lm)
 
         future_wall = time.time() + 120.0
-        with patch("landline.lock.time.time", return_value=future_wall), \
-             patch("landline.lock.log") as mock_log, \
+        with patch("landline.runtime.lock.time.time", return_value=future_wall), \
+             patch("landline.runtime.lock.log") as mock_log, \
              patch(
-                 "landline.lock.keychain_get_status",
+                 "landline.runtime.lock.keychain_get_status",
                  return_value=(FAKE_UNLOCK_HASH, "ok"),
              ):
             lm.try_silent_unlock("wrong-passphrase-do-not-log")
@@ -581,7 +581,7 @@ class TestKeychainLocked:
         # function actually reaches the keychain read.
         assert lm._unlock_lockout_until == 0.0
         with patch(
-            "landline.lock.keychain_get_status",
+            "landline.runtime.lock.keychain_get_status",
             return_value=(None, "locked"),
         ):
             result = lm.try_silent_unlock(FAKE_UNLOCK_PASSPHRASE)
@@ -597,7 +597,7 @@ class TestKeychainLocked:
         lm.restore_from_state(default_state)
         assert lm._unlock_lockout_until == 0.0
         with patch(
-            "landline.lock.keychain_get_status",
+            "landline.runtime.lock.keychain_get_status",
             return_value=(None, "locked"),
         ):
             lm.try_silent_unlock(FAKE_UNLOCK_PASSPHRASE)
@@ -611,9 +611,9 @@ class TestKeychainLocked:
         lm.restore_from_state(default_state)
         assert lm._unlock_lockout_until == 0.0
         with patch(
-            "landline.lock.keychain_get_status",
+            "landline.runtime.lock.keychain_get_status",
             return_value=(None, "locked"),
-        ), patch("landline.lock.log") as mock_log:
+        ), patch("landline.runtime.lock.log") as mock_log:
             lm.try_silent_unlock(FAKE_UNLOCK_PASSPHRASE)
         messages = " | ".join(str(c.args[0]) for c in mock_log.call_args_list)
         assert "Keychain locked" in messages
@@ -627,9 +627,9 @@ class TestKeychainLocked:
         lm.restore_from_state(default_state)
         assert lm._unlock_lockout_until == 0.0
         with patch(
-            "landline.lock.keychain_get_status",
+            "landline.runtime.lock.keychain_get_status",
             return_value=(None, "absent"),
-        ), patch("landline.lock.log") as mock_log:
+        ), patch("landline.runtime.lock.log") as mock_log:
             lm.try_silent_unlock(FAKE_UNLOCK_PASSPHRASE)
         messages = " | ".join(str(c.args[0]) for c in mock_log.call_args_list)
         assert "Keychain locked" not in messages

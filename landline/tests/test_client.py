@@ -1,9 +1,9 @@
-"""Tests for landline.client — Telegram transport, formatting, chunking, sending."""
+"""Tests for landline.telegram — Telegram transport, formatting, chunking, sending."""
 
 import json
 from unittest.mock import patch, MagicMock
 
-from landline.client import (
+from landline.telegram import (
     md_to_telegram_html,
     chunk_text,
     send_response,
@@ -21,7 +21,7 @@ from landline.config import (
     SEND_RETRY_AFTER_CAP,
     SEND_RETRY_AFTER_FALLBACK,
 )
-from landline.telegram_fmt import pre
+from landline.telegram.fmt import pre
 
 
 class TestMdToTelegramHtml:
@@ -301,7 +301,7 @@ class TestSendWithRetry:
 
     def test_success_first_try_no_retry(self):
         """A successful send needs no retry and no sleep."""
-        with patch("landline.telegram_transport._send_chunk", return_value=(True, None, 0)) as mock_chunk, \
+        with patch("landline.telegram.transport._send_chunk", return_value=(True, None, 0)) as mock_chunk, \
              patch("time.sleep") as mock_sleep:
             ok, code = _send_with_retry("token", "123", "hello", html_mode=True, label="t")
         assert ok is True
@@ -315,7 +315,7 @@ class TestSendWithRetry:
         # Build a side_effect that always returns 429 — enough entries for
         # SEND_MAX_ATTEMPTS attempts.
         with patch(
-            "landline.telegram_transport._send_chunk",
+            "landline.telegram.transport._send_chunk",
             side_effect=[(False, 429, 2)] * SEND_MAX_ATTEMPTS,
         ) as mock_chunk, \
              patch("time.sleep") as mock_sleep:
@@ -331,7 +331,7 @@ class TestSendWithRetry:
 
     def test_429_retry_delay_minimum_one_second(self):
         """retry_after=0 from the server still results in at least 1s sleep."""
-        with patch("landline.telegram_transport._send_chunk", side_effect=[
+        with patch("landline.telegram.transport._send_chunk", side_effect=[
             (False, 429, 0),
             (True, None, 0),
         ]), patch("time.sleep") as mock_sleep:
@@ -340,7 +340,7 @@ class TestSendWithRetry:
 
     def test_400_does_not_retry(self):
         """Non-429 errors return immediately without retry."""
-        with patch("landline.telegram_transport._send_chunk", return_value=(False, 400, 0)) as mock_chunk, \
+        with patch("landline.telegram.transport._send_chunk", return_value=(False, 400, 0)) as mock_chunk, \
              patch("time.sleep") as mock_sleep:
             ok, code = _send_with_retry("token", "123", "hello", html_mode=True, label="t")
         assert ok is False
@@ -350,7 +350,7 @@ class TestSendWithRetry:
 
     def test_5xx_retried_then_succeeds(self):
         """A transient 5xx is retried; the retry succeeds → overall success."""
-        with patch("landline.telegram_transport._send_chunk", side_effect=[
+        with patch("landline.telegram.transport._send_chunk", side_effect=[
             (False, 502, 0),
             (True, None, 0),
         ]) as mock_chunk, \
@@ -366,7 +366,7 @@ class TestSendWithRetry:
 
     def test_connection_error_retried_then_succeeds(self):
         """A connection/timeout error (code=None) is retried like a 5xx."""
-        with patch("landline.telegram_transport._send_chunk", side_effect=[
+        with patch("landline.telegram.transport._send_chunk", side_effect=[
             (False, None, 0),   # network error — looks like connection refused
             (True, None, 0),
         ]) as mock_chunk, \
@@ -522,7 +522,7 @@ class TestMultiChunkTruncation:
         with patch("urllib.request.urlopen", side_effect=side_effect), \
              patch("time.sleep"), \
              patch(
-                 "landline.telegram_transport.log",
+                 "landline.telegram.transport.log",
                  side_effect=lambda msg: logged.append(msg),
              ):
             send_response("token", "123", text)
@@ -638,7 +638,7 @@ class TestPreCodeRendering:
         # Lossless content: concatenating the visible text across all pieces
         # preserves the original visible text (after stripping tags from the
         # HTML pieces and the already-stripped plain pieces just used as-is).
-        from landline.client import _strip_tags
+        from landline.telegram import _strip_tags
         recovered = "".join(_strip_tags(p) if h else p for p, h in pieces)
         # The original visible text is the entire html with tags stripped.
         # Note: in plain-degrade pieces the chunker already calls _strip_tags,
@@ -653,7 +653,7 @@ class TestPreCodeRendering:
         HTML, so `&lt;&lt;` is rendered as `<<` by Telegram, not exposed as
         literal `&lt;&lt;` plain text."""
         html = pre("cat <<'EOF' | wc -m", "Shell")
-        with patch("landline.telegram_transport._send_with_retry", return_value=(True, None)) as mock_send:
+        with patch("landline.telegram.transport._send_with_retry", return_value=(True, None)) as mock_send:
             send_html("token", "123", html)
         # Exactly one HTML-mode send, with the full intact HTML payload.
         assert mock_send.call_count == 1
@@ -671,20 +671,20 @@ class TestPreCodeRendering:
 
     def test_strip_tags_unescapes_named_entities(self):
         """D1: a degrade of `<a>Tom &amp; Jerry</a>` must decode `&amp;` to `&`."""
-        from landline.client import _strip_tags
+        from landline.telegram import _strip_tags
         assert _strip_tags('<a href="x">Tom &amp; Jerry</a>') == 'Tom & Jerry'
 
     def test_strip_tags_unescapes_lt_gt(self):
         """D1: `&lt;` / `&gt;` (the most common Telegram-escaped chars from
         code snippets) decode to `<` / `>` in the plain-text degrade."""
-        from landline.client import _strip_tags
+        from landline.telegram import _strip_tags
         assert _strip_tags('A &lt; B and B &gt; C') == 'A < B and B > C'
 
     def test_strip_tags_no_entities_is_noop(self):
         """D1: entity-free payloads pass through unchanged — `html.unescape`
         is documented no-op on inputs without entities. Guards against an
         over-eager replacement that mutates entity-free strings."""
-        from landline.client import _strip_tags
+        from landline.telegram import _strip_tags
         assert _strip_tags('<b>plain text only</b>') == 'plain text only'
 
     def test_strip_tags_single_pass_decode(self):
@@ -697,7 +697,7 @@ class TestPreCodeRendering:
         fixed-point assertion would (correctly) fail on the implemented
         single-pass design. Assert the value, not `f(f(x)) == f(x)`.
         """
-        from landline.client import _strip_tags
+        from landline.telegram import _strip_tags
         assert _strip_tags('<a>Tom &amp;amp; Jerry</a>') == 'Tom &amp; Jerry'
 
     def test_send_html_plain_fallback_decodes_entities(self):
@@ -710,7 +710,7 @@ class TestPreCodeRendering:
         # fallback) returns (True, None). The plain-fallback body is what
         # we assert on.
         with patch(
-            "landline.telegram_transport._send_with_retry",
+            "landline.telegram.transport._send_with_retry",
             side_effect=[(False, 400), (True, None)],
         ) as mock_send:
             send_html("token", "123", html_payload)
@@ -736,7 +736,7 @@ class TestPreCodeRendering:
         would skip degrade entirely and leave the assertion trivially
         satisfied by the HTML path, defeating the strengthening.
         """
-        from landline.client import _strip_tags
+        from landline.telegram import _strip_tags
         html = (
             '<pre><code class="language-py">'
             + ('x' * 5000)
@@ -772,7 +772,7 @@ class TestChunkHtmlTier2Safety:
         Tracks by-name innermost match (HTML-style nesting tolerance), same
         approach as the chunker harness.
         """
-        from landline.client import _TAG_RE
+        from landline.telegram import _TAG_RE
         stack = []
         for m in _TAG_RE.finditer(piece):
             is_close = m.group(1) == "/"
@@ -858,7 +858,7 @@ class TestA4LogContentTransport:
             "urllib.request.urlopen",
             side_effect=urllib.error.URLError("dns fail"),
         ), patch(
-            "landline.telegram_transport.log",
+            "landline.telegram.transport.log",
             side_effect=lambda msg: logged.append(msg),
         ):
             _send_chunk("tok", "999111", "hi", html_mode=True)
@@ -892,7 +892,7 @@ class TestA4LogContentTransport:
         logged: list = []
         with patch("urllib.request.urlopen", side_effect=side_effect), \
              patch(
-                 "landline.telegram_transport.log",
+                 "landline.telegram.transport.log",
                  side_effect=lambda msg: logged.append(msg),
              ):
             send_response("token", "42", "**bold**")
@@ -917,7 +917,7 @@ class TestA4LogContentTransport:
         with patch("urllib.request.urlopen", side_effect=side_effect), \
              patch("time.sleep"), \
              patch(
-                 "landline.telegram_transport.log",
+                 "landline.telegram.transport.log",
                  side_effect=lambda msg: logged.append(msg),
              ):
             send_response("token", "42", "hello")
@@ -946,7 +946,7 @@ class TestA4LogContentTransport:
         with patch("urllib.request.urlopen", side_effect=side_effect), \
              patch("time.sleep"), \
              patch(
-                 "landline.telegram_transport.log",
+                 "landline.telegram.transport.log",
                  side_effect=lambda msg: logged.append(msg),
              ):
             send_response("token", "42", "hello")
@@ -979,7 +979,7 @@ class TestA4LogContentTransport:
         with patch("urllib.request.urlopen", side_effect=side_effect), \
              patch("time.sleep"), \
              patch(
-                 "landline.telegram_transport.log",
+                 "landline.telegram.transport.log",
                  side_effect=lambda msg: logged.append(msg),
              ):
             send_response("token", "424242", text)
@@ -1007,7 +1007,7 @@ class TestA4LogContentTransport:
         with patch("urllib.request.urlopen", side_effect=side_effect), \
              patch("time.sleep"), \
              patch(
-                 "landline.telegram_transport.log",
+                 "landline.telegram.transport.log",
                  side_effect=lambda msg: logged.append(msg),
              ):
             send_response("token", "77", "hello")
@@ -1022,10 +1022,10 @@ class TestA4LogContentTransport:
         """Edit 2: the 429 retry log carries chat_id."""
         logged: list = []
         with patch(
-            "landline.telegram_transport._send_chunk",
+            "landline.telegram.transport._send_chunk",
             side_effect=[(False, 429, 1), (True, None, 0)],
         ), patch("time.sleep"), patch(
-            "landline.telegram_transport.log",
+            "landline.telegram.transport.log",
             side_effect=lambda msg: logged.append(msg),
         ):
             _send_with_retry("tok", "55", "hi", html_mode=True, label="HTML chunk")
@@ -1040,10 +1040,10 @@ class TestA4LogContentTransport:
         """Edit 3: the 5xx/network retry log carries chat_id."""
         logged: list = []
         with patch(
-            "landline.telegram_transport._send_chunk",
+            "landline.telegram.transport._send_chunk",
             side_effect=[(False, 502, 0), (True, None, 0)],
         ), patch("time.sleep"), patch(
-            "landline.telegram_transport.log",
+            "landline.telegram.transport.log",
             side_effect=lambda msg: logged.append(msg),
         ):
             _send_with_retry("tok", "55", "hi", html_mode=True, label="HTML chunk")
@@ -1066,14 +1066,14 @@ class TestA4LogContentDownload:
     def test_get_file_error_log_includes_exc_class(self):
         """Edit 9: getFile API call failure log includes exc=<ClassName>."""
         import urllib.error
-        from landline.telegram_download import download_file
+        from landline.telegram.download import download_file
 
         logged: list = []
         with patch(
-            "landline.telegram_download.telegram_api",
+            "landline.telegram.download.telegram_api",
             side_effect=urllib.error.URLError("net"),
         ), patch(
-            "landline.telegram_download.log",
+            "landline.telegram.download.log",
             side_effect=lambda msg: logged.append(msg),
         ):
             result = download_file("tok", "AgACAgIA_fake_file_id_here", "x.jpg")
@@ -1087,7 +1087,7 @@ class TestA4LogContentDownload:
 
     def test_download_failure_log_includes_exc_class(self):
         """Edit 10: file download failure log includes exc=<ClassName>."""
-        from landline.telegram_download import download_file
+        from landline.telegram.download import download_file
 
         good_resp = {
             "ok": True,
@@ -1096,13 +1096,13 @@ class TestA4LogContentDownload:
 
         logged: list = []
         with patch(
-            "landline.telegram_download.telegram_api",
+            "landline.telegram.download.telegram_api",
             return_value=good_resp,
         ), patch(
             "urllib.request.urlopen",
             side_effect=OSError("disk full"),
         ), patch(
-            "landline.telegram_download.log",
+            "landline.telegram.download.log",
             side_effect=lambda msg: logged.append(msg),
         ):
             result = download_file("tok", "AgACAgIA_fake_file_id_here", "x.jpg")
@@ -1120,9 +1120,9 @@ class TestSendTyping:
         """Cluster 5: send_typing uses a pooled http.client.HTTPSConnection
         (not urllib.request.urlopen) on the happy path. Assert the request
         line/body/URL still describe a sendChatAction: typing."""
-        import landline.telegram_transport as tt
+        import landline.telegram.transport as tt
         tt._reset_typing_conn()
-        with patch("landline.telegram_transport.http.client.HTTPSConnection") as mock_cls:
+        with patch("landline.telegram.transport.http.client.HTTPSConnection") as mock_cls:
             fake_conn = MagicMock()
             fake_resp = MagicMock(status=200)
             fake_resp.read.return_value = b'{"ok":true}'
@@ -1149,10 +1149,10 @@ class TestSendTyping:
         both. This is the semantics-preserving contract for the pool
         change (matches pre-cluster behaviour when the network is down).
         """
-        import landline.telegram_transport as tt
+        import landline.telegram.transport as tt
         tt._reset_typing_conn()
         with patch(
-            "landline.telegram_transport.http.client.HTTPSConnection",
+            "landline.telegram.transport.http.client.HTTPSConnection",
             side_effect=Exception("pool network"),
         ), patch(
             "urllib.request.urlopen", side_effect=Exception("fallback network"),
@@ -1177,14 +1177,14 @@ class TestSpoolPersistOnSendWithRetry:
         once, mark_success called once with the same spool_id, mark_failed
         never called."""
         with patch(
-            "landline.telegram_transport.outbound_spool.persist",
+            "landline.telegram.transport.outbound_spool.persist",
             return_value="/tmp/fake-spool-id.json",
         ) as mock_persist, patch(
-            "landline.telegram_transport.outbound_spool.mark_success",
+            "landline.telegram.transport.outbound_spool.mark_success",
         ) as mock_success, patch(
-            "landline.telegram_transport.outbound_spool.mark_failed",
+            "landline.telegram.transport.outbound_spool.mark_failed",
         ) as mock_failed, patch(
-            "landline.telegram_transport._send_chunk",
+            "landline.telegram.transport._send_chunk",
             return_value=(True, None, 0),
         ):
             ok, code = _send_with_retry(
@@ -1201,14 +1201,14 @@ class TestSpoolPersistOnSendWithRetry:
         terminal branch — this is the at-least-once persistence guarantee
         so the next daemon boot's replay pass picks it up)."""
         with patch(
-            "landline.telegram_transport.outbound_spool.persist",
+            "landline.telegram.transport.outbound_spool.persist",
             return_value="/tmp/spool-abc.json",
         ), patch(
-            "landline.telegram_transport.outbound_spool.mark_success",
+            "landline.telegram.transport.outbound_spool.mark_success",
         ) as mock_success, patch(
-            "landline.telegram_transport.outbound_spool.mark_failed",
+            "landline.telegram.transport.outbound_spool.mark_failed",
         ) as mock_failed, patch(
-            "landline.telegram_transport._send_chunk",
+            "landline.telegram.transport._send_chunk",
             return_value=(False, 500, 0),
         ), patch("time.sleep"):
             ok, code = _send_with_retry(
@@ -1226,14 +1226,14 @@ class TestSpoolPersistOnSendWithRetry:
         is still called so the replay pass can decide (it will unlink on a
         repeat 400)."""
         with patch(
-            "landline.telegram_transport.outbound_spool.persist",
+            "landline.telegram.transport.outbound_spool.persist",
             return_value="/tmp/spool-400.json",
         ), patch(
-            "landline.telegram_transport.outbound_spool.mark_success",
+            "landline.telegram.transport.outbound_spool.mark_success",
         ) as mock_success, patch(
-            "landline.telegram_transport.outbound_spool.mark_failed",
+            "landline.telegram.transport.outbound_spool.mark_failed",
         ) as mock_failed, patch(
-            "landline.telegram_transport._send_chunk",
+            "landline.telegram.transport._send_chunk",
             return_value=(False, 400, 0),
         ):
             ok, code = _send_with_retry(
@@ -1248,14 +1248,14 @@ class TestSpoolPersistOnSendWithRetry:
         """Disk-full / persist raises OSError → send still proceeds; no
         mark_success or mark_failed is called (nothing was persisted)."""
         with patch(
-            "landline.telegram_transport.outbound_spool.persist",
+            "landline.telegram.transport.outbound_spool.persist",
             side_effect=OSError("disk full"),
         ), patch(
-            "landline.telegram_transport.outbound_spool.mark_success",
+            "landline.telegram.transport.outbound_spool.mark_success",
         ) as mock_success, patch(
-            "landline.telegram_transport.outbound_spool.mark_failed",
+            "landline.telegram.transport.outbound_spool.mark_failed",
         ) as mock_failed, patch(
-            "landline.telegram_transport._send_chunk",
+            "landline.telegram.transport._send_chunk",
             return_value=(True, None, 0),
         ):
             ok, code = _send_with_retry(
@@ -1273,10 +1273,10 @@ class TestSpoolAndSendTypingPool:
     def test_send_typing_uses_pooled_https_connection(self):
         """Call send_typing twice; assert conn.request called twice on the
         SAME connection instance (no fresh handshake)."""
-        import landline.telegram_transport as tt
+        import landline.telegram.transport as tt
         tt._reset_typing_conn()
         with patch(
-            "landline.telegram_transport.http.client.HTTPSConnection",
+            "landline.telegram.transport.http.client.HTTPSConnection",
         ) as mock_cls:
             fake_conn = MagicMock()
             fake_resp = MagicMock(status=200)
@@ -1294,15 +1294,15 @@ class TestSpoolAndSendTypingPool:
     def test_send_typing_falls_back_on_pool_error(self):
         """First pool call raises; assert one telegram_api fallback call
         and the local conn is reset to None."""
-        import landline.telegram_transport as tt
+        import landline.telegram.transport as tt
         tt._reset_typing_conn()
         # Build a real conn placeholder, then mock the pool to raise on
         # first request(); the fallback path goes through telegram_api →
         # urllib.request.urlopen.
         with patch(
-            "landline.telegram_transport.http.client.HTTPSConnection",
+            "landline.telegram.transport.http.client.HTTPSConnection",
         ) as mock_cls, patch(
-            "landline.telegram_transport.telegram_api",
+            "landline.telegram.transport.telegram_api",
         ) as mock_api:
             fake_conn = MagicMock()
             fake_conn.request.side_effect = OSError("stale keepalive")
@@ -1320,14 +1320,14 @@ class TestSpoolAndSendTypingPool:
         """Spawn two threads calling send_typing; each has its own
         _typing_conn_local.conn."""
         import threading
-        import landline.telegram_transport as tt
+        import landline.telegram.transport as tt
         tt._reset_typing_conn()
         seen_conns = []
         lock = threading.Lock()
 
         def worker():
             with patch(
-                "landline.telegram_transport.http.client.HTTPSConnection",
+                "landline.telegram.transport.http.client.HTTPSConnection",
             ) as mock_cls:
                 fake_conn = MagicMock()
                 fake_resp = MagicMock(status=200)
@@ -1366,15 +1366,15 @@ class TestSendResponseNoDoubleSpoolOnFallback:
         variant) may remain pending — the HTML one must be discarded so
         the replay pass delivers the message ONCE, not twice.
         """
-        import landline.outbound_spool as spool_mod
-        from landline.telegram_transport import send_response
+        import landline.telegram.spool as spool_mod
+        from landline.telegram.transport import send_response
         from landline.config import SPOOL_DIR
 
         # SPOOL_DIR is redirected to tmp by the autouse fixture; verify.
         assert str(SPOOL_DIR).startswith(str(tmp_path))
 
         with patch(
-            "landline.telegram_transport._send_chunk",
+            "landline.telegram.transport._send_chunk",
             return_value=(False, 500, 0),
         ), patch("time.sleep"):
             send_response("token", "999", "hello")
@@ -1408,8 +1408,8 @@ class TestSendResponseNoDoubleSpoolOnFallback:
         remain. (Prior behaviour left the HTML variant as ``pending`` for
         the replayer to attempt-and-discard on a repeat 400; the fix makes
         it deterministic: no orphaned files.)"""
-        import landline.outbound_spool as spool_mod
-        from landline.telegram_transport import send_response
+        import landline.telegram.spool as spool_mod
+        from landline.telegram.transport import send_response
         from landline.config import SPOOL_DIR
 
         # HTML returns 400 (non-retryable), plain returns 200.
@@ -1422,7 +1422,7 @@ class TestSendResponseNoDoubleSpoolOnFallback:
             return (True, None, 0)
 
         with patch(
-            "landline.telegram_transport._send_chunk",
+            "landline.telegram.transport._send_chunk",
             side_effect=fake_send_chunk,
         ):
             send_response("token", "999", "hello")
@@ -1444,7 +1444,7 @@ class TestOutboundSpoolDiscard:
     already been renamed to ``pending`` by mark_failed."""
 
     def test_discard_removes_pending_file(self, tmp_path):
-        import landline.outbound_spool as spool_mod
+        import landline.telegram.spool as spool_mod
         from landline.config import SPOOL_DIR
 
         spool_id = spool_mod.persist("42", "hello", True, "HTML chunk")
@@ -1462,7 +1462,7 @@ class TestOutboundSpoolDiscard:
         assert entries == []
 
     def test_discard_removes_inflight_file(self, tmp_path):
-        import landline.outbound_spool as spool_mod
+        import landline.telegram.spool as spool_mod
         from landline.config import SPOOL_DIR
 
         spool_id = spool_mod.persist("42", "hello", True, "HTML chunk")
@@ -1473,7 +1473,7 @@ class TestOutboundSpoolDiscard:
         assert entries == []
 
     def test_discard_is_idempotent(self, tmp_path):
-        import landline.outbound_spool as spool_mod
+        import landline.telegram.spool as spool_mod
 
         spool_id = spool_mod.persist("42", "hello", True, "HTML chunk")
         spool_mod.discard(spool_id)
@@ -1504,14 +1504,14 @@ class TestSendResponseHtmlFailureRaceWithReplayer:
         must be visible — the replayer's per-tick scan of pending files
         would otherwise race the imminent ``discard`` call. The file MUST
         remain ``inflight-<pid>`` until the caller finalizes."""
-        import landline.outbound_spool as spool_mod
-        from landline.telegram_transport import _send_with_retry_tracked
+        import landline.telegram.spool as spool_mod
+        from landline.telegram.transport import _send_with_retry_tracked
         from landline.config import SPOOL_DIR
 
         assert str(SPOOL_DIR).startswith(str(tmp_path))
 
         with patch(
-            "landline.telegram_transport._send_chunk",
+            "landline.telegram.transport._send_chunk",
             return_value=(False, 500, 0),
         ), patch("time.sleep"):
             ok, code, spool_id = _send_with_retry_tracked(
@@ -1553,8 +1553,8 @@ class TestSendResponseHtmlFailureRaceWithReplayer:
         spool files must be empty — proving the replayer would have
         found nothing to pick up in the race window. Before the fix,
         the HTML variant sat as ``pending`` in this window."""
-        import landline.outbound_spool as spool_mod
-        from landline.telegram_transport import send_response
+        import landline.telegram.spool as spool_mod
+        from landline.telegram.transport import send_response
         from landline.config import SPOOL_DIR
 
         assert str(SPOOL_DIR).startswith(str(tmp_path))
@@ -1578,7 +1578,7 @@ class TestSendResponseHtmlFailureRaceWithReplayer:
             return (True, None, 0)
 
         with patch(
-            "landline.telegram_transport._send_chunk",
+            "landline.telegram.transport._send_chunk",
             side_effect=fake_send_chunk,
         ), patch("time.sleep"):
             send_response("token", "999", "hello")

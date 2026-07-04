@@ -1,4 +1,4 @@
-"""Tests for landline.claude_dispatch — ClaudeStreamResult, stale detection, ClaudeDispatcher."""
+"""Tests for landline.claude.dispatch — ClaudeStreamResult, stale detection, ClaudeDispatcher."""
 
 import collections
 import time
@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock, call
 
 import pytest
 
-from landline.claude_dispatch import (
+from landline.claude.dispatch import (
     ClaudeStreamResult,
     is_result_successful,
     looks_like_stale_session,
@@ -15,7 +15,7 @@ from landline.claude_dispatch import (
     ClaudeDispatcher,
 )
 from landline import config as daemon_config
-from landline.failure_tracker import ClaudeFailureTracker
+from landline.claude.failure_tracker import ClaudeFailureTracker
 from landline.orchestrator import PauseFlag
 
 
@@ -119,17 +119,17 @@ class TestLooksLikeStaleSession:
 
 
 class TestClaudeStreamResultLocation:
-    """E2 regression tests — ClaudeStreamResult lives in landline.types so the
+    """E2 regression tests — ClaudeStreamResult lives in landline.claude.types so the
     streaming<->claude_dispatch cycle pivot stays broken."""
 
     def test_types_module_is_canonical_home(self):
-        """ClaudeStreamResult MUST be importable from landline.types — that
+        """ClaudeStreamResult MUST be importable from landline.claude.types — that
         is the home that breaks the streaming<->claude_dispatch cycle. If
         someone reverts E2 by moving the class back to claude_dispatch,
-        this fails because landline.types either won't exist or won't expose
+        this fails because landline.claude.types either won't exist or won't expose
         the class."""
-        from landline.types import ClaudeStreamResult as FromTypes
-        from landline.claude_dispatch import ClaudeStreamResult as FromDispatch
+        from landline.claude.types import ClaudeStreamResult as FromTypes
+        from landline.claude.dispatch import ClaudeStreamResult as FromDispatch
         # Both names resolve to the SAME class object (claude_dispatch
         # re-imports from landline.types).
         assert FromTypes is FromDispatch
@@ -138,23 +138,23 @@ class TestClaudeStreamResultLocation:
         """The streaming module must not reach into claude_dispatch for
         the result type — that edge is the cycle pivot E2 removes."""
         import inspect
-        import landline.streaming as streaming_mod
+        import landline.claude.streaming as streaming_mod
         assert hasattr(streaming_mod, "ClaudeStreamResult")
         src = inspect.getsource(streaming_mod)
-        assert "from landline.claude_dispatch import ClaudeStreamResult" not in src
-        assert "from landline.types import ClaudeStreamResult" in src
+        assert "from landline.claude.dispatch import ClaudeStreamResult" not in src
+        assert "from landline.claude.types import ClaudeStreamResult" in src
 
     def test_types_module_is_a_leaf(self):
-        """landline.types must not import from sibling package modules — that
+        """landline.claude.types must not import from sibling package modules — that
         is what keeps it cycle-safe forever. Only `typing` is allowed."""
         import inspect
-        import landline.types as types_mod
+        import landline.claude.types as types_mod
         src = inspect.getsource(types_mod)
         for line in src.splitlines():
             stripped = line.strip()
             if stripped.startswith("from landline") or stripped.startswith("import landline"):
                 raise AssertionError(
-                    "landline.types must stay a leaf — found sibling import: " + stripped
+                    "landline.claude.types must stay a leaf — found sibling import: " + stripped
                 )
 
 
@@ -192,10 +192,10 @@ class TestClaudeDispatcher:
         r.session_id = "s"
         run_mock.return_value = r
         d = self._make_dispatcher(run_claude_fn=run_mock)
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             d.send_to_claude("hello", "123")
         assert run_mock.call_count == 1
         kwargs = run_mock.call_args[1]
@@ -208,18 +208,18 @@ class TestClaudeDispatcher:
     def test_send_to_claude_updates_session_id(self):
         state = {"session_id": None, "turn_count": 0}
         d = self._make_dispatcher(state=state)
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             d.send_to_claude("hello", "123")
         assert state["session_id"] == "new-session"
 
     def test_increments_turn_count(self):
         state = {"session_id": None, "turn_count": 0}
         d = self._make_dispatcher(state=state)
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             d.send_to_claude("hello", "123")
         assert state["turn_count"] == 1
 
@@ -235,9 +235,9 @@ class TestClaudeDispatcher:
             state=state,
             run_claude_fn=MagicMock(side_effect=interrupted_run),
         )
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             d.send_to_claude("hi", "123")
         assert state["turn_count"] == 5
 
@@ -254,9 +254,9 @@ class TestClaudeDispatcher:
             failure_tracker=ft,
             run_claude_fn=MagicMock(side_effect=interrupted_run),
         )
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             d.send_to_claude("hi", "123")
         assert ft.consecutive_failure_count == 0
         assert ft.is_in_backoff() is False
@@ -317,10 +317,10 @@ class TestClaudeDispatcher:
         d = self._make_dispatcher(failure_tracker=ft, run_claude_fn=run_mock)
         d._backoff_queue.append(("earlier message", "123"))
         d._backoff_queue.append(("middle message", "123"))
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             d.send_to_claude("current message", "123")
         # Queue drained.
         assert len(d._backoff_queue) == 0
@@ -355,10 +355,10 @@ class TestClaudeDispatcher:
             run_claude_fn=MagicMock(side_effect=stale_then_fresh),
             send_response_fn=send_resp,
         )
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             d.send_to_claude("hello", "123")
         assert call_count[0] == 2
         # First call resumed the old session.
@@ -388,10 +388,10 @@ class TestClaudeDispatcher:
             run_claude_fn=MagicMock(side_effect=empty_result),
         )
         d.running = False
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             d.send_to_claude("hello", "123")
         # Only one call — no fallback attempt.
         assert call_count[0] == 1
@@ -409,9 +409,9 @@ class TestClaudeDispatcher:
             failure_tracker=ft,
             run_claude_fn=MagicMock(side_effect=error_run),
         )
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             d.send_to_claude("hi", "123")
         assert ft.consecutive_failure_count == 1
 
@@ -419,9 +419,9 @@ class TestClaudeDispatcher:
         ft = ClaudeFailureTracker()
         ft.consecutive_failure_count = 3
         d = self._make_dispatcher(failure_tracker=ft)
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             d.send_to_claude("hi", "123")
         assert ft.consecutive_failure_count == 0
 
@@ -429,9 +429,9 @@ class TestClaudeDispatcher:
         state = {"session_id": "s", "turn_count": 0}
         send_resp = MagicMock()
         d = self._make_dispatcher(state=state, send_response_fn=send_resp)
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=75.0):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=75.0):
             d.send_to_claude("hi", "123")
         context_calls = [
             c for c in send_resp.call_args_list
@@ -447,9 +447,9 @@ class TestClaudeDispatcher:
         state = {"session_id": "s", "turn_count": 0, "_context_warned_at": 50}
         send_resp = MagicMock()
         d = self._make_dispatcher(state=state, send_response_fn=send_resp)
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=55.0):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=55.0):
             d.send_to_claude("hi", "123")
         context_calls = [
             c for c in send_resp.call_args_list
@@ -462,10 +462,10 @@ class TestClaudeDispatcher:
         from landline.config import RATE_LIMIT_SECONDS
         d = self._make_dispatcher()
         d.last_process_time = time.time()  # just processed -> must throttle
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""), \
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""), \
              patch("time.sleep") as mock_sleep:
             d.send_to_claude("hi", "123")
         # Verify sleep was called and the duration is bounded by RATE_LIMIT_SECONDS.
@@ -479,10 +479,10 @@ class TestClaudeDispatcher:
         from landline.config import RATE_LIMIT_SECONDS
         d = self._make_dispatcher()
         d.last_process_time = time.time() - (RATE_LIMIT_SECONDS + 10)
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""), \
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""), \
              patch("time.sleep") as mock_sleep:
             d.send_to_claude("hi", "123")
         mock_sleep.assert_not_called()
@@ -495,10 +495,10 @@ class TestClaudeDispatcher:
         r.streamed_text = "ok"
         run_mock.return_value = r
         d = self._make_dispatcher(state=state, run_claude_fn=run_mock)
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value="history here"):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value="history here"):
             d.send_to_claude("hello", "123")
         call_kwargs = run_mock.call_args[1]
         assert "history here" in call_kwargs["message"]
@@ -511,10 +511,10 @@ class TestClaudeDispatcher:
         r.streamed_text = "ok"
         run_mock.return_value = r
         d = self._make_dispatcher(state=state, run_claude_fn=run_mock)
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history") as mock_hist:
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history") as mock_hist:
             d.send_to_claude("hello", "123")
         mock_hist.assert_not_called()
 
@@ -534,10 +534,10 @@ class TestClaudeDispatcher:
             run_claude_fn=MagicMock(side_effect=error_run),
             send_response_fn=send_resp,
         )
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             d.send_to_claude("hi", "123")
         alert_calls = [
             c for c in send_resp.call_args_list
@@ -546,10 +546,10 @@ class TestClaudeDispatcher:
         assert len(alert_calls) == 1
         # Idempotent — second failure in same streak must not re-alert.
         send_resp.reset_mock()
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             d.send_to_claude("hi", "123")
         alert_calls_2 = [
             c for c in send_resp.call_args_list
@@ -570,10 +570,10 @@ class TestClaudeDispatcher:
             state=state,
             run_claude_fn=MagicMock(side_effect=error_run),
         )
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             d.send_to_claude("hi", "123")
         # session_id stays put on failure.
         assert state["session_id"] == "existing-good-id"
@@ -588,10 +588,10 @@ class TestClaudeDispatcher:
             failure_tracker=ft,
             run_claude_fn=MagicMock(side_effect=crashing_run),
         )
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             # Must not raise — exception is swallowed and recorded as failure.
             d.send_to_claude("hi", "123")
         assert ft.consecutive_failure_count == 1
@@ -607,7 +607,7 @@ class TestFinalizeInterruptedMessage:
     def _make_dispatcher(
         self, send_response_fn=None, run_claude_fn=None,
     ):
-        from landline.failure_tracker import ClaudeFailureTracker
+        from landline.claude.failure_tracker import ClaudeFailureTracker
         state = {"session_id": "s", "turn_count": 0}
         ft = ClaudeFailureTracker()
         hook = MagicMock()
@@ -629,10 +629,10 @@ class TestFinalizeInterruptedMessage:
         result = ClaudeStreamResult()
         result.interrupted = True
         result.streamed_text = ""
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.send_html", send_html_mock):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.send_html", send_html_mock):
             d._finalize_response(result, "123")
         paused_calls = [
             c for c in send_html_mock.call_args_list
@@ -647,10 +647,10 @@ class TestFinalizeInterruptedMessage:
         result = ClaudeStreamResult()
         result.interrupted = True
         result.streamed_text = "partial response"
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.send_html", send_html_mock):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.send_html", send_html_mock):
             d._finalize_response(result, "123")
         paused_calls = [
             c for c in send_html_mock.call_args_list
@@ -675,10 +675,10 @@ class TestFinalizeInterruptedMessage:
         with claude_mod._senders_lock:
             claude_mod._senders["123"] = live_sender
         try:
-            with patch("landline.claude_dispatch.save_state"), \
-                 patch("landline.claude_dispatch.log_conversation"), \
-                 patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-                 patch("landline.claude_dispatch.send_html", send_html_mock):
+            with patch("landline.claude.dispatch.save_state"), \
+                 patch("landline.claude.dispatch.log_conversation"), \
+                 patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+                 patch("landline.claude.dispatch.send_html", send_html_mock):
                 d._finalize_response(result, "123")
         finally:
             with claude_mod._senders_lock:
@@ -699,9 +699,9 @@ class TestFinalizeInterruptedMessage:
         result = ClaudeStreamResult()
         result.interrupted = True
         result.streamed_text = "partial"
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             d._finalize_response(result, "123")
         assert clear_mock.call_count == 1
 
@@ -715,9 +715,9 @@ class TestFinalizeInterruptedMessage:
         result.streamed_text = "done"
         result.final_result = "done"
         result.session_id = "s2"
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             d._finalize_response(result, "123")
         clear_mock.assert_not_called()
 
@@ -730,10 +730,10 @@ class TestFinalizeInterruptedMessage:
         result = ClaudeStreamResult()
         result.interrupted = True
         result.streamed_text = "partial"
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.send_html", send_html_mock):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.send_html", send_html_mock):
             d._finalize_response(result, "123")  # must not raise
         paused_calls = [
             c for c in send_html_mock.call_args_list
@@ -750,7 +750,7 @@ class TestFinalizeInterruptedMessage:
         invoked on result.interrupted=True without any post-construction
         reach-through.
         """
-        from landline.failure_tracker import ClaudeFailureTracker
+        from landline.claude.failure_tracker import ClaudeFailureTracker
         clear_mock = MagicMock()
         d = ClaudeDispatcher(
             token="fake-token",
@@ -768,10 +768,10 @@ class TestFinalizeInterruptedMessage:
         result = ClaudeStreamResult()
         result.interrupted = True
         result.streamed_text = "partial"
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.send_html"):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.send_html"):
             d._finalize_response(result, "123")
         assert clear_mock.call_count == 1
 
@@ -783,9 +783,9 @@ class TestFinalizeInterruptedMessage:
         result.interrupted = False
         result.streamed_text = "natural done"
         result.session_id = "s2"
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             d._finalize_response(result, "123")
         paused_calls = [
             c for c in send_resp.call_args_list
@@ -800,9 +800,9 @@ class TestFinalizeInterruptedMessage:
         result = ClaudeStreamResult()
         result.interrupted = True
         result.streamed_text = "partial"
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             d._finalize_response(result, "123")
         assert d._state["turn_count"] == 7
 
@@ -816,7 +816,7 @@ class TestInjectCommitUnderBackoff:
     """
 
     def _make_dispatcher(self, failure_tracker=None, run_claude_fn=None):
-        from landline.failure_tracker import ClaudeFailureTracker
+        from landline.claude.failure_tracker import ClaudeFailureTracker
         state = {"session_id": None, "turn_count": 0}
         ft = failure_tracker or ClaudeFailureTracker()
         hook = MagicMock()
@@ -841,7 +841,7 @@ class TestInjectCommitUnderBackoff:
 
     def test_gated_call_does_not_commit_inject_paths(self, tmp_path):
         """In backoff: paths ride along on the queue tuple, NOT unlinked."""
-        from landline.failure_tracker import ClaudeFailureTracker
+        from landline.claude.failure_tracker import ClaudeFailureTracker
         ft = ClaudeFailureTracker()
         ft.next_attempt_allowed_at_epoch = time.time() + 1000
         ft.consecutive_failure_count = 5
@@ -867,7 +867,7 @@ class TestInjectCommitUnderBackoff:
     def test_paths_committed_after_drain_and_dispatch(self, tmp_path):
         """When backoff clears, the drained paths are unlinked after the
         actual Claude call completes."""
-        from landline.failure_tracker import ClaudeFailureTracker
+        from landline.claude.failure_tracker import ClaudeFailureTracker
         # Start in-backoff, queue a message with paths.
         ft = ClaudeFailureTracker()
         ft.next_attempt_allowed_at_epoch = time.time() + 1000
@@ -886,10 +886,10 @@ class TestInjectCommitUnderBackoff:
         path_current = tmp_path / "current.json"
         path_current.write_text("{}")
 
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""):
             d.send_to_claude("current", "123", consumed_paths=[path_current])
 
@@ -904,10 +904,10 @@ class TestInjectCommitUnderBackoff:
         d = self._make_dispatcher()
         path = tmp_path / "report.json"
         path.write_text("{}")
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""):
             d.send_to_claude("hi", "123", consumed_paths=[path])
         assert not path.exists()
@@ -916,12 +916,12 @@ class TestInjectCommitUnderBackoff:
         """If consumed_paths is empty or None, no commit_inject_queue call —
         defensive check that we don't accidentally walk an empty list."""
         d = self._make_dispatcher()
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""), \
-             patch("landline.claude_dispatch.commit_inject_queue") as mock_commit:
+             patch("landline.claude.dispatch.commit_inject_queue") as mock_commit:
             d.send_to_claude("hi", "123")
         mock_commit.assert_not_called()
 
@@ -934,7 +934,7 @@ class TestBackoffQueueCrossChat:
     """
 
     def _make_dispatcher(self, failure_tracker=None, run_claude_fn=None):
-        from landline.failure_tracker import ClaudeFailureTracker
+        from landline.claude.failure_tracker import ClaudeFailureTracker
         state = {"session_id": None, "turn_count": 0}
         ft = failure_tracker or ClaudeFailureTracker()
         hook = MagicMock()
@@ -961,7 +961,7 @@ class TestBackoffQueueCrossChat:
         """A backoff queue with entries from two chats is drained selectively
         — the current chat's entry is merged, the other chat's is left queued.
         """
-        from landline.failure_tracker import ClaudeFailureTracker
+        from landline.claude.failure_tracker import ClaudeFailureTracker
         ft = ClaudeFailureTracker()
         ft.next_attempt_allowed_at_epoch = 0.0  # not in backoff
         run_mock = MagicMock()
@@ -973,10 +973,10 @@ class TestBackoffQueueCrossChat:
         d._backoff_queue.append(("from chat A", "AAA", []))
         d._backoff_queue.append(("from chat B", "BBB", []))
         d._backoff_queue.append(("also from chat A", "AAA", []))
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""):
             d.send_to_claude("now from A", "AAA")
         sent_text = run_mock.call_args[1]["message"]
@@ -996,7 +996,7 @@ class TestBackoffQueueCrossChat:
     def test_drain_handles_legacy_two_tuple_entries(self):
         """Backward-compat: hand-populated 2-tuple entries (no paths slot)
         normalise cleanly via _unpack_entry."""
-        from landline.failure_tracker import ClaudeFailureTracker
+        from landline.claude.failure_tracker import ClaudeFailureTracker
         ft = ClaudeFailureTracker()
         ft.next_attempt_allowed_at_epoch = 0.0
         run_mock = MagicMock()
@@ -1007,10 +1007,10 @@ class TestBackoffQueueCrossChat:
         d = self._make_dispatcher(failure_tracker=ft, run_claude_fn=run_mock)
         # Legacy shape — pre-fix queue entries had no paths slot.
         d._backoff_queue.append(("legacy text", "AAA"))
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""):
             d.send_to_claude("current", "AAA")
         sent_text = run_mock.call_args[1]["message"]
@@ -1101,10 +1101,10 @@ class TestSessionIdSingleSource:
         # Skip the seed (pc already has the sid); test the retry path.
         d._pc_seeded = True
         with patch("landline.claude._get_persistent_claude", return_value=pc), \
-             patch("landline.claude_dispatch.save_state", save_state_mock), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+             patch("landline.claude.dispatch.save_state", save_state_mock), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""):
             d.send_to_claude("hello", "123")
 
@@ -1150,12 +1150,12 @@ class TestSessionIdSingleSource:
         )
         d._pc_seeded = True  # already seeded for this test
         with patch("landline.claude._get_persistent_claude", return_value=pc), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""), \
-             patch("landline.claude_dispatch.send_html"):
+             patch("landline.claude.dispatch.send_html"):
             d.send_to_claude("hi", "123")
         # Exactly one run_claude call — no stale retry triggered.
         assert call_count[0] == 1
@@ -1190,10 +1190,10 @@ class TestSessionIdSingleSource:
             run_claude_fn=MagicMock(side_effect=capture_run),
         )
         with patch("landline.claude._get_persistent_claude", return_value=pc), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""):
             d.send_to_claude("hello", "123")
         # The seed populated pc BEFORE run_claude was called; the
@@ -1228,10 +1228,10 @@ class TestSessionIdSingleSource:
 
         d._run_claude = MagicMock(side_effect=capture_run)
         with patch("landline.claude._get_persistent_claude", return_value=pc), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""):
             d.send_to_claude("hello", "123")
         # Up to the moment run_claude was first called, the seed helper
@@ -1255,10 +1255,10 @@ class TestSessionIdSingleSource:
             run_claude_fn=MagicMock(side_effect=fresh_run),
         )
         with patch("landline.claude._get_persistent_claude", return_value=pc), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""):
             d.send_to_claude("hello", "123")
         assert pc._sid == "new-sid"
@@ -1289,10 +1289,10 @@ class TestSessionIdSingleSource:
         )
         with patch("landline.claude._get_persistent_claude",
                    return_value=pc) as get_pc_mock, \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""):
             d.send_to_claude("first", "123")
             assert d._pc_seeded is True
@@ -1328,10 +1328,10 @@ class TestSessionIdSingleSource:
 
         d._run_claude = MagicMock(side_effect=capture_run)
         with patch("landline.claude._get_persistent_claude", return_value=pc), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""):
             d.send_to_claude("hello", "123")
         # pc.set_session_id was never called with "state-sid" — seed bailed out.
@@ -1359,10 +1359,10 @@ class TestSessionIdSingleSource:
         result.streamed_text = "partial"
         # result.session_id stays None.
         with patch("landline.claude._get_persistent_claude", return_value=pc), \
-             patch("landline.claude_dispatch.save_state", save_state_mock), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.send_html"):
+             patch("landline.claude.dispatch.save_state", save_state_mock), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.send_html"):
             d._finalize_response(result, "123")
         # save_state was called with state dict mirroring pc.get_session_id().
         assert save_state_mock.called
@@ -1382,7 +1382,7 @@ class TestTryEnqueueOrSendCallers:
     def _make_dispatcher(
         self, state=None, run_claude_fn=None, send_response_fn=None,
     ):
-        from landline.failure_tracker import ClaudeFailureTracker
+        from landline.claude.failure_tracker import ClaudeFailureTracker
         state = state or {"session_id": "s", "turn_count": 0}
         ft = ClaudeFailureTracker()
         hook = MagicMock()
@@ -1406,9 +1406,9 @@ class TestTryEnqueueOrSendCallers:
         result.interrupted = True
         result.streamed_text = "partial"
         with patch("landline.claude.try_enqueue_or_send", helper_mock), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             d._finalize_response(result, "123")
         assert helper_mock.call_count == 1
         call_kwargs = helper_mock.call_args.kwargs
@@ -1427,9 +1427,9 @@ class TestTryEnqueueOrSendCallers:
         result.final_result = "ok"
         result.session_id = "s"
         with patch("landline.claude.try_enqueue_or_send", helper_mock), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=75.0):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=75.0):
             d._finalize_response(result, "123")
         # 75% crosses the 70 threshold; expect exactly one helper call.
         warning_calls = [
@@ -1458,7 +1458,7 @@ class TestTryEnqueueOrSendCallers:
                 pass
 
         with patch("landline.claude.try_enqueue_or_send", helper_mock), \
-             patch("landline.claude_dispatch.threading.Timer", ImmediateTimer):
+             patch("landline.claude.dispatch.threading.Timer", ImmediateTimer):
             watchdog = d._start_response_watchdog("123")
             watchdog.cancel()
         assert helper_mock.call_count == 1
@@ -1687,10 +1687,10 @@ class TestPrunedResumeRetryIntegration:
         )
         d._pc_seeded = True  # pre-seeded (simulating a running daemon)
         with patch("landline.claude._get_persistent_claude", return_value=pc), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""):
             d.send_to_claude("hello after pruning", "123")
 
@@ -1729,10 +1729,10 @@ class TestPrunedResumeRetryIntegration:
         )
         d._pc_seeded = True
         with patch("landline.claude._get_persistent_claude", return_value=pc), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""):
             d.send_to_claude("mid-session turn", "123")
 
@@ -1793,13 +1793,13 @@ class TestPrunedResumeRetryIntegration:
         )
         d._pc_seeded = True
         with patch("landline.claude._get_persistent_claude", return_value=pc), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""), \
              patch(
-                 "landline.notifications.send_health_alert", return_value=True,
+                 "landline.runtime.notifications.send_health_alert", return_value=True,
              ) as mock_alert:
             d.send_to_claude("test turn during auth outage", "123")
 
@@ -1895,7 +1895,7 @@ class TestClaudeAuthExpiryAlert:
         once with subject='claude-auth-expired'."""
         d = self._make_dispatcher()
         with patch(
-            "landline.notifications.send_health_alert", return_value=True,
+            "landline.runtime.notifications.send_health_alert", return_value=True,
         ) as mock_alert:
             d._record_outcome(self._auth_failure_result(), "123")
         assert mock_alert.call_count == 1
@@ -1911,7 +1911,7 @@ class TestClaudeAuthExpiryAlert:
         blocks re-fires until the next success."""
         d = self._make_dispatcher()
         with patch(
-            "landline.notifications.send_health_alert", return_value=True,
+            "landline.runtime.notifications.send_health_alert", return_value=True,
         ) as mock_alert:
             for _ in range(5):
                 d._record_outcome(self._auth_failure_result(), "123")
@@ -1931,7 +1931,7 @@ class TestClaudeAuthExpiryAlert:
         """
         d = self._make_dispatcher()
         with patch(
-            "landline.notifications.send_health_alert", return_value=True,
+            "landline.runtime.notifications.send_health_alert", return_value=True,
         ) as mock_alert:
             d._record_outcome(self._auth_failure_result(), "123")
             assert mock_alert.call_count == 1
@@ -1974,7 +1974,7 @@ class TestClaudeAuthExpiryAlert:
         d = self._make_dispatcher()
         stderr_tail = f"[cc stderr]\nsome prefix {marker} some suffix\n"
         with patch(
-            "landline.notifications.send_health_alert", return_value=True,
+            "landline.runtime.notifications.send_health_alert", return_value=True,
         ) as mock_alert:
             d._record_outcome(self._auth_failure_result(stderr_tail), "123")
         assert mock_alert.call_count == 1, (
@@ -1989,7 +1989,7 @@ class TestClaudeAuthExpiryAlert:
         d = self._make_dispatcher(failure_tracker=ft)
         result = self._auth_failure_result(stderr_tail="connection refused")
         with patch(
-            "landline.notifications.send_health_alert", return_value=True,
+            "landline.runtime.notifications.send_health_alert", return_value=True,
         ) as mock_alert:
             d._record_outcome(result, "123")
         mock_alert.assert_not_called()
@@ -2004,7 +2004,7 @@ class TestClaudeAuthExpiryAlert:
         alert (rather than being silently swallowed forever)."""
         d = self._make_dispatcher()
         with patch(
-            "landline.notifications.send_health_alert",
+            "landline.runtime.notifications.send_health_alert",
             side_effect=RuntimeError("imsg broke"),
         ) as mock_alert:
             # Must not raise.
@@ -2020,7 +2020,7 @@ class TestClaudeAuthExpiryAlert:
         forfeits the alert for the rest of the incident."""
         d = self._make_dispatcher()
         with patch(
-            "landline.notifications.send_health_alert", return_value=False,
+            "landline.runtime.notifications.send_health_alert", return_value=False,
         ):
             d._record_outcome(self._auth_failure_result(), "123")
         assert d._auth_alert_sent is False
@@ -2063,7 +2063,7 @@ class TestClaudeAuthExpiryAlert:
             stderr_tail="tool timed out\nlistening on port 4014\n"
         )
         with patch(
-            "landline.notifications.send_health_alert", return_value=True,
+            "landline.runtime.notifications.send_health_alert", return_value=True,
         ) as mock_alert:
             d._record_outcome(result, "123")
         mock_alert.assert_not_called()
@@ -2080,7 +2080,7 @@ class TestClaudeAuthExpiryAlert:
         even after the latch has been cleared by a success."""
         d = self._make_dispatcher()
         with patch(
-            "landline.notifications.send_health_alert", return_value=True,
+            "landline.runtime.notifications.send_health_alert", return_value=True,
         ) as mock_alert:
             # Fire the first alert normally.
             d._record_outcome(self._auth_failure_result(), "123")
@@ -2112,7 +2112,7 @@ class TestClaudeAuthExpiryAlert:
         ft = ClaudeFailureTracker()
         d = self._make_dispatcher(failure_tracker=ft)
         with patch(
-            "landline.notifications.send_health_alert", return_value=True,
+            "landline.runtime.notifications.send_health_alert", return_value=True,
         ) as mock_alert:
             d._record_outcome(self._auth_failure_result(), "123")
         # Auth alert did fire on the very first turn.
@@ -2188,10 +2188,10 @@ class TestReactionCompletionAcks:
         result.streamed_text = "hello back"
         result.final_result = "hello back"
         result.session_id = "s"
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.reactions.set_reactions_batch_async") as mock_batch:
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.telegram.reactions.set_reactions_batch_async") as mock_batch:
             d._finalize_response(result, "chat-1")
         mock_batch.assert_called_once()
         args = mock_batch.call_args[0]
@@ -2210,11 +2210,11 @@ class TestReactionCompletionAcks:
         result = ClaudeStreamResult()
         result.interrupted = True
         result.streamed_text = "partial"
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.send_html"), \
-             patch("landline.reactions.set_reactions_batch_async") as mock_batch:
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.send_html"), \
+             patch("landline.telegram.reactions.set_reactions_batch_async") as mock_batch:
             d._finalize_response(result, "chat-1")
         mock_batch.assert_not_called()
 
@@ -2226,10 +2226,10 @@ class TestReactionCompletionAcks:
         d._pending_ack_chat_id = "chat-1"
         result = ClaudeStreamResult()
         result.error = "something broke"
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.reactions.set_reactions_batch_async") as mock_batch:
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.telegram.reactions.set_reactions_batch_async") as mock_batch:
             d._finalize_response(result, "chat-1")
         mock_batch.assert_not_called()
 
@@ -2240,10 +2240,10 @@ class TestReactionCompletionAcks:
         d._pending_ack_message_ids = [101]
         d._pending_ack_chat_id = "chat-1"
         result = ClaudeStreamResult()  # no content, no error
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.reactions.set_reactions_batch_async") as mock_batch:
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.telegram.reactions.set_reactions_batch_async") as mock_batch:
             d._finalize_response(result, "chat-1")
         mock_batch.assert_not_called()
 
@@ -2255,10 +2255,10 @@ class TestReactionCompletionAcks:
         result = ClaudeStreamResult()
         result.streamed_text = "hi"
         result.final_result = "hi"
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.reactions.set_reactions_batch_async") as mock_batch:
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.telegram.reactions.set_reactions_batch_async") as mock_batch:
             d._finalize_response(result, "chat-1")
         mock_batch.assert_not_called()
 
@@ -2273,11 +2273,11 @@ class TestReactionCompletionAcks:
         result.streamed_text = "hi"
         result.final_result = "hi"
         result.session_id = "s"
-        with patch("landline.claude_dispatch.save_state") as mock_save, \
-             patch("landline.claude_dispatch.log_conversation") as mock_logconv, \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
+        with patch("landline.claude.dispatch.save_state") as mock_save, \
+             patch("landline.claude.dispatch.log_conversation") as mock_logconv, \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
              patch(
-                 "landline.reactions.set_reactions_batch_async",
+                 "landline.telegram.reactions.set_reactions_batch_async",
                  side_effect=RuntimeError("nope"),
              ):
             # Must not raise.
@@ -2300,7 +2300,7 @@ class TestReactionCompletionAcks:
              queued during the outage kept 👀 forever without 👌.
         """
         from landline.config import REACTION_DONE_EMOJI
-        from landline.failure_tracker import ClaudeFailureTracker
+        from landline.claude.failure_tracker import ClaudeFailureTracker
 
         ft = ClaudeFailureTracker()
         ft.next_attempt_allowed_at_epoch = time.time() + 1000
@@ -2332,18 +2332,18 @@ class TestReactionCompletionAcks:
 
         # Step 2: backoff clears. Next call drains, merges, finalizes.
         ft.next_attempt_allowed_at_epoch = 0.0
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
              patch(
-                 "landline.claude_dispatch.get_context_percent",
+                 "landline.claude.dispatch.get_context_percent",
                  return_value=None,
              ), \
              patch(
-                 "landline.claude_dispatch.read_recent_conversation_history",
+                 "landline.claude.dispatch.read_recent_conversation_history",
                  return_value="",
              ), \
              patch(
-                 "landline.reactions.set_reactions_batch_async",
+                 "landline.telegram.reactions.set_reactions_batch_async",
              ) as mock_batch:
             d.send_to_claude("m2", "chat-1", ack_message_ids=[22])
 
@@ -2369,7 +2369,7 @@ class TestReactionCompletionAcks:
     def test_gated_call_stashes_ack_ids_on_queue_tuple(self):
         """Direct-observation pin: when gated, the queue tuple's 4th slot
         holds the ack_message_ids so a later drain can find them."""
-        from landline.failure_tracker import ClaudeFailureTracker
+        from landline.claude.failure_tracker import ClaudeFailureTracker
         ft = ClaudeFailureTracker()
         ft.next_attempt_allowed_at_epoch = time.time() + 1000
         ft.consecutive_failure_count = 5
@@ -2427,10 +2427,10 @@ class TestUsageStatsRecording:
         result.result_model_usage = {"m": {"input_tokens": 10, "output_tokens": 20}}
         result.result_total_cost_usd = 0.005
         result.result_duration_ms = 300
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.usage_stats.record_turn") as mock_record:
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.runtime.usage_stats.record_turn") as mock_record:
             d._finalize_response(result, "chat-1")
         mock_record.assert_called_once()
         kwargs = mock_record.call_args.kwargs
@@ -2445,11 +2445,11 @@ class TestUsageStatsRecording:
         result = ClaudeStreamResult()
         result.interrupted = True
         result.streamed_text = "partial"
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.send_html"), \
-             patch("landline.usage_stats.record_turn") as mock_record:
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.send_html"), \
+             patch("landline.runtime.usage_stats.record_turn") as mock_record:
             d._finalize_response(result, "chat-1")
         mock_record.assert_not_called()
 
@@ -2457,20 +2457,20 @@ class TestUsageStatsRecording:
         d = self._make_dispatcher()
         result = ClaudeStreamResult()
         result.error = "boom"
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.usage_stats.record_turn") as mock_record:
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.runtime.usage_stats.record_turn") as mock_record:
             d._finalize_response(result, "chat-1")
         mock_record.assert_not_called()
 
     def test_empty_result_does_not_record_turn(self):
         d = self._make_dispatcher()
         result = ClaudeStreamResult()  # no content, no error, not interrupted
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.usage_stats.record_turn") as mock_record:
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.runtime.usage_stats.record_turn") as mock_record:
             d._finalize_response(result, "chat-1")
         mock_record.assert_not_called()
 
@@ -2482,11 +2482,11 @@ class TestUsageStatsRecording:
         result.streamed_text = "hi"
         result.final_result = "hi"
         result.session_id = "s"
-        with patch("landline.claude_dispatch.save_state") as mock_save, \
-             patch("landline.claude_dispatch.log_conversation") as mock_logconv, \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
+        with patch("landline.claude.dispatch.save_state") as mock_save, \
+             patch("landline.claude.dispatch.log_conversation") as mock_logconv, \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
              patch(
-                 "landline.usage_stats.record_turn",
+                 "landline.runtime.usage_stats.record_turn",
                  side_effect=RuntimeError("io simulated"),
              ):
             # Must not raise.
@@ -2560,10 +2560,10 @@ class TestPreExistingPauseReAnchor:
             run_claude_fn=MagicMock(side_effect=run_claude),
             pause_flag=pf,
         )
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             d.send_to_claude("please transcribe this", "123")
         # The pre-existing pause was honored at the new generation.
         assert interrupt_observations == [True], (
@@ -2623,10 +2623,10 @@ class TestPreExistingPauseReAnchor:
             run_claude_fn=MagicMock(side_effect=run_claude),
             pause_flag=pf,
         )
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             d.send_to_claude("hello", "123")
         # No spurious interrupt.
         assert interrupt_observations == [False]

@@ -1,12 +1,12 @@
-"""Tests for landline.commands — CommandRouter, _parse_command, _status_text."""
+"""Tests for landline.runtime.commands — CommandRouter, _parse_command, _status_text."""
 
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 
-from landline.commands import _parse_command, _status_text, CommandRouter
-from landline.lock import LockManager
+from landline.runtime.commands import _parse_command, _status_text, CommandRouter
+from landline.runtime.lock import LockManager
 
 
 class TestParseCommand:
@@ -89,7 +89,7 @@ class TestStatusText:
     def test_shows_morning_brief(self, no_subprocess, tmp_workspace, monkeypatch):
         # MORNING_BRIEF_GLOB is opt-in — set it to exercise the briefs branch.
         monkeypatch.setattr(
-            "landline.commands.MORNING_BRIEF_GLOB",
+            "landline.runtime.commands.MORNING_BRIEF_GLOB",
             "briefs_morning/morning-*.md",
         )
         brief_dir = tmp_workspace / "briefs_morning"
@@ -362,7 +362,7 @@ class TestStatusUsageStatsLine:
     def test_after_record_turn_status_shows_today_line_with_notional(
         self, no_subprocess, tmp_workspace,
     ):
-        from landline import usage_stats
+        from landline.runtime import usage_stats
         usage_stats.record_turn(
             result_usage={"input_tokens": 1000, "output_tokens": 2000},
             result_model_usage=None,
@@ -387,7 +387,7 @@ class TestStatusUsageStatsLine:
         lm = self._make_lock_manager()
         state = {"session_id": None, "turn_count": 0}
         with patch(
-            "landline.usage_stats.format_status_line",
+            "landline.runtime.usage_stats.format_status_line",
             side_effect=RuntimeError("boom"),
         ):
             # Must not raise.

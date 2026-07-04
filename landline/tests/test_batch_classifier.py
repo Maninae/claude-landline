@@ -1,4 +1,4 @@
-"""Regression tests for landline.batch_classifier.
+"""Regression tests for landline.runtime.batch_classifier.
 
 Covers:
   - E4: ``extract_chat_id`` helper centralizes the Telegram-envelope
@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from landline.batch_classifier import classify_updates, extract_chat_id
+from landline.runtime.batch_classifier import classify_updates, extract_chat_id
 
 
 def _make_daemon(running: bool = True) -> MagicMock:
@@ -91,7 +91,7 @@ class TestExtractChatId:
         ``batch_classifier.py`` but leaves ``orchestrator.py`` importing it,
         this fails at collection time AND the daemon's import line breaks
         at startup — exactly the loud-failure mode we want."""
-        from landline.batch_classifier import extract_chat_id as _h
+        from landline.runtime.batch_classifier import extract_chat_id as _h
         assert callable(_h)
 
 
@@ -150,7 +150,7 @@ class TestCallbackQueryUnreachable:
         adds ``if update.get("callback_query"):`` back."""
         import inspect
 
-        from landline import batch_classifier
+        from landline.runtime import batch_classifier
 
         source = inspect.getsource(batch_classifier.classify_updates)
         assert "callback_query" not in source, (
@@ -168,7 +168,7 @@ class TestMessageOnlyInvariantDocumentedInModule:
     branches."""
 
     def test_docstring_references_allowed_updates_filter(self):
-        from landline import batch_classifier
+        from landline.runtime import batch_classifier
 
         doc = batch_classifier.__doc__ or ""
         assert "allowed_updates" in doc, (
@@ -515,7 +515,7 @@ class TestReactionAcks:
         from landline.config import REACTION_ACK_EMOJI
         daemon = self._make_daemon_with_tracker()
         update = self._text_update(1, "hello agent", message_id=555)
-        with patch("landline.batch_classifier.reactions.set_reaction_async") as mock_ack:
+        with patch("landline.runtime.batch_classifier.reactions.set_reaction_async") as mock_ack:
             classify_updates(daemon, [update])
         mock_ack.assert_called_once_with(
             daemon.token, "12345", 555, REACTION_ACK_EMOJI,
@@ -533,7 +533,7 @@ class TestReactionAcks:
                 "photo": [{"file_id": "p", "width": 1, "height": 1}],
             },
         }
-        with patch("landline.batch_classifier.reactions.set_reaction_async") as mock_ack:
+        with patch("landline.runtime.batch_classifier.reactions.set_reaction_async") as mock_ack:
             classify_updates(daemon, [update])
         mock_ack.assert_called_once()
         assert mock_ack.call_args[0][2] == 777
@@ -551,7 +551,7 @@ class TestReactionAcks:
                 "voice": {"file_id": "v", "duration": 5},
             },
         }
-        with patch("landline.batch_classifier.reactions.set_reaction_async") as mock_ack:
+        with patch("landline.runtime.batch_classifier.reactions.set_reaction_async") as mock_ack:
             classify_updates(daemon, [update])
         mock_ack.assert_called_once()
         assert mock_ack.call_args[0][2] == 888
@@ -573,7 +573,7 @@ class TestReactionAcks:
                 },
             },
         }
-        with patch("landline.batch_classifier.reactions.set_reaction_async") as mock_ack:
+        with patch("landline.runtime.batch_classifier.reactions.set_reaction_async") as mock_ack:
             classify_updates(daemon, [update])
         mock_ack.assert_called_once()
         assert mock_ack.call_args[0][2] == 999
@@ -584,7 +584,7 @@ class TestReactionAcks:
         """/pause is a control message, not content. No 👀 receipt."""
         daemon = self._make_daemon_with_tracker()
         update = self._text_update(5, "/pause", message_id=111)
-        with patch("landline.batch_classifier.reactions.set_reaction_async") as mock_ack:
+        with patch("landline.runtime.batch_classifier.reactions.set_reaction_async") as mock_ack:
             classify_updates(daemon, [update])
         mock_ack.assert_not_called()
         assert daemon._batch_ack_message_ids == {}
@@ -593,7 +593,7 @@ class TestReactionAcks:
         """Slash commands render as text via CommandRouter — no reaction."""
         daemon = self._make_daemon_with_tracker()
         update = self._text_update(6, "/status", message_id=222)
-        with patch("landline.batch_classifier.reactions.set_reaction_async") as mock_ack:
+        with patch("landline.runtime.batch_classifier.reactions.set_reaction_async") as mock_ack:
             classify_updates(daemon, [update])
         mock_ack.assert_not_called()
         assert daemon._batch_ack_message_ids == {}
@@ -609,7 +609,7 @@ class TestReactionAcks:
                 "edit_date": 123456,
             },
         }
-        with patch("landline.batch_classifier.reactions.set_reaction_async") as mock_ack:
+        with patch("landline.runtime.batch_classifier.reactions.set_reaction_async") as mock_ack:
             classify_updates(daemon, [update])
         mock_ack.assert_not_called()
         assert daemon._batch_ack_message_ids == {}
@@ -623,7 +623,7 @@ class TestReactionAcks:
                 "text": "no chat",
             },
         }
-        with patch("landline.batch_classifier.reactions.set_reaction_async") as mock_ack:
+        with patch("landline.runtime.batch_classifier.reactions.set_reaction_async") as mock_ack:
             classify_updates(daemon, [update])
         mock_ack.assert_not_called()
         assert daemon._batch_ack_message_ids == {}
@@ -636,7 +636,7 @@ class TestReactionAcks:
         daemon._batch_ack_message_ids = {}
         daemon._guard_fn = MagicMock(return_value=False)
         update = self._text_update(9, "hello", message_id=555)
-        with patch("landline.batch_classifier.reactions.set_reaction_async") as mock_ack:
+        with patch("landline.runtime.batch_classifier.reactions.set_reaction_async") as mock_ack:
             classify_updates(daemon, [update])
         mock_ack.assert_not_called()
         assert daemon._batch_ack_message_ids == {}
@@ -649,7 +649,7 @@ class TestReactionAcks:
         daemon = self._make_daemon_with_tracker()
         long_text = "x" * (MAX_MESSAGE_LENGTH + 1)
         update = self._text_update(10, long_text, message_id=1111)
-        with patch("landline.batch_classifier.reactions.set_reaction_async") as mock_ack:
+        with patch("landline.runtime.batch_classifier.reactions.set_reaction_async") as mock_ack:
             classify_updates(daemon, [update])
         mock_ack.assert_not_called()
         assert daemon._batch_ack_message_ids == {}
@@ -664,7 +664,7 @@ class TestReactionAcks:
                 "chat": {"id": 12345},
             },
         }
-        with patch("landline.batch_classifier.reactions.set_reaction_async") as mock_ack:
+        with patch("landline.runtime.batch_classifier.reactions.set_reaction_async") as mock_ack:
             classify_updates(daemon, [update])
         mock_ack.assert_not_called()
 
@@ -684,7 +684,7 @@ class TestReactionAcks:
                 },
             },
         }
-        with patch("landline.batch_classifier.reactions.set_reaction_async") as mock_ack:
+        with patch("landline.runtime.batch_classifier.reactions.set_reaction_async") as mock_ack:
             classify_updates(daemon, [update])
         mock_ack.assert_not_called()
 
@@ -696,7 +696,7 @@ class TestReactionAcks:
             self._text_update(21, "two", message_id=200),
             self._text_update(22, "three", message_id=300),
         ]
-        with patch("landline.batch_classifier.reactions.set_reaction_async"):
+        with patch("landline.runtime.batch_classifier.reactions.set_reaction_async"):
             classify_updates(daemon, updates)
         assert daemon._batch_ack_message_ids["12345"] == [100, 200, 300]
 
@@ -706,7 +706,7 @@ class TestReactionAcks:
         daemon = _make_daemon()
         # Intentionally do NOT set _batch_ack_message_ids.
         update = self._text_update(30, "hi", message_id=999)
-        with patch("landline.batch_classifier.reactions.set_reaction_async") as mock_ack:
+        with patch("landline.runtime.batch_classifier.reactions.set_reaction_async") as mock_ack:
             classify_updates(daemon, [update])
         mock_ack.assert_called_once()
 
@@ -737,7 +737,7 @@ class TestDocumentRejectLogPrivacy:
         daemon = _make_daemon()
         sensitive = "private_medical_records_XSensitiveMarker.exe"
         update = self._make_doc_update(sensitive)
-        with patch("landline.batch_classifier.log") as mock_log:
+        with patch("landline.runtime.batch_classifier.log") as mock_log:
             classify_updates(daemon, [update])
         for call in mock_log.call_args_list:
             args = list(call.args) + list(call.kwargs.values())

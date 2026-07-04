@@ -24,10 +24,10 @@ def _noop_keychain_get(service, account="landline"):  # type: ignore[no-untyped-
 
 
 for _modname in (
-    "landline.guard",
-    "landline.lock",
-    "landline.security",
-    "landline.notifications",
+    "landline.runtime.guard",
+    "landline.runtime.lock",
+    "landline.runtime.security",
+    "landline.runtime.notifications",
     "landline.orchestrator",
 ):
     _mod = importlib.import_module(_modname)
@@ -43,14 +43,14 @@ for _modname in (
 def test_main_module_imports_secure_daily_logs():
     """`landline.__main__` must expose secure_daily_logs at module scope.
 
-    Reverting the `from landline.state import secure_daily_logs` line
+    Reverting the `from landline.runtime.state import secure_daily_logs` line
     removes this attribute and fails the test.
     """
     import landline.__main__ as main_module
     importlib.reload(main_module)
     assert hasattr(main_module, "secure_daily_logs")
     # Must be the real function from landline.state, not a stray name.
-    from landline.state import secure_daily_logs as state_secure_daily_logs
+    from landline.runtime.state import secure_daily_logs as state_secure_daily_logs
     assert main_module.secure_daily_logs is state_secure_daily_logs
 
 

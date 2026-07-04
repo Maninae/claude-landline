@@ -1,4 +1,4 @@
-"""Tests for landline.outbound_spool — disk-backed at-least-once spool.
+"""Tests for landline.telegram.spool — disk-backed at-least-once spool.
 
 Covers the persist/success/failed primitives, startup reclaim of orphaned
 inflight files from a dead pid, and the replay_all sort/age/cap semantics.
@@ -26,7 +26,7 @@ def tmp_spool(tmp_path, monkeypatch):
     # 0o700 so the ensure_spool_dir chmod finds a matching baseline.
     os.chmod(str(spool_dir), 0o700)
     monkeypatch.setattr("landline.config.SPOOL_DIR", spool_dir)
-    monkeypatch.setattr("landline.outbound_spool.SPOOL_DIR", spool_dir)
+    monkeypatch.setattr("landline.telegram.spool.SPOOL_DIR", spool_dir)
     yield spool_dir
 
 
@@ -40,7 +40,7 @@ class TestPersist:
         self, tmp_spool,
     ):
         """Persist a payload, stat the file, assert 0o600 and JSON round-trips."""
-        from landline.outbound_spool import persist
+        from landline.telegram.spool import persist
         spool_id = persist("42", "hello world", html_mode=True, label="HTML chunk")
         assert os.path.isfile(spool_id)
         # 0o600 — no group/other bits set.
@@ -58,7 +58,7 @@ class TestPersist:
 
     def test_persist_creates_inflight_state(self, tmp_spool):
         """After persist(), the file is in ``inflight-<pid>`` state."""
-        from landline.outbound_spool import persist
+        from landline.telegram.spool import persist
         spool_id = persist("42", "hi", html_mode=False, label="plain")
         assert ("-inflight-%d.json" % os.getpid()) in spool_id
 
@@ -74,8 +74,8 @@ class TestEnsureSpoolDir:
         spool_dir = tmp_path / "brand-new-spool"
         assert not spool_dir.exists()
         monkeypatch.setattr("landline.config.SPOOL_DIR", spool_dir)
-        monkeypatch.setattr("landline.outbound_spool.SPOOL_DIR", spool_dir)
-        from landline.outbound_spool import ensure_spool_dir
+        monkeypatch.setattr("landline.telegram.spool.SPOOL_DIR", spool_dir)
+        from landline.telegram.spool import ensure_spool_dir
         result = ensure_spool_dir()
         assert result == spool_dir
         assert spool_dir.is_dir()
@@ -84,7 +84,7 @@ class TestEnsureSpoolDir:
 
     def test_ensure_spool_dir_is_idempotent(self, tmp_spool):
         """Second call on an existing dir does not raise."""
-        from landline.outbound_spool import ensure_spool_dir
+        from landline.telegram.spool import ensure_spool_dir
         ensure_spool_dir()
         ensure_spool_dir()  # must not raise
         assert tmp_spool.is_dir()
@@ -111,7 +111,7 @@ class TestStartupReclaim:
             ns = time.time_ns() + i
             name = "%d-abcd%d-inflight-%d.json" % (ns, i, dead_pid)
             (tmp_spool / name).write_bytes(payload)
-        from landline.outbound_spool import startup_reclaim_orphaned_inflight
+        from landline.telegram.spool import startup_reclaim_orphaned_inflight
         count = startup_reclaim_orphaned_inflight()
         assert count == 2
         # Both files are now pending; no inflight remains.
@@ -124,7 +124,7 @@ class TestStartupReclaim:
         """Foreign files in the dir are safely skipped."""
         (tmp_spool / "not-a-spool-file.txt").write_text("hi")
         (tmp_spool / "README").write_text("readme")
-        from landline.outbound_spool import startup_reclaim_orphaned_inflight
+        from landline.telegram.spool import startup_reclaim_orphaned_inflight
         count = startup_reclaim_orphaned_inflight()
         assert count == 0
 
@@ -169,7 +169,7 @@ class TestReplayAll:
             created_ns=3000, uid="cccccccc",
         )
         send_fn = MagicMock(return_value=(True, None))
-        from landline.outbound_spool import replay_all
+        from landline.telegram.spool import replay_all
         replay_all(send_fn)
         # send_fn called once per file, in filename-ns order.
         chunks_seen = [c[0][1] for c in send_fn.call_args_list]
@@ -182,7 +182,7 @@ class TestReplayAll:
             tmp_spool, "old", created_at=now - (25 * 3600),
         )
         send_fn = MagicMock(return_value=(True, None))
-        from landline.outbound_spool import replay_all
+        from landline.telegram.spool import replay_all
         replay_all(send_fn)
         assert not stale.exists()
         send_fn.assert_not_called()
@@ -194,7 +194,7 @@ class TestReplayAll:
             tmp_spool, "young", created_at=now - 1,
         )
         send_fn = MagicMock(return_value=(True, None))
-        from landline.outbound_spool import replay_all
+        from landline.telegram.spool import replay_all
         replay_all(send_fn)
         # Still present, still pending (not renamed).
         assert recent.exists()
@@ -206,8 +206,8 @@ class TestReplayAll:
         now = time.time()
         f = _write_pending(tmp_spool, "bad", created_at=now - 10)
         send_fn = MagicMock(return_value=(False, 400))
-        with patch("landline.outbound_spool.log") as mock_log:
-            from landline.outbound_spool import replay_all
+        with patch("landline.telegram.spool.log") as mock_log:
+            from landline.telegram.spool import replay_all
             replay_all(send_fn)
         # File gone (400 is unfixable).
         assert not any(
@@ -223,7 +223,7 @@ class TestReplayAll:
         now = time.time()
         _write_pending(tmp_spool, "boom", created_at=now - 10)
         send_fn = MagicMock(return_value=(False, 500))
-        from landline.outbound_spool import replay_all
+        from landline.telegram.spool import replay_all
         replay_all(send_fn)
         # File still present, still pending.
         entries = list(tmp_spool.iterdir())
@@ -234,7 +234,7 @@ class TestReplayAll:
     def test_replay_all_soft_caps_at_max_files(self, tmp_spool, monkeypatch):
         """600 files → 500 kept (newest), 100 oldest removed."""
         # Use a much smaller cap so the test is fast — logic is identical.
-        monkeypatch.setattr("landline.outbound_spool.SPOOL_MAX_FILES", 20)
+        monkeypatch.setattr("landline.telegram.spool.SPOOL_MAX_FILES", 20)
         now = time.time()
         for i in range(25):
             _write_pending(
@@ -242,7 +242,7 @@ class TestReplayAll:
                 created_ns=10000 + i, uid="u%07d" % i,
             )
         send_fn = MagicMock(return_value=(True, None))
-        from landline.outbound_spool import replay_all
+        from landline.telegram.spool import replay_all
         replay_all(send_fn)
         # 25 - 20 = 5 oldest dropped; the remaining 20 were sent.
         assert send_fn.call_count == 20
@@ -256,7 +256,7 @@ class TestReplayAll:
         name = "%d-aaaaaaaa-pending.json" % ns
         (tmp_spool / name).write_bytes(b"not valid json {")
         send_fn = MagicMock(return_value=(True, None))
-        from landline.outbound_spool import replay_all
+        from landline.telegram.spool import replay_all
         replay_all(send_fn)
         assert not (tmp_spool / name).exists()
         send_fn.assert_not_called()
@@ -269,19 +269,19 @@ class TestReplayAll:
 
 class TestMarkPrimitives:
     def test_mark_success_unlinks(self, tmp_spool):
-        from landline.outbound_spool import persist, mark_success
+        from landline.telegram.spool import persist, mark_success
         spool_id = persist("1", "x", html_mode=False, label="l")
         assert os.path.isfile(spool_id)
         mark_success(spool_id)
         assert not os.path.exists(spool_id)
 
     def test_mark_success_idempotent_on_missing_file(self, tmp_spool):
-        from landline.outbound_spool import mark_success
+        from landline.telegram.spool import mark_success
         # Must not raise on a nonexistent path.
         mark_success(str(tmp_spool / "does-not-exist.json"))
 
     def test_mark_failed_renames_inflight_to_pending(self, tmp_spool):
-        from landline.outbound_spool import persist, mark_failed
+        from landline.telegram.spool import persist, mark_failed
         spool_id = persist("1", "x", html_mode=False, label="l")
         assert "-inflight-" in spool_id
         mark_failed(spool_id)
@@ -314,7 +314,7 @@ class TestPersistFailureCleanup:
     """
 
     def test_persist_unlinks_pending_when_rename_fails(self, tmp_spool):
-        from landline import outbound_spool
+        from landline.telegram import spool as outbound_spool
         real_rename = os.rename
         rename_calls = {"n": 0}
 
@@ -357,7 +357,7 @@ class TestPersistFailureCleanup:
         must not leave the pending file behind, so replay_all sees
         nothing.
         """
-        from landline import outbound_spool
+        from landline.telegram import spool as outbound_spool
 
         def rename_fails(src, dst):
             raise OSError(5, "Input/output error")
@@ -395,8 +395,8 @@ class TestReplayAllPermanent4xx:
         now = time.time()
         _write_pending(tmp_spool, "doomed", created_at=now - 10)
         send_fn = MagicMock(return_value=(False, code))
-        with patch("landline.outbound_spool.log") as mock_log:
-            from landline.outbound_spool import replay_all
+        with patch("landline.telegram.spool.log") as mock_log:
+            from landline.telegram.spool import replay_all
             replay_all(send_fn)
         # File gone — this is a terminal failure code.
         assert not any(
@@ -415,7 +415,7 @@ class TestReplayAllPermanent4xx:
         now = time.time()
         _write_pending(tmp_spool, "retry-me", created_at=now - 10)
         send_fn = MagicMock(return_value=(False, code))
-        from landline.outbound_spool import replay_all
+        from landline.telegram.spool import replay_all
         replay_all(send_fn)
         entries = list(tmp_spool.iterdir())
         assert len(entries) == 1, (

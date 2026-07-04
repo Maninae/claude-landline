@@ -1,4 +1,4 @@
-"""Cluster 3 — Regression tests for landline.reactions (setMessageReaction).
+"""Cluster 3 — Regression tests for landline.telegram.reactions (setMessageReaction).
 
 Contracts covered:
   - Fire-and-forget: the entrypoint enqueues to the single worker and
@@ -19,7 +19,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from landline import config, reactions
+from landline import config
+from landline.telegram import reactions
 
 
 # Opt this whole module back in to the reactions HTTP path (the autouse
@@ -233,7 +234,7 @@ class TestRetryAndSwallow:
             raise URLError("connection refused")
 
         with patch("urllib.request.urlopen", side_effect=failing_urlopen), \
-             patch("landline.reactions.log") as mock_log:
+             patch("landline.telegram.reactions.log") as mock_log:
             reactions.set_reaction_async(
                 FAKE_TOKEN, FAKE_CHAT, 99, config.REACTION_ACK_EMOJI,
             )
@@ -257,7 +258,7 @@ class TestRetryAndSwallow:
         with patch(
             "urllib.request.urlopen",
             return_value=_FakeUrlopenResponse(status=200),
-        ), patch("landline.reactions.log") as mock_log:
+        ), patch("landline.telegram.reactions.log") as mock_log:
             reactions.set_reaction_async(
                 FAKE_TOKEN, FAKE_CHAT, 5, config.REACTION_ACK_EMOJI,
             )
@@ -274,7 +275,7 @@ class TestRetryAndSwallow:
             "urllib.request.urlopen",
             return_value=response,
         ) as mock_open, \
-             patch("landline.reactions.log") as mock_log:
+             patch("landline.telegram.reactions.log") as mock_log:
             reactions.set_reaction_async(
                 FAKE_TOKEN, FAKE_CHAT, 33, config.REACTION_ACK_EMOJI,
             )

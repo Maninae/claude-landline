@@ -1,10 +1,10 @@
-"""Tests for landline.image_cache — Cluster 1 (generalized multi-dir sweep +
+"""Tests for landline.media.cache — Cluster 1 (generalized multi-dir sweep +
 single-dir back-compat wrapper)."""
 
 import os
 import time
 
-from landline.image_cache import (
+from landline.media.cache import (
     _sweep_dir,
     _sweep_telegram_image_cache,
     sweep_media_caches,
@@ -76,7 +76,8 @@ class TestSweepMediaCaches:
         maintainer accidentally shadowing the default doesn't silently
         skip a cache dir at startup."""
         import inspect
-        from landline import config, image_cache
+        from landline import config
+        from landline.media import cache as image_cache
         sig = inspect.signature(image_cache.sweep_media_caches)
         default = sig.parameters["dirs"].default
         assert default == config.MEDIA_CACHE_DIRS
@@ -116,7 +117,7 @@ class TestSweepMediaCaches:
 
         # Tune retention to the operator's tight-privacy scenario.
         monkeypatch.setattr(
-            "landline.image_cache.MEDIA_CACHE_RETENTION_HOURS",
+            "landline.media.cache.MEDIA_CACHE_RETENTION_HOURS",
             {image_dir: 24, file_dir: 2, voice_dir: 1},
         )
 
@@ -217,7 +218,7 @@ class TestSweepDir:
 
         captured: list = []
         monkeypatch.setattr(
-            "landline.image_cache.log",
+            "landline.media.cache.log",
             lambda msg: captured.append(msg),
         )
 

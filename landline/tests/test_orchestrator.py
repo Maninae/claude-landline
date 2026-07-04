@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from landline.claude_dispatch import ClaudeStreamResult
+from landline.claude.dispatch import ClaudeStreamResult
 from landline.config import MAX_QUEUED_UPDATES, UNLOCK_DURATION_SECONDS
 from landline.orchestrator import TelegramDaemon
 
@@ -151,7 +151,7 @@ class TestResetPersistentClaudeForNew:
         — exactly the invariants the dispatcher's _invoke_with_stale_retry
         relies on to take the is_new_session=True path."""
         from landline.orchestrator import _reset_persistent_claude_for_new
-        import landline.persistent_claude as pc_mod
+        import landline.claude.persistent as pc_mod
 
         # Set up a singleton with a fake live subprocess + session id.
         pc = pc_mod.PersistentClaude()
@@ -357,10 +357,10 @@ class TestProcessUpdateBatch:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             daemon._process_update_batch([update])
         mocks["run_claude"].assert_called_once()
         kwargs = mocks["run_claude"].call_args.kwargs
@@ -378,10 +378,10 @@ class TestProcessUpdateBatch:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("[brief: morning]", [])), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             daemon._process_update_batch([update])
         msg = mocks["run_claude"].call_args.kwargs["message"]
         assert "[brief: morning]" in msg
@@ -591,9 +591,9 @@ class TestPauseCallbackAndClassification:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             daemon._process_update_batch(updates)
         mocks["run_claude"].assert_called_once()
         responses = [c[0][2] for c in mocks["send_response"].call_args_list]
@@ -612,9 +612,9 @@ class TestPauseCallbackAndClassification:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             daemon._process_update_batch(updates)
         mocks["run_claude"].assert_called_once()
         responses = [c[0][2] for c in mocks["send_response"].call_args_list]
@@ -638,9 +638,9 @@ class TestPauseCallbackAndClassification:
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
              patch("landline.orchestrator.download_file", return_value="/tmp/img.jpg"), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             daemon._process_update_batch(updates)
         responses = [c[0][2] for c in mocks["send_response"].call_args_list]
         assert not any("Nothing to pause" in r for r in responses)
@@ -709,9 +709,9 @@ class TestPauseCallbackAndClassification:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             daemon._process_update_batch([update])
         # Successful (non-interrupted) Claude call: clear must NOT have fired.
         assert clear_calls == []
@@ -751,9 +751,9 @@ class TestPauseFlagStrandingBailOuts:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             daemon._process_update_batch([make_telegram_update(99, "next turn")])
         assert not daemon._pause_requested.is_set(), (
             "Stranded /pause must be cleared before the next unrelated turn"
@@ -964,9 +964,9 @@ class TestPauseFlagStrandingBailOuts:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None):
             daemon._process_update_batch(updates)
 
         # Backoff-gated: no Claude call this batch; text queued.
@@ -1035,7 +1035,7 @@ class TestPauseFlagStrandingBailOuts:
         daemon._dispatcher = daemon._dispatcher  # noqa: keep import
         # Rebuild send_to_claude as a passthrough to the real method by
         # dropping the MagicMock — reach into the class binding.
-        from landline.claude_dispatch import ClaudeDispatcher
+        from landline.claude.dispatch import ClaudeDispatcher
         daemon._dispatcher.send_to_claude = (
             ClaudeDispatcher.send_to_claude.__get__(
                 daemon._dispatcher, ClaudeDispatcher,
@@ -1091,9 +1091,9 @@ class TestQueueingBehavior:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
              patch("subprocess.run", return_value=MagicMock(stdout="", returncode=0)):
             daemon._process_update_batch(updates)
 
@@ -1167,10 +1167,10 @@ class TestPhotoBatch:
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
              patch("landline.orchestrator.download_file", side_effect=fake_download), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             daemon._process_update_batch(updates)
 
         # One Claude call for the whole album.
@@ -1203,10 +1203,10 @@ class TestPhotoBatch:
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
              patch("landline.orchestrator.download_file",
                    side_effect=lambda t, fid, fn: f"/tmp/{fid}.jpg"), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             daemon._process_update_batch(updates)
 
         assert mocks["run_claude"].call_count == 2
@@ -1252,10 +1252,10 @@ class TestBatchErrorIsolation:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             daemon._process_update_batch(updates)
         mocks["run_claude"].assert_called_once()
         assert "real message" in mocks["run_claude"].call_args.kwargs["message"]
@@ -1283,10 +1283,10 @@ class TestRestartContinuation:
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue",
                    return_value=("[brief: morning]", [])) as mock_drain, \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""):
             daemon._handle_restart_continuation()
         # drain_inject_queue MUST have been called — confirms the path went
@@ -1416,11 +1416,11 @@ class TestRestartContinuation:
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue",
                    return_value=("", [])), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent",
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent",
                    return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""):
             daemon._handle_restart_continuation()
         assert not trigger.exists()
@@ -2210,10 +2210,10 @@ class TestDocumentBatch:
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
              patch("landline.orchestrator.download_file",
                    return_value="/tmp/telegram_files/20260703_120000_report.pdf"), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             daemon._process_update_batch([update])
 
         mocks["run_claude"].assert_called_once()
@@ -2286,10 +2286,10 @@ class TestDocumentBatch:
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
              patch("landline.orchestrator.download_file",
                    side_effect=lambda t, fid, fn, target_dir=None, size_cap=None: f"/tmp/{fn}"), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             daemon._process_update_batch([update])
         prompt = mocks["run_claude"].call_args.kwargs["message"]
         assert "evil.pdf" in prompt
@@ -2311,7 +2311,7 @@ class TestVoiceBatchWiring:
         }
 
     def test_voice_only_batch_dispatches_transcript(self):
-        from landline.voice_transcribe import TranscribeResult
+        from landline.media.transcribe import TranscribeResult
 
         daemon, mocks = _make_daemon()
         daemon._lock_manager._lock_state = "unlocked"
@@ -2323,16 +2323,16 @@ class TestVoiceBatchWiring:
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
              patch("landline.orchestrator.download_file",
                    return_value="/tmp/telegram_voice/x.ogg"), \
-             patch("landline.voice_handler.transcribe_file",
+             patch("landline.media.voice.transcribe_file",
                    return_value=TranscribeResult(
                        ok=True, text="hello agent",
                        duration_seconds=1.0, error=None,
                    )), \
-             patch("landline.voice_handler.log_conversation"), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+             patch("landline.media.voice.log_conversation"), \
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             daemon._process_update_batch([update])
 
         mocks["run_claude"].assert_called_once()
@@ -2408,12 +2408,12 @@ class TestReactionAcksPerBatchState:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
-             patch("landline.batch_classifier.reactions.set_reaction_async"), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""), \
-             patch("landline.reactions.set_reactions_batch_async"):
+             patch("landline.runtime.batch_classifier.reactions.set_reaction_async"), \
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""), \
+             patch("landline.telegram.reactions.set_reactions_batch_async"):
             daemon._process_update_batch([update])
         assert daemon._batch_ack_message_ids is None
 
@@ -2453,7 +2453,7 @@ class TestReactionAcksPerBatchState:
              patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
-             patch("landline.batch_classifier.reactions.set_reaction_async"):
+             patch("landline.runtime.batch_classifier.reactions.set_reaction_async"):
             daemon._process_update_batch(updates)
         mock_send.assert_called_once()
         ack_ids = mock_send.call_args.kwargs["ack_message_ids"]
@@ -2476,12 +2476,12 @@ class TestReactionAcksPerBatchState:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
-             patch("landline.batch_classifier.reactions.set_reaction_async") as mock_ack, \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""), \
-             patch("landline.reactions.set_reactions_batch_async") as mock_done:
+             patch("landline.runtime.batch_classifier.reactions.set_reaction_async") as mock_ack, \
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""), \
+             patch("landline.telegram.reactions.set_reactions_batch_async") as mock_done:
             daemon._process_update_batch(updates)
         # 👀 fired 3 times (once per accepted text message).
         assert mock_ack.call_count == 3
@@ -2508,10 +2508,10 @@ class TestReactionAcksPerBatchState:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""), \
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""), \
              patch("urllib.request.urlopen") as mock_urlopen, \
              patch("threading.Thread.start") as mock_start:
             daemon._process_update_batch([update])
@@ -2567,7 +2567,7 @@ class TestAckPartitioningAcrossMediaTypes:
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue",
                    return_value=("", [])), \
-             patch("landline.batch_classifier.reactions.set_reaction_async"), \
+             patch("landline.runtime.batch_classifier.reactions.set_reaction_async"), \
              patch("landline.orchestrator.download_file",
                    return_value="/tmp/fake.jpg"):
             daemon._process_update_batch([photo_update, text_update])
@@ -2619,7 +2619,7 @@ class TestAckPartitioningAcrossMediaTypes:
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue",
                    return_value=("", [])), \
-             patch("landline.batch_classifier.reactions.set_reaction_async"), \
+             patch("landline.runtime.batch_classifier.reactions.set_reaction_async"), \
              patch("landline.orchestrator.download_file",
                    return_value="/tmp/fake.pdf"):
             daemon._process_update_batch(docs)
@@ -2657,7 +2657,7 @@ class TestAckPartitioningAcrossMediaTypes:
         text_update = make_telegram_update(302, "then some text")
 
         # Force whisper to fail (empty transcript).
-        from landline.voice_transcribe import TranscribeResult
+        from landline.media.transcribe import TranscribeResult
         bad = TranscribeResult(
             ok=False, text="", duration_seconds=0.1, error="empty_transcript",
         )
@@ -2669,10 +2669,10 @@ class TestAckPartitioningAcrossMediaTypes:
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue",
                    return_value=("", [])), \
-             patch("landline.batch_classifier.reactions.set_reaction_async"), \
+             patch("landline.runtime.batch_classifier.reactions.set_reaction_async"), \
              patch("landline.orchestrator.download_file",
                    return_value="/tmp/fake.ogg"), \
-             patch("landline.voice_handler.transcribe_file", return_value=bad):
+             patch("landline.media.voice.transcribe_file", return_value=bad):
             daemon._process_update_batch([voice_update, text_update])
 
         # Voice never dispatched (early return on transcribe failure).
@@ -2715,8 +2715,8 @@ class TestRejectionPathsClearAck:
             make_telegram_update(951, "again"),
         ]
         with patch("landline.orchestrator.save_state"), \
-             patch("landline.batch_classifier.reactions.set_reaction_async"), \
-             patch("landline.reactions.set_reactions_batch_async") as mock_batch:
+             patch("landline.runtime.batch_classifier.reactions.set_reaction_async"), \
+             patch("landline.telegram.reactions.set_reactions_batch_async") as mock_batch:
             daemon._process_update_batch(updates)
         # message_id = update_id * 10 in make_telegram_update.
         # Batch-clear was called with the two text mids and emoji=None.
@@ -2740,8 +2740,8 @@ class TestRejectionPathsClearAck:
         daemon._lock_manager.try_silent_unlock = MagicMock(return_value=True)
         upd = make_telegram_update(960, "correcthorsebatterystaple")
         with patch("landline.orchestrator.save_state"), \
-             patch("landline.batch_classifier.reactions.set_reaction_async"), \
-             patch("landline.reactions.set_reactions_batch_async") as mock_batch:
+             patch("landline.runtime.batch_classifier.reactions.set_reaction_async"), \
+             patch("landline.telegram.reactions.set_reactions_batch_async") as mock_batch:
             daemon._process_update_batch([upd])
         # 👀 cleared on the passphrase message_id (9600).
         assert any(
@@ -2758,8 +2758,8 @@ class TestRejectionPathsClearAck:
         photo_upd["message"].pop("text", None)
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
-             patch("landline.batch_classifier.reactions.set_reaction_async"), \
-             patch("landline.reactions.set_reactions_batch_async") as mock_batch, \
+             patch("landline.runtime.batch_classifier.reactions.set_reaction_async"), \
+             patch("landline.telegram.reactions.set_reactions_batch_async") as mock_batch, \
              patch("landline.orchestrator.download_file", return_value=None):
             daemon._process_update_batch([photo_upd])
         mocks["run_claude"].assert_not_called()
@@ -2791,8 +2791,8 @@ class TestRejectionPathsClearAck:
 
         updates = [_make_voice_upd(u) for u in (980, 981, 982, 983, 984)]
         with patch("landline.orchestrator.save_state"), \
-             patch("landline.batch_classifier.reactions.set_reaction_async"), \
-             patch("landline.voice_handler.reactions.set_reaction_async"), \
+             patch("landline.runtime.batch_classifier.reactions.set_reaction_async"), \
+             patch("landline.media.voice.reactions.set_reaction_async"), \
              patch("landline.orchestrator.download_file") as mock_dl:
             daemon._process_update_batch(updates)
         mock_dl.assert_not_called()
@@ -2836,8 +2836,8 @@ class TestRejectionPathsClearAck:
             _make_doc_upd(992, "c.pdf"),
         ]
         with patch("landline.orchestrator.save_state"), \
-             patch("landline.batch_classifier.reactions.set_reaction_async"), \
-             patch("landline.document_handler.reactions.set_reaction_async"), \
+             patch("landline.runtime.batch_classifier.reactions.set_reaction_async"), \
+             patch("landline.media.document.reactions.set_reaction_async"), \
              patch("landline.orchestrator.download_file") as mock_dl:
             daemon._process_update_batch(updates)
         mock_dl.assert_not_called()
@@ -2897,10 +2897,10 @@ class TestRejectionPathsClearAck:
         text_upd = make_telegram_update(1203, "hello there")
 
         with patch("landline.orchestrator.save_state"), \
-             patch("landline.batch_classifier.reactions.set_reaction_async"), \
-             patch("landline.voice_handler.reactions.set_reaction_async"), \
-             patch("landline.document_handler.reactions.set_reaction_async"), \
-             patch("landline.reactions.set_reactions_batch_async"), \
+             patch("landline.runtime.batch_classifier.reactions.set_reaction_async"), \
+             patch("landline.media.voice.reactions.set_reaction_async"), \
+             patch("landline.media.document.reactions.set_reaction_async"), \
+             patch("landline.telegram.reactions.set_reactions_batch_async"), \
              patch("landline.orchestrator.download_file") as mock_dl:
             daemon._process_update_batch(
                 [photo_upd, voice_upd, doc_upd, text_upd]
@@ -2926,8 +2926,8 @@ class TestRejectionPathsClearAck:
         daemon, mocks = _make_daemon()
         daemon._lock_manager._lock_state = "locked"
         with patch("landline.orchestrator.save_state"), \
-             patch("landline.batch_classifier.reactions.set_reaction_async"), \
-             patch("landline.reactions.set_reactions_batch_async"):
+             patch("landline.runtime.batch_classifier.reactions.set_reaction_async"), \
+             patch("landline.telegram.reactions.set_reactions_batch_async"):
             daemon._process_update_batch(
                 [make_telegram_update(1300, "batch one")]
             )

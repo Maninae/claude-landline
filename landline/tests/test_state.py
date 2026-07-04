@@ -1,4 +1,4 @@
-"""Tests for landline.state — state persistence, conversation logging, context %."""
+"""Tests for landline.runtime.state — state persistence, conversation logging, context %."""
 
 import json
 import os
@@ -14,9 +14,9 @@ import pytest
 class TestLoadState:
     def test_returns_defaults_when_no_file(self, tmp_workspace):
         missing = tmp_workspace / "cache" / "nofile.json"
-        with patch("landline.state.STATE_FILE", missing), \
-             patch("landline.state.log") as mock_log:
-            from landline.state import load_state
+        with patch("landline.runtime.state.STATE_FILE", missing), \
+             patch("landline.runtime.state.log") as mock_log:
+            from landline.runtime.state import load_state
             state = load_state()
         assert state["session_id"] is None
         assert state["last_update_id"] == 0
@@ -38,8 +38,8 @@ class TestLoadState:
             "unlock_timestamp": 99.0,
         }
         tmp_state_file.write_text(json.dumps(saved))
-        with patch("landline.state.STATE_FILE", tmp_state_file):
-            from landline.state import load_state
+        with patch("landline.runtime.state.STATE_FILE", tmp_state_file):
+            from landline.runtime.state import load_state
             state = load_state()
         assert state["session_id"] == "abc-123"
         assert state["last_update_id"] == 42
@@ -47,8 +47,8 @@ class TestLoadState:
 
     def test_fills_missing_keys_with_defaults(self, tmp_state_file):
         tmp_state_file.write_text(json.dumps({"session_id": "x"}))
-        with patch("landline.state.STATE_FILE", tmp_state_file):
-            from landline.state import load_state
+        with patch("landline.runtime.state.STATE_FILE", tmp_state_file):
+            from landline.runtime.state import load_state
             state = load_state()
         assert state["session_id"] == "x"
         assert state["last_update_id"] == 0
@@ -61,9 +61,9 @@ class TestLoadState:
         this whole branch is here to prevent."""
         corrupt_bytes = "not json {{{"
         tmp_state_file.write_text(corrupt_bytes)
-        with patch("landline.state.STATE_FILE", tmp_state_file), \
-             patch("landline.state.log") as mock_log:
-            from landline.state import load_state
+        with patch("landline.runtime.state.STATE_FILE", tmp_state_file), \
+             patch("landline.runtime.state.log") as mock_log:
+            from landline.runtime.state import load_state
             state = load_state()
         assert state["session_id"] is None
         assert state["last_update_id"] == 0
@@ -84,9 +84,9 @@ class TestLoadState:
         as ``test_handles_corrupt_json`` — back up + log + defaults."""
         truncated = '{"session_id": "abc-123", "last_update_id": 42'
         tmp_state_file.write_text(truncated)
-        with patch("landline.state.STATE_FILE", tmp_state_file), \
-             patch("landline.state.log") as mock_log:
-            from landline.state import load_state
+        with patch("landline.runtime.state.STATE_FILE", tmp_state_file), \
+             patch("landline.runtime.state.log") as mock_log:
+            from landline.runtime.state import load_state
             state = load_state()
         assert state["session_id"] is None
         assert state["last_update_id"] == 0
@@ -103,9 +103,9 @@ class TestLoadState:
         backup.write_text("older corruption")
         latest = "newer corruption {{{"
         tmp_state_file.write_text(latest)
-        with patch("landline.state.STATE_FILE", tmp_state_file), \
-             patch("landline.state.log"):
-            from landline.state import load_state
+        with patch("landline.runtime.state.STATE_FILE", tmp_state_file), \
+             patch("landline.runtime.state.log"):
+            from landline.runtime.state import load_state
             state = load_state()
         assert state["session_id"] is None
         assert backup.exists()
@@ -114,8 +114,8 @@ class TestLoadState:
 
 class TestSaveState:
     def test_writes_json_atomically(self, tmp_state_file):
-        with patch("landline.state.STATE_FILE", tmp_state_file):
-            from landline.state import save_state
+        with patch("landline.runtime.state.STATE_FILE", tmp_state_file):
+            from landline.runtime.state import save_state
             save_state({"session_id": "xyz", "last_update_id": 10})
         data = json.loads(tmp_state_file.read_text())
         assert data["session_id"] == "xyz"
@@ -123,8 +123,8 @@ class TestSaveState:
 
     def test_creates_parent_dirs(self, tmp_workspace):
         deep_file = tmp_workspace / "deep" / "nested" / "state.json"
-        with patch("landline.state.STATE_FILE", deep_file):
-            from landline.state import save_state
+        with patch("landline.runtime.state.STATE_FILE", deep_file):
+            from landline.runtime.state import save_state
             save_state({"session_id": None})
         assert deep_file.exists()
 
@@ -136,8 +136,8 @@ class TestSaveState:
         # on children still work — only writes should fail.
         os.chmod(str(tmp_workspace / "readonly"), 0o555)
         try:
-            with patch("landline.state.STATE_FILE", bad_path):
-                from landline.state import save_state
+            with patch("landline.runtime.state.STATE_FILE", bad_path):
+                from landline.runtime.state import save_state
                 # The contract: save_state swallows OSError, no exception leaks.
                 save_state({"key": "val"})
             assert not bad_path.exists()
@@ -154,15 +154,15 @@ class TestSaveState:
     def test_replaces_existing_file_atomically(self, tmp_state_file):
         """save_state must overwrite existing state, not append or fail."""
         tmp_state_file.write_text('{"session_id": "old"}')
-        with patch("landline.state.STATE_FILE", tmp_state_file):
-            from landline.state import save_state
+        with patch("landline.runtime.state.STATE_FILE", tmp_state_file):
+            from landline.runtime.state import save_state
             save_state({"session_id": "new"})
         data = json.loads(tmp_state_file.read_text())
         assert data == {"session_id": "new"}
 
     def test_cleans_up_tmp_file(self, tmp_state_file):
-        with patch("landline.state.STATE_FILE", tmp_state_file):
-            from landline.state import save_state
+        with patch("landline.runtime.state.STATE_FILE", tmp_state_file):
+            from landline.runtime.state import save_state
             save_state({"session_id": "a"})
         tmp_file = tmp_state_file.with_suffix(tmp_state_file.suffix + ".tmp")
         assert not tmp_file.exists()
@@ -170,15 +170,15 @@ class TestSaveState:
 
 class TestLogConversation:
     def test_creates_log_file(self, tmp_workspace):
-        with patch("landline.state.WORKSPACE", tmp_workspace):
-            from landline.state import log_conversation
+        with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+            from landline.runtime.state import log_conversation
             log_conversation("the operator", "hello world")
         log_files = list((tmp_workspace / "memory" / "daily").glob("*_telegram.md"))
         assert len(log_files) == 1
 
     def test_appends_role_and_text(self, tmp_workspace):
-        with patch("landline.state.WORKSPACE", tmp_workspace):
-            from landline.state import log_conversation
+        with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+            from landline.runtime.state import log_conversation
             log_conversation("the operator", "first message")
             log_conversation("the agent", "response here")
         log_files = list((tmp_workspace / "memory" / "daily").glob("*_telegram.md"))
@@ -189,8 +189,8 @@ class TestLogConversation:
         assert "response here" in content
 
     def test_writes_header_on_empty_file(self, tmp_workspace):
-        with patch("landline.state.WORKSPACE", tmp_workspace):
-            from landline.state import log_conversation
+        with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+            from landline.runtime.state import log_conversation
             log_conversation("the operator", "test")
         log_files = list((tmp_workspace / "memory" / "daily").glob("*_telegram.md"))
         content = log_files[0].read_text()
@@ -199,8 +199,8 @@ class TestLogConversation:
 
 class TestReadRecentConversationHistory:
     def test_returns_empty_when_no_log(self, tmp_workspace):
-        with patch("landline.state.WORKSPACE", tmp_workspace):
-            from landline.state import read_recent_conversation_history
+        with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+            from landline.runtime.state import read_recent_conversation_history
             result = read_recent_conversation_history()
         assert result == ""
 
@@ -216,8 +216,8 @@ class TestReadRecentConversationHistory:
             "**the operator** (10:00): hello\n\n"
             "**the agent** (10:01): hi back\n\n"
         )
-        with patch("landline.state.WORKSPACE", tmp_workspace):
-            from landline.state import read_recent_conversation_history
+        with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+            from landline.runtime.state import read_recent_conversation_history
             result = read_recent_conversation_history()
         assert "hello" in result
         assert "hi back" in result
@@ -233,8 +233,8 @@ class TestReadRecentConversationHistory:
         for i in range(100):
             lines.append(f"**the operator** (10:{i:02d}): msg {i}\n")
         log_path.write_text("\n".join(lines))
-        with patch("landline.state.WORKSPACE", tmp_workspace):
-            from landline.state import read_recent_conversation_history
+        with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+            from landline.runtime.state import read_recent_conversation_history
             result = read_recent_conversation_history(max_turns=5)
         assert "omitted" in result
         assert "<system>" in result
@@ -260,8 +260,8 @@ class TestReadRecentConversationHistory:
             "**the operator** (10:00): hi\n"
             "**the agent** (10:01): hello\n"
         )
-        with patch("landline.state.WORKSPACE", tmp_workspace):
-            from landline.state import read_recent_conversation_history
+        with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+            from landline.runtime.state import read_recent_conversation_history
             result = read_recent_conversation_history(max_turns=20)
         assert "omitted" not in result
         assert "<system>" in result
@@ -276,8 +276,8 @@ class TestReadRecentConversationHistory:
         log_path = tmp_workspace / "memory" / "daily" / f"{today}_telegram.md"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("# Telegram Conversation\n\nSome prose, no messages yet.\n")
-        with patch("landline.state.WORKSPACE", tmp_workspace):
-            from landline.state import read_recent_conversation_history
+        with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+            from landline.runtime.state import read_recent_conversation_history
             result = read_recent_conversation_history()
         assert result == ""
 
@@ -291,8 +291,8 @@ class TestReadRecentConversationHistory:
         log_path.write_text("content")
         os.chmod(str(log_path), 0o000)
         try:
-            with patch("landline.state.WORKSPACE", tmp_workspace):
-                from landline.state import read_recent_conversation_history
+            with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+                from landline.runtime.state import read_recent_conversation_history
                 result = read_recent_conversation_history()
             assert result == ""
         finally:
@@ -301,13 +301,13 @@ class TestReadRecentConversationHistory:
 
 class TestGetContextPercent:
     def test_returns_none_for_no_session(self):
-        from landline.state import get_context_percent
+        from landline.runtime.state import get_context_percent
         assert get_context_percent(None) is None
         assert get_context_percent("") is None
 
     def test_returns_none_when_file_missing(self, tmp_workspace):
-        with patch("landline.state.PROJECT_DIR", tmp_workspace / "nonexistent"):
-            from landline.state import get_context_percent
+        with patch("landline.runtime.state.PROJECT_DIR", tmp_workspace / "nonexistent"):
+            from landline.runtime.state import get_context_percent
             result = get_context_percent("some-session-id")
         assert result is None
 
@@ -326,8 +326,8 @@ class TestGetContextPercent:
             }
         }
         session_file.write_text(json.dumps(entry) + "\n")
-        with patch("landline.state.PROJECT_DIR", project_dir):
-            from landline.state import get_context_percent
+        with patch("landline.runtime.state.PROJECT_DIR", project_dir):
+            from landline.runtime.state import get_context_percent
             result = get_context_percent("test-session")
         assert result is not None
         assert abs(result - 65.0) < 0.1
@@ -338,8 +338,8 @@ class TestGetContextPercent:
         session_file = project_dir / "test-session.jsonl"
         entry = {"type": "user", "message": {"content": "hello"}}
         session_file.write_text(json.dumps(entry) + "\n")
-        with patch("landline.state.PROJECT_DIR", project_dir):
-            from landline.state import get_context_percent
+        with patch("landline.runtime.state.PROJECT_DIR", project_dir):
+            from landline.runtime.state import get_context_percent
             result = get_context_percent("test-session")
         assert result is None
 
@@ -361,8 +361,8 @@ class TestGetContextPercent:
             }
             lines.append(json.dumps(entry))
         session_file.write_text("\n".join(lines) + "\n")
-        with patch("landline.state.PROJECT_DIR", project_dir):
-            from landline.state import get_context_percent
+        with patch("landline.runtime.state.PROJECT_DIR", project_dir):
+            from landline.runtime.state import get_context_percent
             result = get_context_percent("test-session")
         assert result is not None
         assert abs(result - 30.0) < 0.1
@@ -391,8 +391,8 @@ class TestGetContextPercent:
             + json.dumps(good) + "\n"
             + "more garbage\n"
         )
-        with patch("landline.state.PROJECT_DIR", project_dir):
-            from landline.state import get_context_percent
+        with patch("landline.runtime.state.PROJECT_DIR", project_dir):
+            from landline.runtime.state import get_context_percent
             result = get_context_percent("test-session")
         assert result is not None
         assert abs(result - 25.0) < 0.1
@@ -428,8 +428,8 @@ class TestGetContextPercent:
             + padding + "\n"
             + json.dumps(late) + "\n"
         )
-        with patch("landline.state.PROJECT_DIR", project_dir):
-            from landline.state import get_context_percent
+        with patch("landline.runtime.state.PROJECT_DIR", project_dir):
+            from landline.runtime.state import get_context_percent
             result = get_context_percent("test-session")
         # Should reflect the late entry (10%), not the early one (90%).
         assert result is not None
@@ -462,8 +462,8 @@ class TestGetContextPercent:
             json.dumps(user_entry) + "\n"
             + json.dumps(assistant_entry) + "\n"
         )
-        with patch("landline.state.PROJECT_DIR", project_dir):
-            from landline.state import get_context_percent
+        with patch("landline.runtime.state.PROJECT_DIR", project_dir):
+            from landline.runtime.state import get_context_percent
             result = get_context_percent("test-session")
         assert result is not None
         assert abs(result - 20.0) < 0.1
@@ -475,8 +475,8 @@ class TestDailyLogPermissions:
     def test_log_conversation_creates_file_at_0o600(self, tmp_workspace):
         """A fresh daily log must land at 0o600. Reverting os.open + fchmod
         to plain open(..., 'a') falls back to umask-default 0o644 - fails."""
-        with patch("landline.state.WORKSPACE", tmp_workspace):
-            from landline.state import log_conversation
+        with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+            from landline.runtime.state import log_conversation
             log_conversation("the operator", "hello")
         log_files = list((tmp_workspace / "memory" / "daily").glob("*_telegram.md"))
         assert len(log_files) == 1
@@ -489,8 +489,8 @@ class TestDailyLogPermissions:
         # Pre-create dir at a loose mode to verify the chmod tightens it.
         daily_dir = tmp_workspace / "memory" / "daily"
         os.chmod(str(daily_dir), 0o755)
-        with patch("landline.state.WORKSPACE", tmp_workspace):
-            from landline.state import log_conversation
+        with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+            from landline.runtime.state import log_conversation
             log_conversation("the operator", "hello")
         mode = os.stat(str(daily_dir)).st_mode & 0o777
         assert mode == 0o700, f"daily dir mode is {oct(mode)}, expected 0o700"
@@ -507,8 +507,8 @@ class TestDailyLogPermissions:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("# pre-existing content\n")
         os.chmod(str(log_path), 0o644)
-        with patch("landline.state.WORKSPACE", tmp_workspace):
-            from landline.state import log_conversation
+        with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+            from landline.runtime.state import log_conversation
             log_conversation("the operator", "appended turn")
         mode = os.stat(str(log_path)).st_mode & 0o777
         assert mode == 0o600, (
@@ -523,8 +523,8 @@ class TestDailyLogPermissions:
         legacy_file = daily_dir / "2024-01-01_telegram.md"
         legacy_file.write_text("legacy contents")
         os.chmod(str(legacy_file), 0o644)
-        with patch("landline.state.WORKSPACE", tmp_workspace):
-            from landline.state import secure_daily_logs
+        with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+            from landline.runtime.state import secure_daily_logs
             secure_daily_logs()
         assert os.stat(str(legacy_file)).st_mode & 0o777 == 0o600
         assert os.stat(str(daily_dir)).st_mode & 0o777 == 0o700
@@ -540,8 +540,8 @@ class TestDailyLogPermissions:
         journal = daily_dir / "2024-01-01.md"
         journal.write_text("journal entry")
         os.chmod(str(journal), 0o644)
-        with patch("landline.state.WORKSPACE", tmp_workspace):
-            from landline.state import secure_daily_logs
+        with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+            from landline.runtime.state import secure_daily_logs
             secure_daily_logs()
         assert os.stat(str(tg_file)).st_mode & 0o777 == 0o600
         # Non-telegram file is untouched (only the dir chmod tightens its
@@ -550,8 +550,8 @@ class TestDailyLogPermissions:
 
     def test_secure_daily_logs_is_idempotent(self, tmp_workspace):
         """Second call must not raise and must leave modes unchanged."""
-        with patch("landline.state.WORKSPACE", tmp_workspace):
-            from landline.state import secure_daily_logs
+        with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+            from landline.runtime.state import secure_daily_logs
             secure_daily_logs()
             secure_daily_logs()
         daily_dir = tmp_workspace / "memory" / "daily"
@@ -560,8 +560,8 @@ class TestDailyLogPermissions:
     def test_secure_daily_logs_no_dir(self, tmp_path):
         """No memory/daily dir - return cleanly. Protects fresh-machine path."""
         # tmp_path has no memory/daily under it.
-        with patch("landline.state.WORKSPACE", tmp_path):
-            from landline.state import secure_daily_logs
+        with patch("landline.runtime.state.WORKSPACE", tmp_path):
+            from landline.runtime.state import secure_daily_logs
             secure_daily_logs()  # must not raise
 
     def test_secure_daily_logs_backcompat_wrapper_still_chmods_daily(
@@ -575,16 +575,16 @@ class TestDailyLogPermissions:
         legacy_file = daily_dir / "2024-01-01_telegram.md"
         legacy_file.write_text("legacy contents")
         os.chmod(str(legacy_file), 0o644)
-        with patch("landline.state.WORKSPACE", tmp_workspace):
-            from landline.state import secure_daily_logs
+        with patch("landline.runtime.state.WORKSPACE", tmp_workspace):
+            from landline.runtime.state import secure_daily_logs
             secure_daily_logs()
         assert os.stat(str(legacy_file)).st_mode & 0o777 == 0o600
         assert os.stat(str(daily_dir)).st_mode & 0o777 == 0o700
 
     def test_save_state_writes_at_0o600(self, tmp_state_file):
         """State file must land at 0o600 (defense-in-depth even inside cache/)."""
-        with patch("landline.state.STATE_FILE", tmp_state_file):
-            from landline.state import save_state
+        with patch("landline.runtime.state.STATE_FILE", tmp_state_file):
+            from landline.runtime.state import save_state
             save_state({"session_id": "abc"})
         mode = os.stat(str(tmp_state_file)).st_mode & 0o777
         assert mode == 0o600, f"state file mode is {oct(mode)}, expected 0o600"
@@ -594,7 +594,7 @@ class TestDailyLogPermissions:
         ``os.umask`` does not appear. Reverting to a umask-based design - fails.
         Catches the most dangerous regression class even if a future edit
         forgets the fchmod."""
-        import landline.state as state_mod
+        import landline.runtime.state as state_mod
         source = Path(state_mod.__file__).read_text()
         # Strip comments before checking (allow umask in commentary only).
         code_only = "\n".join(
@@ -602,7 +602,7 @@ class TestDailyLogPermissions:
         )
         # Stricter: ensure no os.umask( call exists as an executable statement.
         assert "os.umask(" not in source, (
-            "landline.state must NOT call os.umask - the daemon is multi-threaded "
+            "landline.runtime.state must NOT call os.umask - the daemon is multi-threaded "
             "and os.umask is process-wide (races concurrent file creation in "
             "poller/sender threads). Use os.open + fchmod instead."
         )
@@ -627,9 +627,9 @@ class TestSaveStateDurability:
             fsynced_modes.append(mode)
             return real_fsync(fd)
 
-        with patch("landline.state.STATE_FILE", tmp_state_file), \
-             patch("landline.state.os.fsync", side_effect=recording_fsync):
-            from landline.state import save_state
+        with patch("landline.runtime.state.STATE_FILE", tmp_state_file), \
+             patch("landline.runtime.state.os.fsync", side_effect=recording_fsync):
+            from landline.runtime.state import save_state
             save_state({"session_id": "durable"})
 
         dir_fsyncs = [m for m in fsynced_modes if stat.S_ISDIR(m)]
@@ -655,10 +655,10 @@ class TestSaveStateDurability:
                 raise OSError("ENOTSUP: directory fsync not supported")
             return real_fsync(fd)
 
-        with patch("landline.state.STATE_FILE", tmp_state_file), \
-             patch("landline.state.os.fsync", side_effect=selective_fsync), \
-             patch("landline.state.log") as mock_log:
-            from landline.state import save_state
+        with patch("landline.runtime.state.STATE_FILE", tmp_state_file), \
+             patch("landline.runtime.state.os.fsync", side_effect=selective_fsync), \
+             patch("landline.runtime.state.log") as mock_log:
+            from landline.runtime.state import save_state
             # Must not raise.
             save_state({"session_id": "ok-on-bsd"})
 
@@ -690,10 +690,10 @@ class TestSaveStateForensics:
                 raise OSError(28, "No space left on device")
             return real_fsync(fd)
 
-        with patch("landline.state.STATE_FILE", tmp_state_file), \
-             patch("landline.state.os.fsync", side_effect=selective_fsync), \
-             patch("landline.state.log") as mock_log:
-            from landline.state import save_state
+        with patch("landline.runtime.state.STATE_FILE", tmp_state_file), \
+             patch("landline.runtime.state.os.fsync", side_effect=selective_fsync), \
+             patch("landline.runtime.state.log") as mock_log:
+            from landline.runtime.state import save_state
             save_state({"session_id": "forensic-evidence", "last_update_id": 7})
 
         # (a) tmp still exists for forensics
@@ -710,21 +710,22 @@ class TestSaveStateForensics:
 
 
 class TestTailBytesConstantsConsumed:
-    """C3 - landline.state imports the two windows from landline.config, no locals."""
+    """C3 - landline.runtime.state imports the two windows from landline.config, no locals."""
 
     def test_state_uses_config_tail_bytes_constants_no_local_redefinition(self):
-        """landline.state must not redefine the tail-bytes constants locally.
-        The two windows live in landline.config; landline.state imports them. A
+        """landline.runtime.state must not redefine the tail-bytes constants locally.
+        The two windows live in landline.config; landline.runtime.state imports them. A
         local redefinition (HISTORY_TAIL_BYTES = ..., TAIL_BYTES = ...) would
         silently re-introduce the drift this item exists to prevent."""
-        from landline import state, config
+        from landline.runtime import state
+        from landline import config
         # The old local names must be gone.
         assert not hasattr(state, "HISTORY_TAIL_BYTES"), (
-            "landline.state.HISTORY_TAIL_BYTES re-appeared - must come from "
+            "landline.runtime.state.HISTORY_TAIL_BYTES re-appeared - must come from "
             "landline.config.CONVERSATION_LOG_TAIL_BYTES instead."
         )
         assert not hasattr(state, "TAIL_BYTES"), (
-            "landline.state.TAIL_BYTES re-appeared - must come from "
+            "landline.runtime.state.TAIL_BYTES re-appeared - must come from "
             "landline.config.SESSION_JSONL_TAIL_BYTES instead."
         )
         # state imports the config names (binding check - they're in state's
@@ -739,7 +740,7 @@ class TestProjectDirDerivation:
     def test_encode_cc_project_dir_matches_claude_code_rule(self):
         """Direct call to the helper - the encoding rule is /` and `.` both
         replaced with `-`. Reverted code has no helper - fails at import."""
-        from landline.state import encode_cc_project_dir
+        from landline.runtime.state import encode_cc_project_dir
         assert encode_cc_project_dir(Path("/Users/testuser/workspace")) == "-Users-testuser-workspace"
         assert encode_cc_project_dir(Path("/Users/alice/.agent-ws")) == "-Users-alice--agent-ws"
         assert encode_cc_project_dir(Path("/Users/x/proj.name")) == "-Users-x-proj-name"
@@ -751,7 +752,7 @@ class TestProjectDirDerivation:
         "projects" / encode_cc_project_dir(WORKSPACE)."""
         if os.environ.get("LANDLINE_CC_PROJECT_DIR"):
             pytest.skip("env override set in test environment")
-        from landline.state import PROJECT_DIR, encode_cc_project_dir
+        from landline.runtime.state import PROJECT_DIR, encode_cc_project_dir
         from landline.config import WORKSPACE
         expected = Path.home() / ".claude" / "projects" / encode_cc_project_dir(WORKSPACE)
         assert PROJECT_DIR == expected
@@ -772,7 +773,7 @@ class TestProjectDirDerivation:
             str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
         )
         probe = (
-            "from landline.state import PROJECT_DIR; "
+            "from landline.runtime.state import PROJECT_DIR; "
             "import sys; sys.stdout.write(str(PROJECT_DIR))"
         )
         result = subprocess.run(
@@ -805,8 +806,8 @@ class TestSecureWorkspacePaths:
         # memory/daily must exist for the daily-log tightening branch.
         (tmp_path / "memory" / "daily").mkdir(parents=True, exist_ok=True)
 
-        with patch("landline.state.WORKSPACE", tmp_path):
-            from landline.state import secure_workspace_paths
+        with patch("landline.runtime.state.WORKSPACE", tmp_path):
+            from landline.runtime.state import secure_workspace_paths
             secure_workspace_paths()
 
         for d in WORKSPACE_SENSITIVE_DIRS:
@@ -826,9 +827,9 @@ class TestSecureWorkspacePaths:
         (tmp_path / "memory" / "daily").mkdir(parents=True)
         os.chmod(str(tmp_path / "memory"), 0o755)
 
-        with patch("landline.state.WORKSPACE", tmp_path), \
-             patch("landline.state.log"):  # silence the "skipping" info line
-            from landline.state import secure_workspace_paths
+        with patch("landline.runtime.state.WORKSPACE", tmp_path), \
+             patch("landline.runtime.state.log"):  # silence the "skipping" info line
+            from landline.runtime.state import secure_workspace_paths
             secure_workspace_paths()  # must not raise
 
         # The dir that DID exist was tightened.
@@ -852,10 +853,10 @@ class TestSecureWorkspacePaths:
                 raise OSError("EPERM: mock NFS mount is read-only")
             return real_chmod(path, mode)
 
-        with patch("landline.state.WORKSPACE", tmp_path), \
-             patch("landline.state.os.chmod", side_effect=selective_chmod), \
-             patch("landline.state.log") as mock_log:
-            from landline.state import secure_workspace_paths
+        with patch("landline.runtime.state.WORKSPACE", tmp_path), \
+             patch("landline.runtime.state.os.chmod", side_effect=selective_chmod), \
+             patch("landline.runtime.state.log") as mock_log:
+            from landline.runtime.state import secure_workspace_paths
             secure_workspace_paths()  # must not raise
 
         # The stuck path was logged (failure surfaced), and the others

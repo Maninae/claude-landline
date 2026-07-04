@@ -297,7 +297,7 @@ def test_state_file_mode_is_owner_only():
 def test_failure_tracker_consts_live_in_config():
     """E6 - failure-tracker tunables live in landline.config (canonical source).
 
-    They were moved out of landline.failure_tracker so the daemon's full
+    They were moved out of landline.claude.failure_tracker so the daemon's full
     tunable surface is visible from one file. failure_tracker imports them
     back (Wave 3b); the unit-test boundary still imports from
     failure_tracker (which re-exports), but the source of truth is here.

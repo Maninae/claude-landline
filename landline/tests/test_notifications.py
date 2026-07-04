@@ -1,4 +1,4 @@
-"""Tests for landline.notifications — iMessage alert delivery.
+"""Tests for landline.runtime.notifications — iMessage alert delivery.
 
 Cluster 1 (M13): sends are async — ``send_network_alert`` and
 ``send_health_alert`` spawn a daemon thread and return immediately.
@@ -15,7 +15,7 @@ import threading
 import time
 from unittest.mock import patch, MagicMock
 
-from landline.notifications import (
+from landline.runtime.notifications import (
     _escape_applescript_literal,
     _wait_for_pending_alerts,
     send_health_alert,
@@ -79,14 +79,14 @@ def _handle_from_call(call):
 
 class TestSendNetworkAlert:
     def test_sends_osascript_with_outage_duration(self, no_subprocess):
-        with patch("landline.notifications.keychain_get", return_value="test-handle"):
+        with patch("landline.runtime.notifications.keychain_get", return_value="test-handle"):
             send_network_alert(120.0)
             _wait_for_pending_alerts()
         osa_calls = _osascript_calls(no_subprocess["run"].call_args_list)
         assert len(osa_calls) == 1
 
     def test_message_contains_outage_seconds(self, no_subprocess):
-        with patch("landline.notifications.keychain_get", return_value="test-handle"):
+        with patch("landline.runtime.notifications.keychain_get", return_value="test-handle"):
             send_network_alert(300.5)
             _wait_for_pending_alerts()
         osa_calls = _osascript_calls(no_subprocess["run"].call_args_list)
@@ -94,7 +94,7 @@ class TestSendNetworkAlert:
         assert "300" in body
 
     def test_skips_when_no_owner_handle(self, no_subprocess):
-        with patch("landline.notifications.keychain_get", return_value=None):
+        with patch("landline.runtime.notifications.keychain_get", return_value=None):
             send_network_alert(60.0)
             _wait_for_pending_alerts()
         osa_calls = _osascript_calls(no_subprocess["run"].call_args_list)
@@ -102,7 +102,7 @@ class TestSendNetworkAlert:
 
     def test_survives_subprocess_exception(self):
         """A subprocess failure must not propagate — alert is best-effort."""
-        with patch("landline.notifications.keychain_get", return_value="test-handle"), \
+        with patch("landline.runtime.notifications.keychain_get", return_value="test-handle"), \
              patch("subprocess.run", side_effect=Exception("osascript not found")):
             # The contract: send_network_alert never raises. If this changes,
             # the daemon's poller would crash on a transient osascript failure.
@@ -112,7 +112,7 @@ class TestSendNetworkAlert:
             assert True
 
     def test_uses_owner_handle_from_keychain(self, no_subprocess):
-        with patch("landline.notifications.keychain_get", return_value="test-handle"):
+        with patch("landline.runtime.notifications.keychain_get", return_value="test-handle"):
             send_network_alert(100.0)
             _wait_for_pending_alerts()
         osa_calls = _osascript_calls(no_subprocess["run"].call_args_list)
@@ -122,7 +122,7 @@ class TestSendNetworkAlert:
         """osascript call must use a timeout — a hung Messages handoff would
         block the alert worker thread indefinitely, and pile up threads on
         repeated alerts."""
-        with patch("landline.notifications.keychain_get", return_value="test-handle"):
+        with patch("landline.runtime.notifications.keychain_get", return_value="test-handle"):
             send_network_alert(50.0)
             _wait_for_pending_alerts()
         osa_calls = _osascript_calls(no_subprocess["run"].call_args_list)
@@ -133,7 +133,7 @@ class TestSendNetworkAlert:
     def test_outage_truncated_to_int_in_message(self, no_subprocess):
         """The alert body uses int(outage_seconds); fractional seconds must
         not appear as '300.5'."""
-        with patch("landline.notifications.keychain_get", return_value="test-handle"):
+        with patch("landline.runtime.notifications.keychain_get", return_value="test-handle"):
             send_network_alert(300.99)
             _wait_for_pending_alerts()
         osa_calls = _osascript_calls(no_subprocess["run"].call_args_list)
@@ -145,7 +145,7 @@ class TestSendNetworkAlert:
     def test_message_identifies_agent(self, no_subprocess):
         """Alert should be attributable so the operator knows what's pinging them."""
         from landline.config import AGENT_NAME
-        with patch("landline.notifications.keychain_get", return_value="test-handle"):
+        with patch("landline.runtime.notifications.keychain_get", return_value="test-handle"):
             send_network_alert(60.0)
             _wait_for_pending_alerts()
         osa_calls = _osascript_calls(no_subprocess["run"].call_args_list)
@@ -157,7 +157,7 @@ class TestSendNetworkAlert:
         argv[2] the AppleScript. Reverting to a bespoke CLI (imsg send
         --to ... --text ...) would silently no-op on any deploy without
         that private tool — this test locks the transport contract."""
-        with patch("landline.notifications.keychain_get", return_value="test-handle"):
+        with patch("landline.runtime.notifications.keychain_get", return_value="test-handle"):
             send_network_alert(60.0)
             _wait_for_pending_alerts()
         osa_calls = _osascript_calls(no_subprocess["run"].call_args_list)
@@ -198,7 +198,7 @@ class TestSendNetworkAlertAsync:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         try:
-            with patch("landline.notifications.keychain_get",
+            with patch("landline.runtime.notifications.keychain_get",
                        return_value="test-handle"), \
                  patch("subprocess.run", side_effect=slow_run):
                 start = time.monotonic()
@@ -225,10 +225,10 @@ class TestSendNetworkAlertAsync:
     def test_send_network_alert_thread_error_swallowed(self):
         """An exception INSIDE the alert thread must not propagate to the
         caller and must be logged."""
-        with patch("landline.notifications.keychain_get",
+        with patch("landline.runtime.notifications.keychain_get",
                    return_value="test-handle"), \
              patch("subprocess.run", side_effect=RuntimeError("boom")), \
-             patch("landline.notifications.log") as mock_log:
+             patch("landline.runtime.notifications.log") as mock_log:
             # Caller must return normally.
             send_network_alert(42.0)
             _wait_for_pending_alerts()
@@ -253,7 +253,7 @@ class TestSendHealthAlert:
     def test_send_health_alert_uses_subject_and_body_from_call(self, no_subprocess):
         """The osascript body must contain both the subject and body strings
         so an operator can identify the source at a glance."""
-        with patch("landline.notifications.keychain_get", return_value="test-handle"):
+        with patch("landline.runtime.notifications.keychain_get", return_value="test-handle"):
             result = send_health_alert(
                 subject="claude-auth-expired",
                 body="the operator's CC token returned 401; all headless jobs failing.",
@@ -270,7 +270,7 @@ class TestSendHealthAlert:
         """When the Keychain lookup returns nothing, no thread is spawned
         AND the caller sees ``False`` — Cluster 3 uses this to gate its
         auth-alert latch (don't set the latch if the alert didn't go out)."""
-        with patch("landline.notifications.keychain_get", return_value=None):
+        with patch("landline.runtime.notifications.keychain_get", return_value=None):
             result = send_health_alert(
                 subject="unused-subject",
                 body="unused-body",
@@ -289,7 +289,7 @@ class TestSendHealthAlert:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         try:
-            with patch("landline.notifications.keychain_get",
+            with patch("landline.runtime.notifications.keychain_get",
                        return_value="test-handle"), \
                  patch("subprocess.run", side_effect=slow_run):
                 start = time.monotonic()
@@ -305,7 +305,7 @@ class TestSendHealthAlert:
         """Alerts should be attributable to the agent so the operator knows
         what's pinging them — mirrors send_network_alert."""
         from landline.config import AGENT_NAME
-        with patch("landline.notifications.keychain_get", return_value="test-handle"):
+        with patch("landline.runtime.notifications.keychain_get", return_value="test-handle"):
             send_health_alert(subject="a-subject", body="a-body")
             _wait_for_pending_alerts()
         osa_calls = _osascript_calls(no_subprocess["run"].call_args_list)
@@ -342,8 +342,8 @@ class TestAppleScriptEscaping:
         character). Without escaping, the send would silently corrupt or
         error out."""
         tricky_body = 'she said "hi" then wrote c:\\path\\to\\file'
-        with patch("landline.notifications.keychain_get", return_value="test-handle"), \
-             patch("landline.notifications.AGENT_NAME", "Assistant"):
+        with patch("landline.runtime.notifications.keychain_get", return_value="test-handle"), \
+             patch("landline.runtime.notifications.AGENT_NAME", "Assistant"):
             # send_network_alert composes its own body; use send_health_alert
             # so we can pass the tricky text through.
             send_health_alert(subject="s", body=tricky_body)
@@ -386,7 +386,7 @@ class TestAppleScriptEscaping:
         """The Keychain-sourced handle is defensively escaped too — a
         stray ``"`` in the handle would break the ``participant`` clause."""
         with patch(
-            "landline.notifications.keychain_get",
+            "landline.runtime.notifications.keychain_get",
             return_value='weird"handle',
         ):
             send_network_alert(10.0)

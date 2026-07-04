@@ -1,4 +1,4 @@
-"""Tests for landline.guard — Telegram sender allowlist gate.
+"""Tests for landline.runtime.guard — Telegram sender allowlist gate.
 
 Critical behavior: fail-closed (empty allowlist blocks everyone).
 """
@@ -8,71 +8,71 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-import landline.guard as guard_module
-from landline.guard import allowed_chat_ids, is_allowed, reject_message
+import landline.runtime.guard as guard_module
+from landline.runtime.guard import allowed_chat_ids, is_allowed, reject_message
 
 
 class TestAllowedChatIds:
     def test_parses_comma_separated_ids(self):
-        with patch("landline.guard.keychain_get_status", return_value=("111,222,333", "ok")):
+        with patch("landline.runtime.guard.keychain_get_status", return_value=("111,222,333", "ok")):
             ids = allowed_chat_ids()
         assert ids == {"111", "222", "333"}
 
     def test_strips_whitespace(self):
-        with patch("landline.guard.keychain_get_status", return_value=(" 111 , 222 ", "ok")):
+        with patch("landline.runtime.guard.keychain_get_status", return_value=(" 111 , 222 ", "ok")):
             ids = allowed_chat_ids()
         assert ids == {"111", "222"}
 
     def test_empty_keychain_returns_empty_set(self):
-        with patch("landline.guard.keychain_get_status", return_value=(None, "absent")):
+        with patch("landline.runtime.guard.keychain_get_status", return_value=(None, "absent")):
             ids = allowed_chat_ids()
         assert ids == set()
 
     def test_empty_string_returns_empty_set(self):
-        with patch("landline.guard.keychain_get_status", return_value=("", "ok")):
+        with patch("landline.runtime.guard.keychain_get_status", return_value=("", "ok")):
             ids = allowed_chat_ids()
         assert ids == set()
 
     def test_caching_within_ttl(self):
-        with patch("landline.guard.keychain_get_status", return_value=("111", "ok")) as mock_kc:
+        with patch("landline.runtime.guard.keychain_get_status", return_value=("111", "ok")) as mock_kc:
             allowed_chat_ids()
             allowed_chat_ids()
         assert mock_kc.call_count == 1
 
     def test_cache_expires_after_ttl(self):
-        with patch("landline.guard.keychain_get_status", return_value=("111", "ok")) as mock_kc:
+        with patch("landline.runtime.guard.keychain_get_status", return_value=("111", "ok")) as mock_kc:
             allowed_chat_ids()
             guard_module._cached_at = time.time() - 120
             allowed_chat_ids()
         assert mock_kc.call_count == 2
 
     def test_single_id(self):
-        with patch("landline.guard.keychain_get_status", return_value=("12345", "ok")):
+        with patch("landline.runtime.guard.keychain_get_status", return_value=("12345", "ok")):
             ids = allowed_chat_ids()
         assert ids == {"12345"}
 
 
 class TestIsAllowed:
     def test_allowed_chat_id(self):
-        with patch("landline.guard.keychain_get_status", return_value=("123,456", "ok")):
+        with patch("landline.runtime.guard.keychain_get_status", return_value=("123,456", "ok")):
             assert is_allowed(123) is True
             assert is_allowed("456") is True
 
     def test_denied_chat_id(self):
-        with patch("landline.guard.keychain_get_status", return_value=("123", "ok")):
+        with patch("landline.runtime.guard.keychain_get_status", return_value=("123", "ok")):
             assert is_allowed(999) is False
 
     def test_fail_closed_empty_allowlist(self):
         """CRITICAL: empty allowlist must block everyone."""
-        with patch("landline.guard.keychain_get_status", return_value=(None, "absent")):
+        with patch("landline.runtime.guard.keychain_get_status", return_value=(None, "absent")):
             assert is_allowed(123) is False
 
     def test_fail_closed_empty_string(self):
-        with patch("landline.guard.keychain_get_status", return_value=("", "ok")):
+        with patch("landline.runtime.guard.keychain_get_status", return_value=("", "ok")):
             assert is_allowed(123) is False
 
     def test_int_and_string_chat_id(self):
-        with patch("landline.guard.keychain_get_status", return_value=("123456789", "ok")):
+        with patch("landline.runtime.guard.keychain_get_status", return_value=("123456789", "ok")):
             assert is_allowed(123456789) is True
             assert is_allowed("123456789") is True
 
@@ -84,7 +84,7 @@ class TestRejectMessageLoudMode:
     explicit-reply path so it stays functional."""
 
     def setup_method(self, method):
-        self._mode_patcher = patch("landline.guard.REJECTION_MODE", "reply")
+        self._mode_patcher = patch("landline.runtime.guard.REJECTION_MODE", "reply")
         self._mode_patcher.start()
 
     def teardown_method(self, method):
@@ -135,14 +135,14 @@ class TestRejectMessageSilentMode:
 
     def test_silent_rejection_sends_no_reply(self):
         """The core silent-mode contract: no outbound HTTP call."""
-        with patch("landline.guard.REJECTION_MODE", "silent"), \
+        with patch("landline.runtime.guard.REJECTION_MODE", "silent"), \
              patch("urllib.request.urlopen") as mock_open:
             reject_message("token", "12345")
         assert mock_open.called is False
 
     def test_silent_rejection_with_custom_text_still_silent(self):
         """The text= arg must NOT bypass silent mode."""
-        with patch("landline.guard.REJECTION_MODE", "silent"), \
+        with patch("landline.runtime.guard.REJECTION_MODE", "silent"), \
              patch("urllib.request.urlopen") as mock_open:
             reject_message("token", "12345", "Custom rejection")
         assert mock_open.called is False
@@ -153,7 +153,7 @@ class TestCacheBehavior:
         """A keychain change WITHIN the TTL is invisible — that's the cache's
         purpose. Documents the operator-visible behavior (60s lag for changes)."""
         with patch(
-            "landline.guard.keychain_get_status",
+            "landline.runtime.guard.keychain_get_status",
             side_effect=[("111", "ok"), ("222", "ok")],
         ) as mock_kc:
             first = allowed_chat_ids()
@@ -165,7 +165,7 @@ class TestCacheBehavior:
     def test_cache_refresh_picks_up_new_value(self):
         """After the TTL expires, the next call sees the updated keychain value."""
         with patch(
-            "landline.guard.keychain_get_status",
+            "landline.runtime.guard.keychain_get_status",
             side_effect=[("111", "ok"), ("222", "ok")],
         ):
             first = allowed_chat_ids()
@@ -181,7 +181,7 @@ class TestCacheBehavior:
         (locked after sleep/wake) would drop every message for the next 60s.
         Uses 'locked' status to also exercise the B5 locked-branch log path."""
         with patch(
-            "landline.guard.keychain_get_status",
+            "landline.runtime.guard.keychain_get_status",
             side_effect=[("111", "ok"), (None, "locked")],
         ):
             assert is_allowed("111") is True  # populates cache from "111"
@@ -193,7 +193,7 @@ class TestCacheBehavior:
         """If keychain_get_status fails BEFORE any successful read, there is no
         prior cache to preserve — fail closed (empty allowlist, deny everyone)."""
         with patch(
-            "landline.guard.keychain_get_status",
+            "landline.runtime.guard.keychain_get_status",
             return_value=(None, "absent"),
         ):
             assert is_allowed("111") is False
@@ -203,7 +203,7 @@ class TestCacheBehavior:
         """After a failed refresh, the cache timestamp should advance so we
         don't call `security` on every single message until the next TTL."""
         with patch(
-            "landline.guard.keychain_get_status",
+            "landline.runtime.guard.keychain_get_status",
             side_effect=[("111", "ok"), (None, "absent")],
         ) as mock_kc:
             allowed_chat_ids()  # populates cache
@@ -215,7 +215,7 @@ class TestCacheBehavior:
     def test_successful_refresh_replaces_cache(self):
         """A successful keychain read after a failure must update the cache."""
         with patch(
-            "landline.guard.keychain_get_status",
+            "landline.runtime.guard.keychain_get_status",
             side_effect=[("111", "ok"), (None, "absent"), ("999", "ok")],
         ):
             assert is_allowed("111") is True
@@ -231,7 +231,7 @@ class TestCacheBehavior:
         mentioning 'locked' and 'unlock login keychain' so the operator sees an
         actionable signal. Cache must still be preserved."""
         with patch(
-            "landline.guard.keychain_get_status",
+            "landline.runtime.guard.keychain_get_status",
             side_effect=[("111", "ok"), (None, "locked")],
         ):
             assert is_allowed("111") is True  # populate cache
@@ -246,7 +246,7 @@ class TestCacheBehavior:
         actionable signal). Catches a builder that hardcodes 'locked' for
         every failure mode."""
         with patch(
-            "landline.guard.keychain_get_status",
+            "landline.runtime.guard.keychain_get_status",
             side_effect=[("111", "ok"), (None, "absent")],
         ):
             assert is_allowed("111") is True
@@ -260,7 +260,7 @@ class TestCacheBehavior:
         """B5 - after a locked failure, the cache timestamp advances so we
         don't hammer the keychain. Same throttle as the existing error path."""
         with patch(
-            "landline.guard.keychain_get_status",
+            "landline.runtime.guard.keychain_get_status",
             side_effect=[("111", "ok"), (None, "locked")],
         ) as mock_kc:
             allowed_chat_ids()  # populates cache
@@ -273,7 +273,7 @@ class TestCacheBehavior:
         """B5 variant of the resilience contract - locked path specifically
         must preserve the prior cache (not invert to empty)."""
         with patch(
-            "landline.guard.keychain_get_status",
+            "landline.runtime.guard.keychain_get_status",
             side_effect=[("123,456", "ok"), (None, "locked")],
         ):
             assert is_allowed("123") is True

@@ -28,7 +28,14 @@ dependencies = []
 Homepage = "https://github.com/Maninae/claude-landline"
 
 [tool.setuptools]
-packages = ["landline"]
+packages = [
+    "landline",
+    "landline.orchestrator",
+    "landline.claude",
+    "landline.telegram",
+    "landline.media",
+    "landline.runtime",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["landline/tests"]

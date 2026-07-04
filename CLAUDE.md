@@ -21,7 +21,7 @@ here to install and run Landline, read [`README.md`](README.md) and
 
 Never use 3.10+ syntax. The daemon starts fine if a file imported before the
 edit, then crashes on next restart — sometimes hours later when nobody's
-watching. **Always compile-check every `landline/*.py` after editing.**
+watching. **Always compile-check every `landline/**/*.py` after editing.**
 
 | Forbidden (3.10+) | Use instead |
 |-------------------|-------------|
@@ -34,7 +34,7 @@ Compile-check:
 
 ```bash
 cd claude-landline && /usr/bin/python3 -c \
-  "import py_compile, glob; [py_compile.compile(f, doraise=True) for f in glob.glob('landline/*.py')]; print('OK')"
+  "import py_compile, glob; [py_compile.compile(f, doraise=True) for f in glob.glob('landline/**/*.py', recursive=True)]; print('OK')"
 ```
 
 ## Architecture
@@ -463,7 +463,7 @@ daemon crashes on restart and is unresponsive for hours.
 
 The script:
 
-1. Compile-checks every `landline/*.py`.
+1. Compile-checks every `landline/**/*.py`.
 2. Imports `TelegramDaemon` to catch import-time errors.
 3. Runs the full pytest suite (unless `--skip-tests`).
 4. Writes `<workspace>/cache/restart-continuation.txt` (default or your

@@ -12,7 +12,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from landline.poller import BackgroundPoller, _telegram_api_get_updates
+from landline.telegram.poller import BackgroundPoller, _telegram_api_get_updates
 
 
 class TestTelegramApiGetUpdates:
@@ -142,7 +142,7 @@ class TestPollerDedup:
             bp._stop.set()
             return {"ok": True, "result": []}
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates):
             bp._poll_loop()
 
         items = bp.drain()
@@ -169,7 +169,7 @@ class TestPollerDedup:
             bp._stop.set()
             return {"ok": True, "result": []}
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates):
             bp._poll_loop()
 
         assert received == [7]
@@ -186,7 +186,7 @@ class TestPollerDedup:
             bp._stop.set()
             return {"ok": True, "result": []}
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates):
             bp._poll_loop()
 
         assert observed_offsets == [101]
@@ -216,8 +216,8 @@ class TestPollerErrorHandling:
 
         bp._stop.wait.side_effect = fake_wait
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-             patch("landline.poller.send_network_alert"):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert"):
             bp._poll_loop()
 
         assert wait_durations[0] == POLL_ERROR_BACKOFF_BASE
@@ -237,8 +237,8 @@ class TestPollerErrorHandling:
         bp._stop.is_set.return_value = False
         bp._stop.wait.return_value = True  # simulate stop signalled during sleep
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-             patch("landline.poller.send_network_alert"):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert"):
             bp._poll_loop()  # must return promptly, no infinite loop
 
         # Exactly one failure observed; wait was called once and returned True.
@@ -269,8 +269,8 @@ class TestPollerErrorHandling:
 
         bp._stop.wait.side_effect = fake_wait
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-             patch("landline.poller.send_network_alert"):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert"):
             bp._poll_loop()
 
         # Two failures before recovery: BASE, then 2x BASE.
@@ -314,10 +314,10 @@ class TestPollerErrorHandling:
         mock_time = MagicMock()
         mock_time.time.side_effect = lambda: next(time_values)
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-             patch("landline.poller.send_network_alert") as mock_alert, \
-             patch("landline.poller.log"), \
-             patch("landline.poller.time", mock_time):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert") as mock_alert, \
+             patch("landline.telegram.poller.log"), \
+             patch("landline.telegram.poller.time", mock_time):
             bp._poll_loop()
 
         assert mock_alert.call_count == 1
@@ -344,7 +344,7 @@ class TestOnUpdateQueuedCallback:
             bp._stop.set()
             return {"ok": True, "result": []}
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates):
             bp._poll_loop()
 
         assert len(received) == 2
@@ -368,8 +368,8 @@ class TestOnUpdateQueuedCallback:
             bp._stop.set()
             return {"ok": True, "result": []}
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-             patch("landline.poller.send_network_alert") as mock_alert:
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert") as mock_alert:
             bp._poll_loop()
 
         # Update was still queued despite the callback raising.
@@ -392,7 +392,7 @@ class TestOnUpdateQueuedCallback:
             bp._stop.set()
             return {"ok": True, "result": []}
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates):
             bp._poll_loop()
 
         items = bp.drain()
@@ -424,7 +424,7 @@ class TestOnUpdateQueuedCallback:
             bp._stop.set()
             return {"ok": True, "result": []}
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates):
             bp._poll_loop()
 
         # qsize at the moment of the callback equals the running count of puts.
@@ -435,7 +435,7 @@ class TestPollerLifecycle:
     def test_start_and_stop(self):
         bp = BackgroundPoller("token", 0)
         response = {"ok": True, "result": []}
-        with patch("landline.poller._telegram_api_get_updates", return_value=response):
+        with patch("landline.telegram.poller._telegram_api_get_updates", return_value=response):
             bp.start()
             time.sleep(0.1)
             bp.stop(join_timeout=2)
@@ -454,7 +454,7 @@ class TestDedupSetCapped:
     def test_eviction_keeps_set_within_cap(self):
         """When the cap is exceeded, oldest ids are evicted and length stays
         at exactly MAX_DEDUP_IDS."""
-        with patch("landline.poller.MAX_DEDUP_IDS", 5):
+        with patch("landline.telegram.poller.MAX_DEDUP_IDS", 5):
             bp = BackgroundPoller("token", 0)
             updates = [
                 {"update_id": i, "message": {"text": "x"}}
@@ -469,7 +469,7 @@ class TestDedupSetCapped:
                 bp._stop.set()
                 return {"ok": True, "result": []}
 
-            with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates):
+            with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates):
                 bp._poll_loop()
 
             # Cap holds; only the 5 most recent ids survive.
@@ -481,7 +481,7 @@ class TestDedupSetCapped:
 
     def test_dedup_still_works_within_window(self):
         """Within the recent window, dedup continues to suppress re-queues."""
-        with patch("landline.poller.MAX_DEDUP_IDS", 5):
+        with patch("landline.telegram.poller.MAX_DEDUP_IDS", 5):
             bp = BackgroundPoller("token", 0)
             update = {"update_id": 42, "message": {"text": "hi"}}
             call_count = [0]
@@ -494,7 +494,7 @@ class TestDedupSetCapped:
                 bp._stop.set()
                 return {"ok": True, "result": []}
 
-            with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates):
+            with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates):
                 bp._poll_loop()
 
             items = bp.drain()
@@ -505,7 +505,7 @@ class TestDedupSetCapped:
         """An id evicted by the LRU cap is no longer tracked, so if Telegram
         somehow re-delivers it (it shouldn't past the cursor, but the test
         confirms the eviction took effect), the dedup gate admits it again."""
-        with patch("landline.poller.MAX_DEDUP_IDS", 3):
+        with patch("landline.telegram.poller.MAX_DEDUP_IDS", 3):
             bp = BackgroundPoller("token", 0)
             first_batch = [
                 {"update_id": 1, "message": {"text": "a"}},
@@ -526,7 +526,7 @@ class TestDedupSetCapped:
                 bp._stop.set()
                 return {"ok": True, "result": []}
 
-            with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates):
+            with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates):
                 bp._poll_loop()
 
             queued_ids = [u["update_id"] for u in bp.drain()]
@@ -564,10 +564,10 @@ class TestNetworkVsApiErrorClassification:
         mock_time = MagicMock()
         mock_time.time.side_effect = lambda: next(time_values)
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-             patch("landline.poller.send_network_alert") as mock_alert, \
-             patch("landline.poller.log"), \
-             patch("landline.poller.time", mock_time):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert") as mock_alert, \
+             patch("landline.telegram.poller.log"), \
+             patch("landline.telegram.poller.time", mock_time):
             bp._poll_loop()
 
         assert mock_alert.call_count == 1
@@ -589,9 +589,9 @@ class TestNetworkVsApiErrorClassification:
 
         # No outage timing math should run on the RuntimeError path, but we
         # still wrap time in case some other call path touches it.
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-             patch("landline.poller.send_network_alert") as mock_alert, \
-             patch("landline.poller.log") as mock_log:
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert") as mock_alert, \
+             patch("landline.telegram.poller.log") as mock_log:
             bp._poll_loop()
 
         mock_alert.assert_not_called()
@@ -616,9 +616,9 @@ class TestNetworkVsApiErrorClassification:
         bp._stop.is_set.side_effect = [False, False, True]
         bp._stop.wait.return_value = False
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-             patch("landline.poller.send_network_alert") as mock_alert, \
-             patch("landline.poller.log") as mock_log:
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert") as mock_alert, \
+             patch("landline.telegram.poller.log") as mock_log:
             bp._poll_loop()
 
         mock_alert.assert_not_called()
@@ -648,9 +648,9 @@ class TestNetworkVsApiErrorClassification:
 
         bp._stop.wait.side_effect = fake_wait
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-             patch("landline.poller.send_network_alert"), \
-             patch("landline.poller.log"):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert"), \
+             patch("landline.telegram.poller.log"):
             bp._poll_loop()
 
         # All waits use the fixed short backoff — no doubling.
@@ -679,9 +679,9 @@ class TestApiErrorLogThrottle:
         bp._stop.is_set.side_effect = [False] * 13 + [True]
         bp._stop.wait.return_value = False
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-             patch("landline.poller.send_network_alert"), \
-             patch("landline.poller.log") as mock_log:
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert"), \
+             patch("landline.telegram.poller.log") as mock_log:
             bp._poll_loop()
 
         api_lines = [
@@ -706,9 +706,9 @@ class TestApiErrorLogThrottle:
         bp._stop.is_set.side_effect = [False] * 13 + [True]
         bp._stop.wait.return_value = False
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-             patch("landline.poller.send_network_alert"), \
-             patch("landline.poller.log") as mock_log:
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert"), \
+             patch("landline.telegram.poller.log") as mock_log:
             bp._poll_loop()
 
         unexpected_lines = [
@@ -740,9 +740,9 @@ class TestApiErrorLogThrottle:
         bp._stop.is_set.side_effect = [False, False, False, False, True]
         bp._stop.wait.return_value = False
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-             patch("landline.poller.send_network_alert"), \
-             patch("landline.poller.log") as mock_log:
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert"), \
+             patch("landline.telegram.poller.log") as mock_log:
             bp._poll_loop()
 
         api_lines = [
@@ -771,9 +771,9 @@ class TestApiErrorLogThrottle:
         bp._stop.is_set.side_effect = [False] * 12 + [True]
         bp._stop.wait.return_value = False
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-             patch("landline.poller.send_network_alert"), \
-             patch("landline.poller.log") as mock_log:
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert"), \
+             patch("landline.telegram.poller.log") as mock_log:
             bp._poll_loop()
 
         api_lines = [
@@ -793,7 +793,7 @@ class TestDedupCapLogged:
 
     def test_dedup_cap_logged_once_on_first_hit(self):
         """One batch of 10 unique ids past cap -> exactly one cap-reached log line."""
-        with patch("landline.poller.MAX_DEDUP_IDS", 3):
+        with patch("landline.telegram.poller.MAX_DEDUP_IDS", 3):
             bp = BackgroundPoller("token", 0)
             updates = [
                 {"update_id": i, "message": {"text": "x"}}
@@ -808,8 +808,8 @@ class TestDedupCapLogged:
                 bp._stop.set()
                 return {"ok": True, "result": []}
 
-            with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-                 patch("landline.poller.log") as mock_log:
+            with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+                 patch("landline.telegram.poller.log") as mock_log:
                 bp._poll_loop()
 
             cap_lines = [
@@ -823,7 +823,7 @@ class TestDedupCapLogged:
 
     def test_dedup_cap_does_not_log_before_reach(self):
         """A batch below the cap -> zero cap-reached log lines and latch stays False."""
-        with patch("landline.poller.MAX_DEDUP_IDS", 5):
+        with patch("landline.telegram.poller.MAX_DEDUP_IDS", 5):
             bp = BackgroundPoller("token", 0)
             updates = [
                 {"update_id": i, "message": {"text": "x"}}
@@ -838,8 +838,8 @@ class TestDedupCapLogged:
                 bp._stop.set()
                 return {"ok": True, "result": []}
 
-            with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-                 patch("landline.poller.log") as mock_log:
+            with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+                 patch("landline.telegram.poller.log") as mock_log:
                 bp._poll_loop()
 
             cap_lines = [
@@ -870,15 +870,15 @@ class TestDedupCapLogged:
                 bp._stop.set()
                 return {"ok": True, "result": []}
 
-            with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-                 patch("landline.poller.log") as mock_log:
+            with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+                 patch("landline.telegram.poller.log") as mock_log:
                 bp._poll_loop()
             cap_lines_total.extend(
                 str(c.args[0]) for c in mock_log.call_args_list
                 if "Dedup set reached" in str(c.args[0])
             )
 
-        with patch("landline.poller.MAX_DEDUP_IDS", 3):
+        with patch("landline.telegram.poller.MAX_DEDUP_IDS", 3):
             run_to_cap()
             run_to_cap()
         # Both fresh pollers re-armed and logged on first cap-hit.
@@ -887,7 +887,7 @@ class TestDedupCapLogged:
     def test_dedup_cap_latch_clears_after_set_shrinks_and_resurges(self):
         """Storm -> log #1. discard ids + successful empty poll resets latch.
         Second storm -> log #2. Verifies the A3 reset path on successful poll."""
-        with patch("landline.poller.MAX_DEDUP_IDS", 3):
+        with patch("landline.telegram.poller.MAX_DEDUP_IDS", 3):
             bp = BackgroundPoller("token", 0)
             batch_a = [
                 {"update_id": i, "message": {"text": "x"}}
@@ -913,8 +913,8 @@ class TestDedupCapLogged:
                 bp._stop.set()
                 return {"ok": True, "result": []}
 
-            with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-                 patch("landline.poller.log") as mock_log:
+            with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+                 patch("landline.telegram.poller.log") as mock_log:
                 bp._poll_loop()
 
             cap_lines = [
@@ -980,7 +980,7 @@ class TestLastSuccessfulPoll:
             bp._stop.set()
             return {"ok": True, "result": []}
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates):
             bp._poll_loop()
 
         assert call_count[0] == 1
@@ -996,7 +996,7 @@ class TestLastSuccessfulPoll:
             bp._stop.set()
             return {"ok": True, "result": [{"update_id": 1, "message": {"text": "hi"}}]}
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates):
             bp._poll_loop()
 
         assert time.time() - bp.last_successful_poll() < 5.0
@@ -1018,8 +1018,8 @@ class TestLastSuccessfulPoll:
         bp._stop.is_set.side_effect = [False, False, True]
         bp._stop.wait.return_value = False
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
-             patch("landline.poller.send_network_alert"):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert"):
             bp._poll_loop()
 
         # Unchanged — network errors bypass the successful-poll update.
@@ -1039,7 +1039,7 @@ class TestLastSuccessfulPoll:
         bp._stop.is_set.side_effect = [False, True]
         bp._stop.wait.return_value = False
 
-        with patch("landline.poller._telegram_api_get_updates", side_effect=fake_get_updates):
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates):
             bp._poll_loop()
 
         assert bp.last_successful_poll() == stale_ts
@@ -1073,7 +1073,7 @@ class TestSnapshotAndLoadDedupIds:
     def test_load_dedup_respects_max_dedup_ids_cap(self):
         """Loading more than MAX_DEDUP_IDS must evict oldest entries so the
         cap semantic is not accidentally widened during a replacement swap."""
-        with patch("landline.poller.MAX_DEDUP_IDS", 3):
+        with patch("landline.telegram.poller.MAX_DEDUP_IDS", 3):
             dst = BackgroundPoller("token", 0)
             dst.load_dedup_ids([1, 2, 3, 4, 5])
             assert len(dst._already_queued_update_ids) == 3

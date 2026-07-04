@@ -1,10 +1,10 @@
-"""Tests for landline.security — macOS Keychain access."""
+"""Tests for landline.runtime.security — macOS Keychain access."""
 
 import subprocess
 from unittest.mock import MagicMock, patch
 
-from landline.security import keychain_get as _real_keychain_get
-from landline.security import keychain_get_status as _real_keychain_get_status
+from landline.runtime.security import keychain_get as _real_keychain_get
+from landline.runtime.security import keychain_get_status as _real_keychain_get_status
 
 
 class TestKeychainGetRaw:
@@ -91,12 +91,12 @@ class TestKeychainGetMocked:
     """Test via the conftest autouse mock — verifies fixture wiring."""
 
     def test_known_services(self):
-        from landline.security import keychain_get
+        from landline.runtime.security import keychain_get
         assert keychain_get("telegram-bot-token") is not None
         assert keychain_get("telegram-chat-id") == "123456789"
 
     def test_unknown_service_returns_none(self):
-        from landline.security import keychain_get
+        from landline.runtime.security import keychain_get
         assert keychain_get("nonexistent") is None
 
 

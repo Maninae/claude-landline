@@ -1,4 +1,4 @@
-"""Tests for landline.voice_transcribe — Cluster 2 (whisper wrapper).
+"""Tests for landline.media.transcribe — Cluster 2 (whisper wrapper).
 
 Covers the subprocess contract, timeout non-raising, cleanup, and the
 privacy invariant that transcript text NEVER reaches the daemon log.
@@ -15,7 +15,7 @@ from landline.config import (
     VOICE_TRANSCRIBE_MAX_TRANSCRIPT_CHARS,
     WHISPER_BIN,
 )
-from landline.voice_transcribe import TranscribeResult, transcribe_file
+from landline.media.transcribe import TranscribeResult, transcribe_file
 
 
 def _make_completed(returncode=0, stdout="", stderr=""):
@@ -52,12 +52,12 @@ def _prime_output_txt(text: str):
 class TestTranscribeFileSuccess:
     def test_returns_ok_with_transcript(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "landline.voice_transcribe.TELEGRAM_VOICE_DIR", tmp_path,
+            "landline.media.transcribe.TELEGRAM_VOICE_DIR", tmp_path,
         )
         audio = tmp_path / "audio.ogg"
         audio.write_bytes(b"fake-audio")
         with patch(
-            "landline.voice_transcribe.subprocess.run",
+            "landline.media.transcribe.subprocess.run",
             side_effect=_prime_output_txt("hello world"),
         ):
             result = transcribe_file(
@@ -72,7 +72,7 @@ class TestTranscribeFileSuccess:
         """Assert the exact CLI shape whisper is invoked with — flags
         drift silently otherwise."""
         monkeypatch.setattr(
-            "landline.voice_transcribe.TELEGRAM_VOICE_DIR", tmp_path,
+            "landline.media.transcribe.TELEGRAM_VOICE_DIR", tmp_path,
         )
         audio = tmp_path / "audio.ogg"
         audio.write_bytes(b"fake")
@@ -91,7 +91,7 @@ class TestTranscribeFileSuccess:
             return _make_completed(returncode=0)
 
         with patch(
-            "landline.voice_transcribe.subprocess.run", side_effect=_capture,
+            "landline.media.transcribe.subprocess.run", side_effect=_capture,
         ):
             transcribe_file(
                 audio, model="base", model_dir="/tmp/models",
@@ -119,13 +119,13 @@ class TestTranscribeFileSuccess:
 
     def test_transcript_truncated_when_over_cap(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "landline.voice_transcribe.TELEGRAM_VOICE_DIR", tmp_path,
+            "landline.media.transcribe.TELEGRAM_VOICE_DIR", tmp_path,
         )
         audio = tmp_path / "audio.ogg"
         audio.write_bytes(b"x")
         huge = "a" * (VOICE_TRANSCRIBE_MAX_TRANSCRIPT_CHARS + 500)
         with patch(
-            "landline.voice_transcribe.subprocess.run",
+            "landline.media.transcribe.subprocess.run",
             side_effect=_prime_output_txt(huge),
         ):
             result = transcribe_file(
@@ -142,12 +142,12 @@ class TestTranscribeFileFailure:
         subprocess.TimeoutExpired the wrapper MUST return TranscribeResult
         rather than raising."""
         monkeypatch.setattr(
-            "landline.voice_transcribe.TELEGRAM_VOICE_DIR", tmp_path,
+            "landline.media.transcribe.TELEGRAM_VOICE_DIR", tmp_path,
         )
         audio = tmp_path / "audio.ogg"
         audio.write_bytes(b"x")
         with patch(
-            "landline.voice_transcribe.subprocess.run",
+            "landline.media.transcribe.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd="whisper", timeout=90),
         ):
             result = transcribe_file(
@@ -162,12 +162,12 @@ class TestTranscribeFileFailure:
         self, tmp_path, monkeypatch,
     ):
         monkeypatch.setattr(
-            "landline.voice_transcribe.TELEGRAM_VOICE_DIR", tmp_path,
+            "landline.media.transcribe.TELEGRAM_VOICE_DIR", tmp_path,
         )
         audio = tmp_path / "audio.ogg"
         audio.write_bytes(b"x")
         with patch(
-            "landline.voice_transcribe.subprocess.run",
+            "landline.media.transcribe.subprocess.run",
             return_value=_make_completed(
                 returncode=1, stderr="ffmpeg missing",
             ),
@@ -184,12 +184,12 @@ class TestTranscribeFileFailure:
         self, tmp_path, monkeypatch,
     ):
         monkeypatch.setattr(
-            "landline.voice_transcribe.TELEGRAM_VOICE_DIR", tmp_path,
+            "landline.media.transcribe.TELEGRAM_VOICE_DIR", tmp_path,
         )
         audio = tmp_path / "audio.ogg"
         audio.write_bytes(b"x")
         with patch(
-            "landline.voice_transcribe.subprocess.run",
+            "landline.media.transcribe.subprocess.run",
             side_effect=FileNotFoundError("no such file"),
         ):
             result = transcribe_file(
@@ -203,12 +203,12 @@ class TestTranscribeFileFailure:
         self, tmp_path, monkeypatch,
     ):
         monkeypatch.setattr(
-            "landline.voice_transcribe.TELEGRAM_VOICE_DIR", tmp_path,
+            "landline.media.transcribe.TELEGRAM_VOICE_DIR", tmp_path,
         )
         audio = tmp_path / "audio.ogg"
         audio.write_bytes(b"x")
         with patch(
-            "landline.voice_transcribe.subprocess.run",
+            "landline.media.transcribe.subprocess.run",
             side_effect=_prime_output_txt(""),
         ):
             result = transcribe_file(
@@ -225,17 +225,17 @@ class TestPrivacyDiscipline:
 
     def test_transcript_never_appears_in_log(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "landline.voice_transcribe.TELEGRAM_VOICE_DIR", tmp_path,
+            "landline.media.transcribe.TELEGRAM_VOICE_DIR", tmp_path,
         )
         audio = tmp_path / "audio.ogg"
         audio.write_bytes(b"x")
         secret = "PRIVATE_TRANSCRIPT_speaker_says_this_particular_thing"
         log_messages = []
         with patch(
-            "landline.voice_transcribe.log",
+            "landline.media.transcribe.log",
             side_effect=lambda m: log_messages.append(m),
         ), patch(
-            "landline.voice_transcribe.subprocess.run",
+            "landline.media.transcribe.subprocess.run",
             side_effect=_prime_output_txt(secret),
         ):
             result = transcribe_file(
@@ -262,12 +262,12 @@ class TestCleanup:
 
     def test_success_cleans_tmpdir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "landline.voice_transcribe.TELEGRAM_VOICE_DIR", tmp_path,
+            "landline.media.transcribe.TELEGRAM_VOICE_DIR", tmp_path,
         )
         audio = tmp_path / "audio.ogg"
         audio.write_bytes(b"x")
         with patch(
-            "landline.voice_transcribe.subprocess.run",
+            "landline.media.transcribe.subprocess.run",
             side_effect=_prime_output_txt("clean me up"),
         ):
             transcribe_file(
@@ -278,12 +278,12 @@ class TestCleanup:
 
     def test_timeout_cleans_tmpdir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "landline.voice_transcribe.TELEGRAM_VOICE_DIR", tmp_path,
+            "landline.media.transcribe.TELEGRAM_VOICE_DIR", tmp_path,
         )
         audio = tmp_path / "audio.ogg"
         audio.write_bytes(b"x")
         with patch(
-            "landline.voice_transcribe.subprocess.run",
+            "landline.media.transcribe.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd="whisper", timeout=90),
         ):
             transcribe_file(
@@ -294,12 +294,12 @@ class TestCleanup:
 
     def test_nonzero_exit_cleans_tmpdir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "landline.voice_transcribe.TELEGRAM_VOICE_DIR", tmp_path,
+            "landline.media.transcribe.TELEGRAM_VOICE_DIR", tmp_path,
         )
         audio = tmp_path / "audio.ogg"
         audio.write_bytes(b"x")
         with patch(
-            "landline.voice_transcribe.subprocess.run",
+            "landline.media.transcribe.subprocess.run",
             return_value=_make_completed(returncode=2, stderr="boom"),
         ):
             transcribe_file(
@@ -346,7 +346,7 @@ class TestPauseInterrupt:
         self, tmp_path, monkeypatch,
     ):
         monkeypatch.setattr(
-            "landline.voice_transcribe.TELEGRAM_VOICE_DIR", tmp_path,
+            "landline.media.transcribe.TELEGRAM_VOICE_DIR", tmp_path,
         )
         audio = tmp_path / "audio.ogg"
         audio.write_bytes(b"x")
@@ -367,7 +367,7 @@ class TestPauseInterrupt:
         pause_flag = _PauseFlag()
 
         with patch(
-            "landline.voice_transcribe.subprocess.Popen",
+            "landline.media.transcribe.subprocess.Popen",
             return_value=fake_proc,
         ):
             result = transcribe_file(
@@ -389,7 +389,7 @@ class TestPauseInterrupt:
         completes normally and delivers a transcript — proving the
         pause branch doesn't false-trigger on quiescent flags."""
         monkeypatch.setattr(
-            "landline.voice_transcribe.TELEGRAM_VOICE_DIR", tmp_path,
+            "landline.media.transcribe.TELEGRAM_VOICE_DIR", tmp_path,
         )
         audio = tmp_path / "audio.ogg"
         audio.write_bytes(b"x")
@@ -426,7 +426,7 @@ class TestPauseInterrupt:
                 return False
 
         with patch(
-            "landline.voice_transcribe.subprocess.Popen",
+            "landline.media.transcribe.subprocess.Popen",
             return_value=fake_proc,
         ):
             result = transcribe_file(
@@ -447,14 +447,14 @@ class TestPauseInterrupt:
         without a daemon (and every existing test in this file) keep
         working."""
         monkeypatch.setattr(
-            "landline.voice_transcribe.TELEGRAM_VOICE_DIR", tmp_path,
+            "landline.media.transcribe.TELEGRAM_VOICE_DIR", tmp_path,
         )
         audio = tmp_path / "audio.ogg"
         audio.write_bytes(b"x")
         with patch(
-            "landline.voice_transcribe.subprocess.Popen",
+            "landline.media.transcribe.subprocess.Popen",
         ) as mock_popen, patch(
-            "landline.voice_transcribe.subprocess.run",
+            "landline.media.transcribe.subprocess.run",
             side_effect=_prime_output_txt("no pause path"),
         ) as mock_run:
             result = transcribe_file(

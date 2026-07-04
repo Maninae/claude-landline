@@ -498,7 +498,7 @@ class TestTryEnqueueOrSend:
         return (MagicMock(), MagicMock())
 
     def test_uses_queue_when_live_sender_exists(self):
-        from landline.sender_registry import try_enqueue_or_send
+        from landline.claude.registry import try_enqueue_or_send
         text_fn, status_fn = self._fns()
         s = _get_or_create_sender("chatA", "tok", text_fn, status_fn)
         direct = MagicMock()
@@ -510,13 +510,13 @@ class TestTryEnqueueOrSend:
         direct.assert_not_called()
 
     def test_falls_back_to_direct_fn_when_no_sender(self):
-        from landline.sender_registry import try_enqueue_or_send
+        from landline.claude.registry import try_enqueue_or_send
         direct = MagicMock()
         try_enqueue_or_send("ghost-chat", text="y", direct_fn=direct)
         direct.assert_called_once_with("y")
 
     def test_falls_back_when_sender_closed(self):
-        from landline.sender_registry import try_enqueue_or_send
+        from landline.claude.registry import try_enqueue_or_send
         text_fn, status_fn = self._fns()
         s = _get_or_create_sender("chatA", "tok", text_fn, status_fn)
         s.close(timeout=2.0)
@@ -525,7 +525,7 @@ class TestTryEnqueueOrSend:
         direct.assert_called_once_with("z")
 
     def test_rejects_both_or_neither_via_validation(self):
-        from landline.sender_registry import try_enqueue_or_send
+        from landline.claude.registry import try_enqueue_or_send
         direct = MagicMock()
         with pytest.raises(ValueError):
             try_enqueue_or_send("chatA", direct_fn=direct)
@@ -534,13 +534,13 @@ class TestTryEnqueueOrSend:
         direct.assert_not_called()
 
     def test_direct_fn_receives_html_body_unchanged(self):
-        from landline.sender_registry import try_enqueue_or_send
+        from landline.claude.registry import try_enqueue_or_send
         direct = MagicMock()
         try_enqueue_or_send("ghost-chat", html="<i>(Paused.)</i>", direct_fn=direct)
         direct.assert_called_once_with("<i>(Paused.)</i>")
 
     def test_direct_fn_receives_text_body_unchanged(self):
-        from landline.sender_registry import try_enqueue_or_send
+        from landline.claude.registry import try_enqueue_or_send
         direct = MagicMock()
         try_enqueue_or_send("ghost-chat", text="heads up", direct_fn=direct)
         direct.assert_called_once_with("heads up")
@@ -701,8 +701,8 @@ class TestRunClaudeStreamingLifecycle:
         fake_pc = self._fake_pc_yielding([result_event])
 
         with patch("landline.claude._get_persistent_claude", return_value=fake_pc), \
-             patch("landline.client.send_response"), \
-             patch("landline.client.send_html"):
+             patch("landline.telegram.send_response"), \
+             patch("landline.telegram.send_html"):
             run_claude_streaming(
                 token="tok", chat_id="chatLive", message="hi",
                 session_id="sess-1", is_new=False,
@@ -1463,11 +1463,11 @@ class TestStreamSenderEmitFailureTracking:
         """3 consecutive text-emit failures -> exactly one fallback notice.
 
         Cluster 1 M7: the notice now routes through
-        ``landline.notifications.send_health_alert`` (async iMessage), NOT
+        ``landline.runtime.notifications.send_health_alert`` (async iMessage), NOT
         the failing text transport. See ``_record_emit_failure``.
         """
         threshold = StreamSender._EMIT_FAILURE_THRESHOLD
-        with patch("landline.notifications.send_health_alert") as mock_alert:
+        with patch("landline.runtime.notifications.send_health_alert") as mock_alert:
             # Raise forever — verifying the fallback is gated and can't
             # loop even when nothing works.
             sender = self._make_recorded_sender(raise_until=10_000)
@@ -1498,7 +1498,7 @@ class TestStreamSenderEmitFailureTracking:
         """A successful emit between failures resets the counter, so the
         threshold is not crossed and no health alert fires."""
         threshold = StreamSender._EMIT_FAILURE_THRESHOLD
-        with patch("landline.notifications.send_health_alert") as mock_alert:
+        with patch("landline.runtime.notifications.send_health_alert") as mock_alert:
             # Fail the first emit, then succeed forever after.
             sender = self._make_recorded_sender(raise_until=1)
             # First payload: fails (count=1)
@@ -1522,7 +1522,7 @@ class TestStreamSenderEmitFailureTracking:
     def test_fallback_sent_only_once_with_persistent_failures(self):
         """Even if failures continue past the threshold, only one notice."""
         threshold = StreamSender._EMIT_FAILURE_THRESHOLD
-        with patch("landline.notifications.send_health_alert") as mock_alert:
+        with patch("landline.runtime.notifications.send_health_alert") as mock_alert:
             sender = self._make_recorded_sender(raise_until=10_000)
             for i in range(threshold + 5):
                 sender.text("payload-%d" % i)
@@ -1546,7 +1546,7 @@ class TestStreamSenderEmitFailureTracking:
             calls.append(("status", text))
             raise RuntimeError("status 5xx")
 
-        with patch("landline.notifications.send_health_alert") as mock_alert:
+        with patch("landline.runtime.notifications.send_health_alert") as mock_alert:
             sender = StreamSender(
                 "token", "123",
                 text_send_fn=text_fn,
@@ -1570,7 +1570,7 @@ class TestStreamSenderEmitFailureTracking:
         the "some messages failed to deliver" alert — through the same
         callable that had just failed 3 times in a row, so the alert
         reliably never landed. The fix routes it to
-        ``landline.notifications.send_health_alert`` (async iMessage), which
+        ``landline.runtime.notifications.send_health_alert`` (async iMessage), which
         is independent of the Telegram transport.
         """
         threshold = StreamSender._EMIT_FAILURE_THRESHOLD
@@ -1584,7 +1584,7 @@ class TestStreamSenderEmitFailureTracking:
         status_fn = MagicMock()
 
         chat_id = "chat-m7-regress"
-        with patch("landline.notifications.send_health_alert") as mock_alert:
+        with patch("landline.runtime.notifications.send_health_alert") as mock_alert:
             sender = StreamSender(
                 "token", chat_id,
                 text_send_fn=text_fn,
@@ -1694,7 +1694,7 @@ class TestF1EventWaitResponsiveness:
         watchdog's done.wait must wake immediately rather than spinning a
         500 ms time.sleep. Reverting done.wait(0.5) to time.sleep(0.5)
         makes this exceed the 100 ms budget."""
-        from landline.streaming import run_claude_streaming as _rcs
+        from landline.claude.streaming import run_claude_streaming as _rcs
 
         result_event = json.dumps(
             {"type": "result", "result": "ok", "session_id": "sess-1"}
@@ -1763,7 +1763,7 @@ class TestF1EventWaitResponsiveness:
         contract) and ``typing_active`` is deleted. A builder who renames
         either fails downstream patching expectations."""
         import inspect
-        from landline import streaming as _s
+        from landline.claude import streaming as _s
         src = inspect.getsource(_s.run_claude_streaming)
         assert "typing_done" in src, "expected ``typing_done`` Event in streaming"
         assert "typing_active" not in src, (
@@ -1777,8 +1777,8 @@ class TestF1EventWaitResponsiveness:
         """With a PauseFlag wired, calling pf.request_pause() from a test
         thread wakes the watchdog within < 100 ms (instead of up to 500 ms).
         Reverts of the pause-wake helper / persistent waiter exceed budget."""
-        from landline.streaming import run_claude_streaming as _rcs
-        from landline.pause_flag import PauseFlag
+        from landline.claude.streaming import run_claude_streaming as _rcs
+        from landline.claude.pause_flag import PauseFlag
 
         # A stdout iterator that blocks; the watchdog must interrupt via
         # the pause path, not via natural stream-end.
@@ -1847,7 +1847,7 @@ class TestF1EventWaitResponsiveness:
         """clear() must clear the internal Event so a subsequent generation
         does not see a spurious wake. Reverting _event.clear() in clear()
         makes the second-generation wait(0.01) spuriously return True."""
-        from landline.pause_flag import PauseFlag
+        from landline.claude.pause_flag import PauseFlag
 
         pf = PauseFlag()
         pf.new_call()           # gen=1
@@ -1866,7 +1866,7 @@ class TestF1EventWaitResponsiveness:
         """Stale Event state from a previous generation is harmless — the
         generation guard inside interrupt_check returns False. Mirrors the
         dispatcher's closure pattern (claude_dispatch.py:427-428)."""
-        from landline.pause_flag import PauseFlag
+        from landline.claude.pause_flag import PauseFlag
 
         pf = PauseFlag()
         pf.new_call()                       # gen=1
@@ -1889,7 +1889,7 @@ class TestF1EventWaitResponsiveness:
     def test_request_pause_sets_event(self):
         """Sanity test for PauseFlag's new contract — request_pause() must
         flip the internal Event so waiters wake."""
-        from landline.pause_flag import PauseFlag
+        from landline.claude.pause_flag import PauseFlag
 
         pf = PauseFlag()
         pf.new_call()
@@ -1901,7 +1901,7 @@ class TestF1EventWaitResponsiveness:
     def test_clear_resets_event(self):
         """Sanity test for PauseFlag's new contract — clear() must reset
         the internal Event so subsequent waiters block again."""
-        from landline.pause_flag import PauseFlag
+        from landline.claude.pause_flag import PauseFlag
 
         pf = PauseFlag()
         pf.new_call()
@@ -1915,10 +1915,10 @@ class TestF1EventWaitResponsiveness:
         """Wire-up regression — ClaudeDispatcher must pass ``pause_flag=pf``
         to run_claude_streaming alongside ``interrupt_check``. Without this,
         /pause latency silently regresses to 500 ms with no failing test."""
-        from landline.claude_dispatch import ClaudeDispatcher
-        from landline.failure_tracker import ClaudeFailureTracker
-        from landline.pause_flag import PauseFlag
-        from landline.types import ClaudeStreamResult
+        from landline.claude.dispatch import ClaudeDispatcher
+        from landline.claude.failure_tracker import ClaudeFailureTracker
+        from landline.claude.pause_flag import PauseFlag
+        from landline.claude.types import ClaudeStreamResult
 
         spy_run = MagicMock()
         r = ClaudeStreamResult()
@@ -1938,10 +1938,10 @@ class TestF1EventWaitResponsiveness:
             send_typing_fn=MagicMock(),
             pause_flag=pf,
         )
-        with patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history",
+        with patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
                    return_value=""):
             d.send_to_claude("hello", "123")
 
@@ -1961,7 +1961,7 @@ class TestClaudeStreamResultClusterTwoDefaults:
     freshly-constructed empty result."""
 
     def test_defaults_are_safe(self):
-        from landline.types import ClaudeStreamResult
+        from landline.claude.types import ClaudeStreamResult
         r = ClaudeStreamResult()
         assert r.result_is_error is False
         assert r.result_subtype is None
@@ -1972,6 +1972,6 @@ class TestClaudeStreamResultClusterTwoDefaults:
         predicate — otherwise the empty-response paths would auto-retry
         every time. Only the clean-empty predicate (looks_like_stale_session)
         should own that shape."""
-        from landline.claude_dispatch import looks_like_pruned_resume
-        from landline.types import ClaudeStreamResult
+        from landline.claude.dispatch import looks_like_pruned_resume
+        from landline.claude.types import ClaudeStreamResult
         assert looks_like_pruned_resume(ClaudeStreamResult()) is False

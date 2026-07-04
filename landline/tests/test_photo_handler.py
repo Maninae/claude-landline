@@ -1,4 +1,4 @@
-"""Tests for landline.photo_handler — locked-batch bail-outs must clear
+"""Tests for landline.media.photo — locked-batch bail-outs must clear
 the classifier's 👀 acks, matching voice_handler / document_handler.
 
 The finding: ``dispatch_photo_group`` used to bail out on
@@ -11,7 +11,7 @@ other handlers already enforce.
 
 from unittest.mock import MagicMock, patch
 
-from landline.photo_handler import (
+from landline.media.photo import (
     dispatch_photo_group,
     process_photo_batch,
 )
@@ -46,7 +46,7 @@ class TestDispatchPhotoGroupLockGateClearsAcks:
         daemon._check_lock_gate = MagicMock(return_value=True)
         messages = [_photo_msg(mid=6001)]
         with patch(
-            "landline.photo_handler.reactions.set_reactions_batch_async",
+            "landline.media.photo.reactions.set_reactions_batch_async",
         ) as mock_batch_clear, patch(
             "landline.orchestrator.download_file",
         ) as mock_dl:
@@ -73,7 +73,7 @@ class TestDispatchPhotoGroupLockGateClearsAcks:
             _photo_msg(mid=6103, file_id="c", media_group_id="album-B"),
         ]
         with patch(
-            "landline.photo_handler.reactions.set_reactions_batch_async",
+            "landline.media.photo.reactions.set_reactions_batch_async",
         ) as mock_batch_clear, patch(
             "landline.orchestrator.download_file",
         ) as mock_dl:
@@ -100,7 +100,7 @@ class TestProcessPhotoBatchLockedBailsClear:
             (_photo_msg(mid=6202, file_id="y"), 502, "12345"),
         ]
         with patch(
-            "landline.photo_handler.reactions.set_reactions_batch_async",
+            "landline.media.photo.reactions.set_reactions_batch_async",
         ) as mock_batch_clear, patch(
             "landline.orchestrator.download_file",
         ):

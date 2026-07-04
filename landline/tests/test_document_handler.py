@@ -1,8 +1,8 @@
-"""Tests for landline.document_handler — Cluster 1 (document dispatch)."""
+"""Tests for landline.media.document — Cluster 1 (document dispatch)."""
 
 from unittest.mock import MagicMock, patch
 
-from landline.document_handler import dispatch_document, process_document_batch
+from landline.media.document import dispatch_document, process_document_batch
 
 
 def _make_daemon_stub():
@@ -37,7 +37,7 @@ class TestDispatchDocument:
             "landline.orchestrator.download_file",
             return_value="/tmp/telegram_files/20260703_141522_report.pdf",
         ) as mock_dl, patch(
-            "landline.document_handler.log_conversation",
+            "landline.media.document.log_conversation",
         ):
             dispatch_document(daemon, msg, update_id=42, chat_id="12345")
 
@@ -72,7 +72,7 @@ class TestDispatchDocument:
             "landline.orchestrator.download_file",
             side_effect=fake_download,
         ), patch(
-            "landline.document_handler.log_conversation",
+            "landline.media.document.log_conversation",
         ):
             dispatch_document(daemon, msg, update_id=43, chat_id="12345")
 
@@ -92,7 +92,7 @@ class TestDispatchDocument:
         with patch(
             "landline.orchestrator.download_file", return_value=None,
         ), patch(
-            "landline.document_handler.log_conversation",
+            "landline.media.document.log_conversation",
         ):
             dispatch_document(daemon, msg, update_id=99, chat_id="12345")
 
@@ -110,7 +110,7 @@ class TestDispatchDocument:
         with patch(
             "landline.orchestrator.download_file",
         ) as mock_dl, patch(
-            "landline.document_handler.log_conversation",
+            "landline.media.document.log_conversation",
         ):
             dispatch_document(daemon, msg, update_id=44, chat_id="12345")
         mock_dl.assert_not_called()
@@ -123,7 +123,7 @@ class TestDispatchDocument:
             "landline.orchestrator.download_file",
             return_value="/tmp/telegram_files/20260703_141522_report.pdf",
         ), patch(
-            "landline.document_handler.log_conversation",
+            "landline.media.document.log_conversation",
         ):
             dispatch_document(daemon, msg, update_id=50, chat_id="12345")
         prompt_text, _, _ = daemon._inject_and_dispatch.call_args.args
@@ -142,7 +142,7 @@ class TestProcessDocumentBatch:
             "landline.orchestrator.download_file",
             side_effect=lambda t, fid, fn, target_dir=None, size_cap=None: f"/tmp/{fn}",
         ), patch(
-            "landline.document_handler.log_conversation",
+            "landline.media.document.log_conversation",
         ):
             process_document_batch(daemon, updates)
         assert daemon._inject_and_dispatch.call_count == 2
@@ -180,7 +180,7 @@ class TestProcessDocumentBatchLockedCoalesce:
             (_make_doc_msg_with_mid(2003, file_id="c", file_name="c.pdf"), 12, "12345"),
         ]
         with patch(
-            "landline.document_handler.reactions.set_reaction_async",
+            "landline.media.document.reactions.set_reaction_async",
         ) as mock_clear, patch(
             "landline.orchestrator.download_file",
         ) as mock_dl:
@@ -211,11 +211,11 @@ class TestDispatchDocumentRejectionsClearAck:
         daemon = _make_daemon_stub()
         msg = _make_doc_msg_with_mid(9001, file_id="d", file_name="d.pdf")
         with patch(
-            "landline.document_handler.reactions.set_reaction_async",
+            "landline.media.document.reactions.set_reaction_async",
         ) as mock_clear, patch(
             "landline.orchestrator.download_file", return_value=None,
         ), patch(
-            "landline.document_handler.log_conversation",
+            "landline.media.document.log_conversation",
         ):
             dispatch_document(daemon, msg, update_id=99, chat_id="12345")
         assert any(
@@ -232,7 +232,7 @@ class TestDispatchDocumentRejectionsClearAck:
         daemon._check_lock_gate = MagicMock(return_value=True)
         msg = _make_doc_msg_with_mid(9002, file_id="e", file_name="e.pdf")
         with patch(
-            "landline.document_handler.reactions.set_reaction_async",
+            "landline.media.document.reactions.set_reaction_async",
         ) as mock_clear, patch(
             "landline.orchestrator.download_file",
         ) as mock_dl:
@@ -266,9 +266,9 @@ class TestPrivacyLogDiscipline:
             "landline.orchestrator.download_file",
             return_value=f"/tmp/telegram_files/20260703_0_{self.SENSITIVE_NAME}",
         ), patch(
-            "landline.document_handler.log_conversation",
+            "landline.media.document.log_conversation",
         ), patch(
-            "landline.document_handler.log",
+            "landline.media.document.log",
         ) as mock_log:
             dispatch_document(daemon, msg, update_id=1, chat_id="12345")
         for call in mock_log.call_args_list:
@@ -286,7 +286,7 @@ class TestPrivacyLogDiscipline:
             "landline.orchestrator.download_file",
             return_value=None,
         ), patch(
-            "landline.document_handler.log",
+            "landline.media.document.log",
         ) as mock_log:
             dispatch_document(daemon, msg, update_id=2, chat_id="12345")
         for call in mock_log.call_args_list:
@@ -308,7 +308,7 @@ class TestPrivacyLogDiscipline:
         with patch(
             "landline.orchestrator.download_file",
         ) as mock_dl, patch(
-            "landline.document_handler.log",
+            "landline.media.document.log",
         ) as mock_log:
             dispatch_document(daemon, msg, update_id=3, chat_id="12345")
         mock_dl.assert_not_called()  # bailed before download
@@ -338,7 +338,7 @@ class TestPromptInjectionDelimiterFraming:
             "landline.orchestrator.download_file",
             return_value="/tmp/telegram_files/20260703_141522_report.pdf",
         ), patch(
-            "landline.document_handler.log_conversation",
+            "landline.media.document.log_conversation",
         ):
             dispatch_document(daemon, msg, update_id=1, chat_id="12345")
         prompt_text, _, _ = daemon._inject_and_dispatch.call_args.args
@@ -363,7 +363,7 @@ class TestPromptInjectionDelimiterFraming:
             "landline.orchestrator.download_file",
             return_value=f"/tmp/telegram_files/20260703_0_{hostile}",
         ), patch(
-            "landline.document_handler.log_conversation",
+            "landline.media.document.log_conversation",
         ):
             dispatch_document(daemon, msg, update_id=1, chat_id="12345")
         prompt_text, _, _ = daemon._inject_and_dispatch.call_args.args
@@ -409,7 +409,7 @@ class TestPromptInjectionDelimiterFraming:
             "landline.orchestrator.download_file",
             return_value="/tmp/telegram_files/20260703_141522_report.pdf",
         ), patch(
-            "landline.document_handler.log_conversation",
+            "landline.media.document.log_conversation",
         ):
             dispatch_document(daemon, msg, update_id=1, chat_id="12345")
         prompt_text, _, _ = daemon._inject_and_dispatch.call_args.args
@@ -433,7 +433,7 @@ class TestPromptInjectionDelimiterFraming:
             "landline.orchestrator.download_file",
             return_value=f"/tmp/telegram_files/20260703_0_{hostile}",
         ), patch(
-            "landline.document_handler.log_conversation",
+            "landline.media.document.log_conversation",
         ) as mock_log_conv:
             dispatch_document(daemon, msg, update_id=1, chat_id="12345")
         assert mock_log_conv.call_count == 1

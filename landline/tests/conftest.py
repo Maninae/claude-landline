@@ -75,11 +75,11 @@ def _fake_keychain_get_status(service: str, account: str = "landline"):
 @pytest.fixture(autouse=True)
 def mock_keychain():
     """Globally replace keychain_get and keychain_get_status at every import site."""
-    with patch("landline.security.keychain_get", side_effect=_fake_keychain_get), \
-         patch("landline.security.keychain_get_status", side_effect=_fake_keychain_get_status), \
-         patch("landline.guard.keychain_get_status", side_effect=_fake_keychain_get_status), \
-         patch("landline.lock.keychain_get_status", side_effect=_fake_keychain_get_status), \
-         patch("landline.notifications.keychain_get", side_effect=_fake_keychain_get), \
+    with patch("landline.runtime.security.keychain_get", side_effect=_fake_keychain_get), \
+         patch("landline.runtime.security.keychain_get_status", side_effect=_fake_keychain_get_status), \
+         patch("landline.runtime.guard.keychain_get_status", side_effect=_fake_keychain_get_status), \
+         patch("landline.runtime.lock.keychain_get_status", side_effect=_fake_keychain_get_status), \
+         patch("landline.runtime.notifications.keychain_get", side_effect=_fake_keychain_get), \
          patch("landline.orchestrator.keychain_get", side_effect=_fake_keychain_get):
         yield _fake_keychain_get
 
@@ -87,7 +87,7 @@ def mock_keychain():
 @pytest.fixture(autouse=True)
 def reset_guard_cache():
     """Reset guard module cache between tests to prevent leakage."""
-    import landline.guard as g
+    import landline.runtime.guard as g
     g._cached_allowed = None
     g._cached_at = 0.0
     yield
@@ -111,7 +111,7 @@ def reset_persistent_claude_singleton():
     a dispatcher (and thus touches the singleton via the lazy import)
     leaves a clean slate for the next test.
     """
-    import landline.persistent_claude as pc_mod
+    import landline.claude.persistent as pc_mod
     pc_mod._persistent_claude = None
     yield
     pc_mod._persistent_claude = None
@@ -119,12 +119,12 @@ def reset_persistent_claude_singleton():
 
 @pytest.fixture(autouse=True)
 def isolate_daemon_log(tmp_path, monkeypatch):
-    """Redirect landline.logging file output to tmp_path for every test.
+    """Redirect landline.runtime.logging file output to tmp_path for every test.
 
     Without this, any test that calls log() (directly or through code under
     test) attaches a RotatingFileHandler to the real production daemon.log.
     """
-    from landline import logging as _dlog
+    from landline.runtime import logging as _dlog
     monkeypatch.setenv("LANDLINE_DAEMON_LOG", str(tmp_path / "daemon.log"))
     _dlog._reset_logger_for_tests()
     yield
@@ -133,7 +133,7 @@ def isolate_daemon_log(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def isolate_conversation_log(tmp_path, monkeypatch):
-    """Redirect landline.state's WORKSPACE so log_conversation writes daily
+    """Redirect landline.runtime.state's WORKSPACE so log_conversation writes daily
     conversation logs under tmp_path, never the real memory/daily/.
 
     Without this, any test that drives an orchestrator/handler path calling
@@ -143,10 +143,10 @@ def isolate_conversation_log(tmp_path, monkeypatch):
     writes and the nightly consolidation reads as the operator's actual
     conversation. Observed polluting the build worktree on 2026-07-03.
     state.py binds WORKSPACE into its own namespace at import, so patching
-    landline.state.WORKSPACE is surgical (config.WORKSPACE and other modules
+    landline.runtime.state.WORKSPACE is surgical (config.WORKSPACE and other modules
     are unaffected).
     """
-    monkeypatch.setattr("landline.state.WORKSPACE", tmp_path)
+    monkeypatch.setattr("landline.runtime.state.WORKSPACE", tmp_path)
     yield
 
 
@@ -162,7 +162,7 @@ def isolate_usage_stats_file(tmp_path, monkeypatch):
     """
     stats_file = tmp_path / "usage-stats.json"
     monkeypatch.setattr("landline.config.USAGE_STATS_FILE", stats_file)
-    monkeypatch.setattr("landline.usage_stats.USAGE_STATS_FILE", stats_file)
+    monkeypatch.setattr("landline.runtime.usage_stats.USAGE_STATS_FILE", stats_file)
     yield stats_file
 
 
@@ -178,7 +178,7 @@ def isolate_outbound_spool_dir(tmp_path, monkeypatch):
     """
     spool_dir = tmp_path / "telegram-outbound-spool"
     monkeypatch.setattr("landline.config.SPOOL_DIR", spool_dir)
-    monkeypatch.setattr("landline.outbound_spool.SPOOL_DIR", spool_dir)
+    monkeypatch.setattr("landline.telegram.spool.SPOOL_DIR", spool_dir)
     yield
 
 
@@ -186,7 +186,7 @@ def pytest_configure(config):
     """Register custom markers used by the daemon test suite."""
     config.addinivalue_line(
         "markers",
-        "reactions_network: opt in to landline.reactions HTTP behaviour "
+        "reactions_network: opt in to landline.telegram.reactions HTTP behaviour "
         "(default autouse fixture disables REACTION_ACKS_ENABLED for the "
         "whole suite to prevent real setMessageReaction POSTs to Telegram)."
     )
@@ -261,7 +261,7 @@ def mock_send_typing():
 @pytest.fixture()
 def mock_run_claude():
     """Mock for run_claude_streaming that returns a default successful result."""
-    from landline.claude_dispatch import ClaudeStreamResult
+    from landline.claude.dispatch import ClaudeStreamResult
 
     def _default_run_claude(**kwargs):
         result = ClaudeStreamResult()

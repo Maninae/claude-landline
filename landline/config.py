@@ -12,10 +12,10 @@ rejection posture, reaction ACKs) are pulled from ``<WORKSPACE>/landline.json``
 via ``_cfg`` at module import. See ``_ALLOWED_KEYS`` for the full list.
 
 Module-local tunables that intentionally are NOT here:
-    - landline.stream_sender._IDLE_POLL_SECONDS  - worker-thread idle poll
-    - landline.stream_sender._QUEUE_HIGH_WATER   - log-once backlog threshold
-    - landline.image_cache.*                     - retention sweep internals
-    - landline.html_chunker.* (regex/limits)     - chunker implementation details
+    - landline.claude.sender._IDLE_POLL_SECONDS  - worker-thread idle poll
+    - landline.claude.sender._QUEUE_HIGH_WATER   - log-once backlog threshold
+    - landline.media.cache.*                     - retention sweep internals
+    - landline.telegram.chunker.* (regex/limits)     - chunker implementation details
 If you find yourself wanting to move one of these here, ask first whether it
 is a knob the deployer would tune from ``landline.json`` - if not, leave it
 local.
@@ -401,8 +401,8 @@ LOG_FILE = WORKSPACE / "logs" / "telegram-daemon" / "daemon.log"
 
 # B4 - daily-log PII permissions: 0o600 files + 0o700 dir, set via os.fchmod
 # (process-wide os.umask is forbidden - it races concurrent file creation in
-# poller/sender threads). Used by landline.state.log_conversation and
-# landline.state.secure_daily_logs.
+# poller/sender threads). Used by landline.runtime.state.log_conversation and
+# landline.runtime.state.secure_daily_logs.
 DAILY_LOG_DIR_MODE = 0o700
 DAILY_LOG_FILE_MODE = 0o600
 # B4 - state-file write mode. Mirrors DAILY_LOG_FILE_MODE; cache/ is
@@ -422,7 +422,7 @@ LOCKED_HELP = "\U0001f512 Session is locked. Enter the passphrase to unlock."
 # Claude failure tracker (constants live here, failure_tracker imports them)
 # ---------------------------------------------------------------------------
 # Governs when the daemon enters Claude-call backoff and when it fires the
-# "Claude unavailable" iMessage alert. See landline.failure_tracker.
+# "Claude unavailable" iMessage alert. See landline.claude.failure_tracker.
 # Ordering invariants (enforced by test_config):
 #   CLAUDE_FAILURE_BACKOFF_THRESHOLD < CLAUDE_FAILURE_ALERT_THRESHOLD
 #   CLAUDE_FAILURE_BACKOFF_BASE_SECONDS < CLAUDE_FAILURE_BACKOFF_CAP_SECONDS
@@ -435,7 +435,7 @@ CLAUDE_FAILURE_BACKOFF_CAP_SECONDS = 1800
 # Cluster 1 (foundation): async iMessage notifications + workspace perms
 # ---------------------------------------------------------------------------
 # Subprocess timeout for the ``osascript`` iMessage-send call spawned by
-# landline.notifications._do_osascript. Bounded so a hung AppleScript event
+# landline.runtime.notifications._do_osascript. Bounded so a hung AppleScript event
 # or slow Messages handoff can't hold onto the alert-worker thread forever;
 # matches the historical value from the in-line subprocess.run(..., timeout=30)
 # call site (M13 hoisted it out of that in-line block).
@@ -445,7 +445,7 @@ IMESSAGE_SEND_SUBPROCESS_TIMEOUT_SECONDS = 30
 # fresh checkout / re-mount / new-machine bootstrap never leaves them
 # world-readable. Distinct from DAILY_LOG_DIR_MODE so a future 0o750 posture
 # for daily-log-vs-workspace can diverge without collateral. See
-# landline.state.secure_workspace_paths for the call site.
+# landline.runtime.state.secure_workspace_paths for the call site.
 WORKSPACE_SENSITIVE_DIR_MODE = 0o700
 WORKSPACE_SENSITIVE_DIRS = ("memory", "cache", "inbox", "outbox", "logs")
 

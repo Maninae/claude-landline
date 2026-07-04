@@ -1,4 +1,4 @@
-"""Tests for landline.telegram_download — Cluster 1 (generalized download +
+"""Tests for landline.telegram.download — Cluster 1 (generalized download +
 safe-basename sanitizer)."""
 
 import os
@@ -6,7 +6,7 @@ import stat
 from unittest.mock import MagicMock, patch
 
 from landline.config import DOCUMENT_ALLOWED_EXTENSIONS, TELEGRAM_IMAGE_DIR
-from landline.telegram_download import _safe_basename, download_file
+from landline.telegram.download import _safe_basename, download_file
 
 
 class TestSafeBasename:
@@ -135,14 +135,14 @@ class TestDownloadFileTargetDir:
         """No target_dir → writes to TELEGRAM_IMAGE_DIR (photo path)."""
         image_dir = tmp_path / "images"
         monkeypatch.setattr(
-            "landline.telegram_download.TELEGRAM_IMAGE_DIR", image_dir,
+            "landline.telegram.download.TELEGRAM_IMAGE_DIR", image_dir,
         )
         good_resp = {
             "ok": True,
             "result": {"file_path": "photos/x.jpg", "file_size": 7},
         }
         with patch(
-            "landline.telegram_download.telegram_api", return_value=good_resp,
+            "landline.telegram.download.telegram_api", return_value=good_resp,
         ), patch(
             "urllib.request.urlopen",
             return_value=self._make_good_urlopen(b"payload"),
@@ -160,7 +160,7 @@ class TestDownloadFileTargetDir:
             "result": {"file_path": "docs/x.pdf", "file_size": 7},
         }
         with patch(
-            "landline.telegram_download.telegram_api", return_value=good_resp,
+            "landline.telegram.download.telegram_api", return_value=good_resp,
         ), patch(
             "urllib.request.urlopen",
             return_value=self._make_good_urlopen(b"payload"),
@@ -185,7 +185,7 @@ class TestDownloadFileTargetDir:
             },
         }
         with patch(
-            "landline.telegram_download.telegram_api", return_value=over_cap_resp,
+            "landline.telegram.download.telegram_api", return_value=over_cap_resp,
         ):
             local = download_file(
                 "tok", "fake-id", "out.pdf",
@@ -216,12 +216,12 @@ class TestDownloadFileLogPrivacy:
             "result": {"file_path": "docs/x.pdf", "file_size": 7},
         }
         with patch(
-            "landline.telegram_download.telegram_api", return_value=good_resp,
+            "landline.telegram.download.telegram_api", return_value=good_resp,
         ), patch(
             "urllib.request.urlopen",
             return_value=self._make_good_urlopen(b"payload"),
         ), patch(
-            "landline.telegram_download.log",
+            "landline.telegram.download.log",
         ) as mock_log:
             local = download_file(
                 "tok", "fake-id", sensitive, target_dir=target,

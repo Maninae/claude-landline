@@ -16,9 +16,9 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from landline.claude_dispatch import ClaudeStreamResult
+from landline.claude.dispatch import ClaudeStreamResult
 from landline.config import AGENT_NAME
-from landline.lock import _normalize_passphrase
+from landline.runtime.lock import _normalize_passphrase
 from landline.orchestrator import TelegramDaemon
 
 from landline.tests.conftest import make_telegram_update, FAKE_CHAT_ID, FAKE_BOT_TOKEN
@@ -99,11 +99,11 @@ class TestE2EConversationFlow:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""), \
-             patch("landline.lock.keychain_get", return_value=PASSPHRASE_HASH), \
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""), \
+             patch("landline.runtime.lock.keychain_get", return_value=PASSPHRASE_HASH), \
              patch("subprocess.run", return_value=MagicMock(stdout="", returncode=0)):
 
             # Step 1: Text while locked -> LOCKED_HELP
@@ -161,10 +161,10 @@ class TestE2EConversationFlow:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             daemon._process_update_batch(updates)
 
         assert claude_calls[0] == 1
@@ -187,10 +187,10 @@ class TestE2EConversationFlow:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("[injected report: morning brief]", [])), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""):
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
             daemon._process_update_batch([update])
 
         assert claude_calls[0] == 1
@@ -238,11 +238,11 @@ class TestE2EConversationFlow:
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
              patch("landline.orchestrator.drain_inject_queue", return_value=("", [])), \
-             patch("landline.claude_dispatch.save_state"), \
-             patch("landline.claude_dispatch.log_conversation"), \
-             patch("landline.claude_dispatch.get_context_percent", return_value=None), \
-             patch("landline.claude_dispatch.read_recent_conversation_history", return_value=""), \
-             patch("landline.claude_dispatch.send_html",
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""), \
+             patch("landline.claude.dispatch.send_html",
                    side_effect=lambda t, c, text: sent.append(text)):
             # Step A: the operator sends text, mock Claude returns interrupted=True
             # (as if a /pause had set the flag and the watchdog SIGINT'd it).
@@ -334,6 +334,6 @@ class TestE2EConversationFlow:
 
         with patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.log_conversation"), \
-             patch("landline.lock.keychain_get", return_value=PASSPHRASE_HASH):
+             patch("landline.runtime.lock.keychain_get", return_value=PASSPHRASE_HASH):
             daemon._process_update_batch([make_telegram_update(1, "/unlock coconut puddings")])
             assert daemon._lock_manager.is_locked

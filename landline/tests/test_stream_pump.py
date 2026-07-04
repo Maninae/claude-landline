@@ -1,4 +1,4 @@
-"""Tests for landline.stream_pump — the per-process persistent stdout reader.
+"""Tests for landline.claude.pump — the per-process persistent stdout reader.
 
 The scenarios here encode the 2026-06/07 "desync" root cause and its fix:
 harness-initiated turns (background subagents / run_in_background Bash
@@ -16,7 +16,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from landline.stream_pump import StreamPump, TurnHandle, get_or_create_pump
+from landline.claude.pump import StreamPump, TurnHandle, get_or_create_pump
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +548,7 @@ class TestStreamingIntegrationRegression(unittest.TestCase):
 
     def test_dispatched_turn_after_unsolicited_block_gets_own_response(self):
         from unittest.mock import MagicMock
-        from landline.streaming import run_claude_streaming
+        from landline.claude.streaming import run_claude_streaming
 
         proc = _FakeProc()
         proc.returncode = None
@@ -638,7 +638,7 @@ class TestPrunedResumeSignals(_PumpTestCase):
     """Cluster 2 (stale-resume auto-recovery) — the pump records the terminal
     result event's error flag / subtype and whether an init opened the block.
 
-    ``landline.claude_dispatch.looks_like_pruned_resume`` consumes those fields
+    ``landline.claude.dispatch.looks_like_pruned_resume`` consumes those fields
     to catch the empirically-verified pruned/nonexistent --resume shape
     without false-positiving on a mid-session API error (which necessarily
     saw an init on this turn).
@@ -753,7 +753,7 @@ class TestUsageCapture(_PumpTestCase):
         chat_sender = _FakeSender()
         with patch("landline.claude._get_or_create_sender",
                    return_value=chat_sender), \
-             patch("landline.usage_stats.record_turn") as mock_record:
+             patch("landline.runtime.usage_stats.record_turn") as mock_record:
             self.pump.set_idle_route("chat1", "tok", lambda *a: None,
                                      lambda *a: None)
 
@@ -791,7 +791,7 @@ class TestUsageCapture(_PumpTestCase):
         chat_sender = _FakeSender()
         with patch("landline.claude._get_or_create_sender",
                    return_value=chat_sender), \
-             patch("landline.usage_stats.record_turn",
+             patch("landline.runtime.usage_stats.record_turn",
                    side_effect=RuntimeError("io simulated")):
             self.pump.set_idle_route("chat1", "tok", lambda *a: None,
                                      lambda *a: None)
@@ -832,7 +832,7 @@ class TestUsageCapture(_PumpTestCase):
         try:
             with patch("landline.claude._get_or_create_sender",
                        return_value=chat_sender), \
-                 patch("landline.usage_stats.record_turn",
+                 patch("landline.runtime.usage_stats.record_turn",
                        side_effect=stuck_record):
                 self.pump.set_idle_route("chat1", "tok", lambda *a: None,
                                          lambda *a: None)

@@ -1,9 +1,9 @@
-"""Tests for landline.logging — rotating file logger + test seam."""
+"""Tests for landline.runtime.logging — rotating file logger + test seam."""
 
 import re
 from unittest.mock import patch, MagicMock
 
-from landline.logging import log
+from landline.runtime.logging import log
 
 
 class TestLog:
@@ -18,7 +18,7 @@ class TestLog:
 
     def test_log_format_full(self):
         """Format must be: [YYYY-MM-DD HH:MM:SS] message — anchor for log parsers."""
-        with patch("landline.logging._get_logger") as mock_get:
+        with patch("landline.runtime.logging._get_logger") as mock_get:
             mock_logger = MagicMock()
             mock_get.return_value = mock_logger
             log("hello")
@@ -29,7 +29,7 @@ class TestLog:
         assert match is not None, f"Bad log format: {forwarded!r}"
 
     def test_log_handles_empty_string(self):
-        with patch("landline.logging._get_logger") as mock_get:
+        with patch("landline.runtime.logging._get_logger") as mock_get:
             mock_logger = MagicMock()
             mock_get.return_value = mock_logger
             log("")
@@ -38,7 +38,7 @@ class TestLog:
         assert re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] $", forwarded)
 
     def test_log_handles_special_characters(self):
-        with patch("landline.logging._get_logger") as mock_get:
+        with patch("landline.runtime.logging._get_logger") as mock_get:
             mock_logger = MagicMock()
             mock_get.return_value = mock_logger
             log("line1\nline2\ttab")
@@ -52,7 +52,7 @@ class TestLog:
 
     def test_log_survives_logger_error_writes_to_stderr(self, capsys):
         """If logger.info raises, log() must fall back to stderr — not print, not silent."""
-        with patch("landline.logging._get_logger") as mock_get:
+        with patch("landline.runtime.logging._get_logger") as mock_get:
             mock_logger = MagicMock()
             mock_logger.info.side_effect = Exception("disk full")
             mock_get.return_value = mock_logger
@@ -66,7 +66,7 @@ class TestLog:
 
     def test_log_forwards_to_file_logger(self):
         """Each log() must call logger.info() once with the formatted line."""
-        with patch("landline.logging._get_logger") as mock_get:
+        with patch("landline.runtime.logging._get_logger") as mock_get:
             mock_logger = MagicMock()
             mock_get.return_value = mock_logger
             log("forwarded message")
@@ -80,10 +80,10 @@ class TestLog:
 
     def test_get_logger_handler_failure_writes_to_stderr(self, capsys):
         """If RotatingFileHandler construction fails, the failure must surface on stderr."""
-        from landline import logging as _dlog
+        from landline.runtime import logging as _dlog
         _dlog._reset_logger_for_tests()
         with patch(
-            "landline.logging.logging.handlers.RotatingFileHandler",
+            "landline.runtime.logging.logging.handlers.RotatingFileHandler",
             side_effect=PermissionError("denied"),
         ):
             log("anything")
@@ -95,10 +95,10 @@ class TestLog:
 
     def test_get_logger_handler_failure_does_not_raise(self):
         """Handler init failure must not propagate — the daemon must keep running."""
-        from landline import logging as _dlog
+        from landline.runtime import logging as _dlog
         _dlog._reset_logger_for_tests()
         with patch(
-            "landline.logging.logging.handlers.RotatingFileHandler",
+            "landline.runtime.logging.logging.handlers.RotatingFileHandler",
             side_effect=PermissionError("denied"),
         ):
             # Must not raise.
@@ -139,7 +139,7 @@ class TestLogTestSeam:
             )
 
     def test_LOG_FILE_is_lazy_at_import(self):
-        """Importing landline.logging must not build the singleton — the seam
+        """Importing landline.runtime.logging must not build the singleton — the seam
         only works if handler construction is deferred until first log().
 
         Uses importlib.reload() to simulate a fresh import without disturbing
@@ -149,14 +149,14 @@ class TestLogTestSeam:
         _LOGGER=None and mask a future eager-build regression).
         """
         import importlib
-        from landline import logging as _dlog
+        from landline.runtime import logging as _dlog
         # Reload to re-run module top-level code as if freshly imported.
         # This is the load-bearing step: if a regression moves handler
         # construction to module top-level, _LOGGER will be non-None here.
         importlib.reload(_dlog)
         try:
             assert _dlog._LOGGER is None, (
-                "A1 lazy-at-import invariant violated: landline.logging built "
+                "A1 lazy-at-import invariant violated: landline.runtime.logging built "
                 "the logger singleton at import time. Handler construction "
                 "must remain inside _get_logger() (called on first log())."
             )
@@ -166,7 +166,7 @@ class TestLogTestSeam:
 
     def test_env_override_redirects_handler(self, tmp_path, monkeypatch):
         """log() under LANDLINE_DAEMON_LOG=<tmp> must write into <tmp>, not LOG_FILE."""
-        from landline import logging as _dlog
+        from landline.runtime import logging as _dlog
         target = tmp_path / "redirected.log"
         monkeypatch.setenv("LANDLINE_DAEMON_LOG", str(target))
         _dlog._reset_logger_for_tests()
