@@ -224,7 +224,7 @@ LAUNCHD_LABEL_PREFIX = _cfg("launchd_label_prefix", "com.landline")
 MORNING_BRIEF_GLOB = _cfg("morning_brief_glob", None)
 
 # Whisper CLI defaults. When ``whisper`` is on PATH the bare name works;
-# absolute paths (Homebrew, ``/Volumes/vega/...``) are passed through as-is.
+# absolute paths are passed through as-is.
 WHISPER_BIN = _cfg("whisper_bin", "whisper")
 WHISPER_MODEL = _cfg("whisper_model", "base")
 # Default lives under the invoking user's home; expanduser applied by the
