@@ -48,10 +48,18 @@ def _status_text(
     except Exception:
         lines.append("Scheduled jobs: unable to check")
 
+    # Wrapped defensively for the same reason as the usage_stats block below:
+    # a bad glob value (e.g. an absolute pathlib pattern raises
+    # NotImplementedError) or an inaccessible directory must never break the
+    # whole /status reply — the operator loses the brief line, not their
+    # diagnostics.
     if MORNING_BRIEF_GLOB:
-        briefs = sorted(workspace.glob(MORNING_BRIEF_GLOB))
-        if briefs:
-            lines.append(f"Last morning brief: {briefs[-1].name}")
+        try:
+            briefs = sorted(workspace.glob(MORNING_BRIEF_GLOB))
+            if briefs:
+                lines.append(f"Last morning brief: {briefs[-1].name}")
+        except Exception as brief_error:
+            log(f"/status: morning brief glob failed: {brief_error}")
 
     try:
         result = subprocess.run(

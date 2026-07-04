@@ -158,7 +158,7 @@ def dispatch_photo_group(
     prompt_caption = caption if caption else default_caption
     prompt_text = f"{prompt_caption}\n\n{path_section}"
 
-    log(f"Photo prompt ({len(downloaded_paths)} image(s)): {prompt_caption[:80]}")
+    log(f"Photo prompt: {len(downloaded_paths)} image(s), caption_chars={len(prompt_caption)}")
     log_conversation(USER_NAME, f"[photo] {prompt_caption}")
 
     # Cluster 3: ack only the photo message_ids in THIS group. In an

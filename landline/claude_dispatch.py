@@ -68,7 +68,7 @@ def _stderr_looks_like_auth_failure(stderr_tail: str) -> bool:
 def looks_like_pruned_resume(result: ClaudeStreamResult) -> bool:
     """True if the result matches the pruned/nonexistent-session shape.
 
-    Verified against claude-fda: resuming a pruned uuid emits a bare
+    Verified empirically against the Claude Code CLI: resuming a pruned uuid emits a bare
     ``result`` event with ``subtype=error_during_execution``,
     ``is_error=true``, NO preceding ``system/init``, and the process exits
     code 1. Stderr contains ``No conversation found with session ID: <uuid>``.
@@ -108,7 +108,7 @@ def looks_like_pruned_resume(result: ClaudeStreamResult) -> bool:
     # later failed. Wiping the still-valid server-side session in that case
     # destroys the whole conversation. Real pruned-resume ALWAYS emits
     # "No conversation found with session ID" (or "session not found") into
-    # stderr (verified against claude-fda); demand the marker before we
+    # stderr (verified empirically against the Claude Code CLI); demand the marker before we
     # decide to nuke a session. If saw_init=False + is_error but no marker,
     # fall back to preserving the session (pre-Cluster-2 behavior) — the
     # operator sees the "(no response — exit N)" notice and can retry,

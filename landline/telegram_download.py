@@ -106,7 +106,7 @@ def download_file(
     dest_dir = target_dir if target_dir is not None else TELEGRAM_IMAGE_DIR
     # Ensure the destination directory exists with a 0700 mode. mkdir's own
     # ``mode=`` is masked by umask; a follow-up chmod is the load-bearing
-    # step (workspace invariant: never call os.umask; see daemon/CLAUDE.md).
+    # step (workspace invariant: never call os.umask; see CLAUDE.md).
     try:
         dest_dir.mkdir(parents=True, exist_ok=True, mode=MEDIA_CACHE_DIR_MODE)
         try:

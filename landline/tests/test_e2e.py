@@ -17,6 +17,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from landline.claude_dispatch import ClaudeStreamResult
+from landline.config import AGENT_NAME
 from landline.lock import _normalize_passphrase
 from landline.orchestrator import TelegramDaemon
 
@@ -130,7 +131,7 @@ class TestE2EConversationFlow:
             # Step 5: /status
             sent.clear()
             daemon._process_update_batch([next_update("/status")])
-            assert any("the agent" in m or "Lock" in m for m in sent), f"Expected status, got: {sent}"
+            assert any(AGENT_NAME in m or "Lock" in m for m in sent), f"Expected status, got: {sent}"
 
             # Step 6: /new -> reset
             sent.clear()

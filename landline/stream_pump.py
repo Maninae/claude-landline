@@ -12,7 +12,8 @@ background task completed while no turn was in flight, the harness ran an
 UNSOLICITED turn whose events — including a `result` — piled up unread in the
 pipe. The next dispatched turn then consumed that stale turn's output, stopped
 at the stale `result`, and left its OWN response unread. Every turn after that
-delivered the PREVIOUS turn's answer (the operator: A -> nothing -> B -> A' -> C -> B'),
+delivered the PREVIOUS turn's answer (the user sends A and gets nothing;
+sends B and receives A's answer; every reply thereafter lags one turn behind),
 until a daemon restart or /new killed the process. Verified empirically:
 after `result`, a finished background task emits
 `system/task_notification` -> `system/init` -> assistant... -> `result`
@@ -538,7 +539,7 @@ class StreamPump:
         (holding ``_lock`` during an SSD stall) stall the pump — Claude's
         stdout pipe would fill and back-pressure the subprocess, breaking
         the "pump reads continuously for the process's life" invariant
-        (see ``daemon/CLAUDE.md`` -> "StreamPump" -> "NOTHING else may
+        (see ``CLAUDE.md`` -> "StreamPump" -> "NOTHING else may
         read that pipe"). Dispatch it to a short-lived daemon thread so the
         pump returns immediately; the daemon thread can afford to block on
         the lock and fsync.

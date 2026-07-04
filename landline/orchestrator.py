@@ -836,7 +836,7 @@ class TelegramDaemon:
 
         Rationale for in-process (vs process exit): keeps the persistent
         Claude subprocess and the StreamSender queue backlog alive across
-        the swap. See daemon/CLAUDE.md "Stuck poller (TCP connection stale)".
+        the swap. See CLAUDE.md "Stuck poller (TCP connection stale)".
         """
         now = time.time()
         if now - self._poller_stale_check_last_at < config.POLL_STALE_CHECK_INTERVAL_SECONDS:

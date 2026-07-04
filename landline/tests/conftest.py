@@ -22,8 +22,16 @@ import pytest
 # cwd can never leak into the test run. Pytest imports conftest.py before
 # any test module and any ``from landline...`` import, so setting the env
 # var here wins the race even for module-level imports in test files.
+#
+# UNCONDITIONAL assignment, never ``setdefault``: the deploy gate
+# (deploy/restart.sh) runs this suite with LANDLINE_WORKSPACE exported and
+# pointing at the LIVE workspace. Inheriting that value would bind
+# import-time WORKSPACE-derived constants (inject queue, image cache,
+# project dir, ...) to production paths — the exact "tests touch
+# production" incident class this suite exists to prevent. The suite never
+# legitimately needs the shell's workspace; per-test paths use tmp_path.
 _TEST_WORKSPACE = tempfile.mkdtemp(prefix="landline-test-workspace-")
-os.environ.setdefault("LANDLINE_WORKSPACE", _TEST_WORKSPACE)
+os.environ["LANDLINE_WORKSPACE"] = _TEST_WORKSPACE
 
 
 # ---------------------------------------------------------------------------

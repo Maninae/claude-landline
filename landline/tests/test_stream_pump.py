@@ -815,7 +815,7 @@ class TestUsageCapture(_PumpTestCase):
         NOT block on ``usage_stats.record_turn`` — that call performs
         synchronous fsync inside a module-level lock, and a stall there
         would freeze the pump (violating the "stdout pipe has exactly one
-        continuously-reading reader" invariant in ``daemon/CLAUDE.md``).
+        continuously-reading reader" invariant in ``CLAUDE.md``).
 
         Simulate an SSD stall by making record_turn block, then verify the
         pump processes a follow-up turn while record_turn is still stuck.

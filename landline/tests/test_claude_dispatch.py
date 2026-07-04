@@ -1471,7 +1471,7 @@ class TestTryEnqueueOrSendCallers:
 class TestLooksLikePrunedResume:
     """Cluster 2 (stale-resume auto-recovery) — the pruned/nonexistent-session
     predicate. Orthogonal to looks_like_stale_session (clean-empty shape);
-    this one catches the is_error + no-init shape verified against claude-fda.
+    this one catches the is_error + no-init shape verified empirically against the Claude Code CLI.
     """
 
     def test_looks_like_pruned_resume_true_for_no_init_is_error(self):
@@ -1483,7 +1483,7 @@ class TestLooksLikePrunedResume:
         mid-session turn whose ``system/init`` line raised in the pump
         (JSONDecodeError, unhandled _handle_event exception) — see
         looks_like_pruned_resume's docstring. Real pruned-resume always
-        emits this marker (verified against claude-fda), so demanding it
+        emits this marker (verified against the Claude Code CLI), so demanding it
         is safe and blocks the missed-init false-positive.
         """
         r = ClaudeStreamResult()
@@ -1836,7 +1836,7 @@ class TestPrunedResumeRetryIntegration:
 class TestClaudeAuthExpiryAlert:
     """Cluster 3 — Claude CLI auth-expiry detection.
 
-    the operator's June 23-25 2026 incident: every ``claude-fda -p`` call 401ed
+    a multi-day silent auth outage (June 2026): every headless ``claude -p`` call 401ed
     silently for two days before he noticed. These tests pin the shape of
     the one-shot iMessage alert that fires on the FIRST failure whose
     stderr tail matches the OAuth-expiry pattern, independent of the
