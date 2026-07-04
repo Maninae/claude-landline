@@ -8,3 +8,10 @@ build/
 
 # Never commit a real config — it names your machine's paths and Keychain entries.
 landline.json
+
+# Runtime state, if the daemon is ever run from the checkout itself
+# (docs recommend a separate workspace; this is belt-and-suspenders —
+# cache/ holds downloaded user media, spool payloads, and state files,
+# logs/ holds the daemon log)
+cache/
+logs/
