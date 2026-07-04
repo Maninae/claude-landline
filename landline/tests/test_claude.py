@@ -1014,21 +1014,6 @@ class TestFormatToolStatus:
         from landline.config import WORKSPACE
         assert str(WORKSPACE) not in result
 
-    def test_bash_calendar(self):
-        block = {"type": "tool_use", "name": "Bash",
-                 "input": {"command": "gog-firewall calendar events foo --days 7"}}
-        assert "language-📅 Calendar" in _format_tool_status(block)
-
-    def test_bash_gmail(self):
-        block = {"type": "tool_use", "name": "Bash",
-                 "input": {"command": "gog-firewall gmail search is:unread"}}
-        assert "language-📧 Gmail" in _format_tool_status(block)
-
-    def test_bash_imsg_send(self):
-        block = {"type": "tool_use", "name": "Bash",
-                 "input": {"command": "imsg send --to +1234 --text hi"}}
-        assert _format_tool_status(block) == "💬 iMessage send"
-
     def test_bash_generic(self):
         block = {"type": "tool_use", "name": "Bash", "input": {"command": "git status"}}
         result = _format_tool_status(block)

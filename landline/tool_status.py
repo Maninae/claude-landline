@@ -56,14 +56,6 @@ def _format_tool_status(block: Dict[str, Any]) -> Optional[str]:
             trimmed = cmd[len(_WORKSPACE_BIN_PREFIX):]
             display = trimmed if len(trimmed) <= _MAX_CMD_LEN else trimmed[:_MAX_CMD_LEN] + "…"
             return pre(display, "Shell")
-        if "gog-firewall" in cmd and "calendar" in cmd:
-            short = cmd.split("gog-firewall ", 1)[-1] if "gog-firewall " in cmd else cmd
-            return pre(short[:_MAX_CMD_LEN], "📅 Calendar")
-        if "gog-firewall" in cmd and "gmail" in cmd:
-            short = cmd.split("gog-firewall ", 1)[-1] if "gog-firewall " in cmd else cmd
-            return pre(short[:_MAX_CMD_LEN], "📧 Gmail")
-        if "imsg" in cmd and "send" in cmd:
-            return "💬 iMessage send"
         display = cmd if len(cmd) <= _MAX_CMD_LEN else cmd[:_MAX_CMD_LEN] + "…"
         return pre(display, "Shell")
 
