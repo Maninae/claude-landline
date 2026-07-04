@@ -24,97 +24,15 @@ from landline.telegram import send_html
 from landline.claude.types import ClaudeStreamResult
 from landline.telegram.fmt import italic
 
-
-def is_result_successful(result: ClaudeStreamResult) -> bool:
-    if result.error:
-        return False
-    return result.has_content
-
-
-def looks_like_stale_session(result: ClaudeStreamResult) -> bool:
-    """True if the result suggests --resume hit a dead session.
-
-    A stale session is specifically a clean exit (code 0 or None) with no
-    content. ANY nonzero exit code means the process died, not that the
-    session was pruned. Misclassifying a crash as stale silently wipes
-    the conversation.
-    """
-    if result.error:
-        return False
-    if result.interrupted:
-        return False
-    if result.exit_code is not None and result.exit_code != 0:
-        return False
-    return not result.has_content
-
-
-def _stderr_looks_like_auth_failure(stderr_tail: str) -> bool:
-    """True if the CC stderr tail matches an OAuth-expiry shape.
-
-    Cluster 3: a multi-day silent auth outage (June 2026) had every
-    ``claude -p`` call 401ing without surfacing anywhere. Match generously
-    (case-insensitive): the exact strings are Anthropic-CLI-owned and
-    change without notice, and the cost of a false positive is one
-    iMessage the operator can ignore — strictly better than missing a
-    multi-day outage.
-    """
-    if not stderr_tail:
-        return False
-    lowered = stderr_tail.lower()
-    return any(marker.lower() in lowered
-               for marker in config.CLAUDE_AUTH_ERROR_MARKERS)
-
-
-def looks_like_pruned_resume(result: ClaudeStreamResult) -> bool:
-    """True if the result matches the pruned/nonexistent-session shape.
-
-    Verified empirically against the Claude Code CLI: resuming a pruned uuid emits a bare
-    ``result`` event with ``subtype=error_during_execution``,
-    ``is_error=true``, NO preceding ``system/init``, and the process exits
-    code 1. Stderr contains ``No conversation found with session ID: <uuid>``.
-
-    Distinguisher from a mid-session API error (which also emits is_error):
-    the mid-session case DID see an init on this turn (``saw_init=True``);
-    the pruned-resume case did not. This is the load-bearing predicate that
-    keeps a genuine mid-session failure from being wiped into a fresh
-    session (which would destroy conversation context).
-
-    Orthogonal to ``looks_like_stale_session``: that predicate catches the
-    clean-empty shape (exit 0 / None, no content). This one catches the
-    is_error + no-init shape (and, as belt-and-suspenders defense-in-depth,
-    the stderr-marker shape if the result-event path didn't populate
-    is_error — e.g. process death before result emit).
-
-    Cluster 2/3 collision guard: a Claude CLI auth failure ALSO produces the
-    is_error + no-init shape (401 happens before any system/init event). If
-    we classified an auth expiry as a pruned resume we would (a) show the
-    operator the misleading "(Previous session expired, starting fresh.)"
-    notice, (b) wipe the still-valid server-side session UUID, and (c)
-    delay the real Cluster 3 auth alert by an extra failed retry. Detect
-    the auth stderr shape first and hand the result to Cluster 3 unmolested.
-    """
-    if result.interrupted:
-        return False
-    # Auth-expiry stderr shape must NOT be treated as pruned-resume; it is
-    # Cluster 3's territory and wiping the session on it is destructive.
-    if _stderr_looks_like_auth_failure(result.stderr_tail or ""):
-        return False
-    if result.saw_init:
-        return False
-    # Corroborating evidence required: is_error + no-init ALONE is ambiguous
-    # with the "pump missed init" path — a JSONDecodeError on the system/init
-    # line (or an exception inside _handle_event on that line) leaves
-    # saw_init=False on the handle even for a healthy mid-session turn that
-    # later failed. Wiping the still-valid server-side session in that case
-    # destroys the whole conversation. Real pruned-resume ALWAYS emits
-    # "No conversation found with session ID" (or "session not found") into
-    # stderr (verified empirically against the Claude Code CLI); demand the marker before we
-    # decide to nuke a session. If saw_init=False + is_error but no marker,
-    # fall back to preserving the session (pre-Cluster-2 behavior) — the
-    # operator sees the "(no response — exit N)" notice and can retry,
-    # which is strictly recoverable, vs. an irreversible session wipe.
-    tail = (result.stderr_tail or "")
-    return any(m in tail for m in config.STALE_RESUME_STDERR_MARKERS)
+# Re-imported so existing patch strings on ``landline.claude.dispatch.<pred>``
+# and existing ``from landline.claude.dispatch import <pred>`` sites keep
+# resolving after the predicates moved to ``landline.claude.predicates``.
+from landline.claude.predicates import (  # noqa: F401
+    is_result_successful,
+    looks_like_stale_session,
+    _stderr_looks_like_auth_failure,
+    looks_like_pruned_resume,
+)
 
 
 class ClaudeDispatcher:
@@ -446,9 +364,25 @@ class ClaudeDispatcher:
     def _finalize_response(
         self, result: ClaudeStreamResult, chat_id: str,
     ) -> None:
-        """Record outcome, persist session state, log conversation, suggest /new."""
-        self._record_outcome(result, chat_id)
+        """Record outcome, persist session state, log conversation, suggest /new.
 
+        Extract-method decomposition: each sub-method's body is the moved
+        code verbatim. The call order below IS the finalize contract — do
+        not reorder. Session-id ordering (pc updated before state, state
+        mirrored before save) lives inside ``_reconcile_session_id``.
+        """
+        self._record_outcome(result, chat_id)
+        self._route_paused_notice(result, chat_id)
+        self._reconcile_session_id(result)
+        self._record_usage_stats_from(result)
+        self._fire_completion_reactions(result)
+        self._warn_context_threshold(chat_id)
+        self.last_process_time = time.time()
+
+    def _route_paused_notice(
+        self, result: ClaudeStreamResult, chat_id: str,
+    ) -> None:
+        """Enqueue "(Paused.)" behind the interrupted turn's draining bubbles."""
         if result.interrupted:
             # Route through the chat's ordered queue so "(Paused.)" lands AFTER
             # any bubbles still draining from the interrupted turn — not ahead
@@ -465,6 +399,14 @@ class ClaudeDispatcher:
             if self._clear_pause_fn is not None:
                 self._clear_pause_fn()
 
+    def _reconcile_session_id(self, result: ClaudeStreamResult) -> None:
+        """Update pc's session id from the result, mirror into state, save.
+
+        Ordering invariant (load-bearing): pc.set_session_id runs BEFORE the
+        state-dict mirror, and the mirror runs BEFORE save_state. An
+        interrupted / exit-143 turn must still land the persisted snapshot
+        matching pc's source-of-truth session id.
+        """
         from landline.claude import _get_persistent_claude
         pc = _get_persistent_claude()
         current_session_id = pc.get_session_id()
@@ -487,6 +429,8 @@ class ClaudeDispatcher:
             self._state["turn_count"] = int(self._state.get("turn_count", 0)) + 1
         save_state(self._state)
 
+    def _record_usage_stats_from(self, result: ClaudeStreamResult) -> None:
+        """Record daily usage/cost from a successful turn and log the reply snippet."""
         # Cluster 4: record usage/cost into the daily aggregate on a
         # genuinely successful turn (never on interrupt / failure — those
         # do not carry a valid `result` event's accounting fields, and
@@ -514,6 +458,8 @@ class ClaudeDispatcher:
                 snippet += "..."
             log_conversation(AGENT_NAME, snippet)
 
+    def _fire_completion_reactions(self, result: ClaudeStreamResult) -> None:
+        """Send the completion 👌 batch for the ids that were 👀'd at classify time."""
         # Cluster 3: fire completion 👌 on the ids we 👀'd at classify
         # time, but ONLY on a genuinely successful turn — not on
         # interrupted (leave 👀 as a persistent "you paused this"
@@ -543,6 +489,8 @@ class ClaudeDispatcher:
                     "continues): %s" % reaction_error
                 )
 
+    def _warn_context_threshold(self, chat_id: str) -> None:
+        """Send the one-shot context-usage heads-up when crossing a threshold."""
         last_warned = self._state.get("_context_warned_at", 0)
         next_thresholds = [t for t in CONTEXT_WARN_THRESHOLDS if t > last_warned]
         if next_thresholds:
@@ -566,8 +514,6 @@ class ClaudeDispatcher:
                         text=warning,
                         direct_fn=lambda body: send_response(token, chat_id, body),
                     )
-
-        self.last_process_time = time.time()
 
     # -- internal helpers (not part of the 4-method decomposition) --
 

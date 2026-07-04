@@ -70,3 +70,10 @@ from landline.claude.streaming import (  # noqa: F401
     ClaudeStreamShutdownHook,
     run_claude_streaming,
 )
+
+from landline.claude.predicates import (  # noqa: F401
+    _stderr_looks_like_auth_failure,
+    is_result_successful,
+    looks_like_pruned_resume,
+    looks_like_stale_session,
+)
