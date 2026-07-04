@@ -90,7 +90,7 @@ _ALLOWED_KEYS = {
     "morning_brief_glob": _v_str_or_none,
     "whisper_bin": _v_path_str,
     "whisper_model": _v_str,
-    "whisper_model_dir": _v_path_or_none,
+    "whisper_model_dir": _v_path_str,
     "whisper_language": _v_str,
     "reaction_acks_enabled": _v_bool,
     "rejection_mode": _v_str,
@@ -113,7 +113,7 @@ def _load_overrides(workspace: Path = None) -> dict:
     The ``workspace`` parameter defaults to the module-level ``WORKSPACE``;
     tests pass a tmp dir explicitly so the loader logic can be exercised
     without side-effect-reloading the whole config module (which would
-    breaks ``is`` identity for downstream constants).
+    break ``is`` identity for downstream constants).
     """
     if workspace is None:
         workspace = WORKSPACE
@@ -434,11 +434,12 @@ CLAUDE_FAILURE_BACKOFF_CAP_SECONDS = 1800
 # ---------------------------------------------------------------------------
 # Cluster 1 (foundation): async iMessage notifications + workspace perms
 # ---------------------------------------------------------------------------
-# Subprocess timeout for the ``imsg send`` CLI call spawned by
-# landline.notifications._do_imsg. Bounded so a hung imsg IPC can't hold onto
-# the alert-worker thread forever; matches the historical value from the
-# in-line subprocess.run(..., timeout=30) call site.
-IMSG_SEND_SUBPROCESS_TIMEOUT_SECONDS = 30
+# Subprocess timeout for the ``osascript`` iMessage-send call spawned by
+# landline.notifications._do_osascript. Bounded so a hung AppleScript event
+# or slow Messages handoff can't hold onto the alert-worker thread forever;
+# matches the historical value from the in-line subprocess.run(..., timeout=30)
+# call site (M13 hoisted it out of that in-line block).
+IMESSAGE_SEND_SUBPROCESS_TIMEOUT_SECONDS = 30
 
 # Workspace-sensitive top-level dirs receive this mode at startup so a
 # fresh checkout / re-mount / new-machine bootstrap never leaves them

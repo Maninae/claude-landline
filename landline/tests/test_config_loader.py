@@ -144,6 +144,18 @@ class TestLoadOverridesFailFast:
         with pytest.raises(SystemExit):
             _load_overrides(tmp_path)
 
+    def test_null_whisper_model_dir_raises_system_exit(self, tmp_path):
+        """``whisper_model_dir`` is a REQUIRED path (validator ``_v_path_str``,
+        not ``_v_path_or_none``): a null must fail fast at startup rather
+        than surface later as an opaque per-voice-note TypeError when the
+        voice pipeline tries to feed the None into whisper's --model-dir."""
+        (tmp_path / "landline.json").write_text(json.dumps({
+            "whisper_model_dir": None,
+        }))
+        from landline.config import _load_overrides
+        with pytest.raises(SystemExit):
+            _load_overrides(tmp_path)
+
 
 # ---------------------------------------------------------------------------
 # Subprocess tests: constants derive from _cfg + overrides applied at import

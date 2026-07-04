@@ -3,24 +3,30 @@
 Extracted from BackgroundPoller._send_network_alert so notification
 logic is reusable by other modules (e.g. crash alerts, health checks).
 
-Cluster 1 (M13): the actual ``imsg send`` subprocess is dispatched on a
-short-lived daemon thread so a hung imsg IPC or slow AppleScript event
-never blocks the poller / dispatcher / StreamSender worker that fired
-the alert. The caller sees a fire-and-forget contract: build the message,
-log the intent, return.
+Cluster 1 (M13): the actual ``osascript`` subprocess is dispatched on a
+short-lived daemon thread so a hung AppleScript event or slow Messages
+handoff never blocks the poller / dispatcher / StreamSender worker that
+fired the alert. The caller sees a fire-and-forget contract: build the
+message, log the intent, return.
+
+Transport: ``osascript -e 'tell application "Messages" to send "<body>"
+to participant "<handle>"'``. This mirrors ``deploy/watchdog.sh`` and
+removes the previous dependency on a private per-user CLI, which
+silently no-op'd on any machine without that personal tool and made
+the auth-expiry / network alerts inert.
 """
 
 import subprocess
 import threading
 from typing import List
 
-from landline.config import AGENT_NAME, IMSG_SEND_SUBPROCESS_TIMEOUT_SECONDS
+from landline.config import AGENT_NAME, IMESSAGE_SEND_SUBPROCESS_TIMEOUT_SECONDS
 from landline.logging import log
 from landline.security import keychain_get
 
 
 # Threads we've spawned that are still (or may still be) running the
-# ``imsg send`` subprocess. Populated by ``_run_imsg_in_thread`` and
+# ``osascript`` subprocess. Populated by ``_run_osascript_in_thread`` and
 # drained by ``_wait_for_pending_alerts`` — the latter is a test-only
 # helper so the sync-vs-async alert contract stays observable in unit
 # tests. Guarded by ``_pending_alerts_lock`` because threads are
@@ -29,35 +35,58 @@ _pending_alerts_lock = threading.Lock()
 _pending_alert_threads: List[threading.Thread] = []
 
 
-def _do_imsg(handle: str, body: str) -> None:
-    """Run the ``imsg send`` subprocess on the worker thread.
+def _escape_applescript_literal(s: str) -> str:
+    """Escape a Python string so it can be embedded inside an AppleScript
+    string literal (between double quotes) without breaking parsing.
+
+    Backslashes go first so the double-quote pass doesn't re-escape the
+    escape character we just inserted. Even though the Keychain-sourced
+    handle is trusted, we escape both operands defensively — the body is
+    agent-generated free text and a stray `"` in either operand would
+    unbalance the AppleScript literal and either silently drop the send
+    or produce a compile error we'd only see in the log.
+    """
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _do_osascript(handle: str, body: str) -> None:
+    """Run the ``osascript`` subprocess on the worker thread.
 
     Swallows every exception (subprocess timeout, missing binary,
     unicode-encode issues) and logs it — the caller has already
     returned, so a raise here would only kill this daemon thread.
     """
+    esc_body = _escape_applescript_literal(body)
+    esc_handle = _escape_applescript_literal(handle)
+    script = (
+        'tell application "Messages" to send "'
+        + esc_body
+        + '" to participant "'
+        + esc_handle
+        + '"'
+    )
     try:
         subprocess.run(
-            ["imsg", "send", "--to", handle, "--text", body],
+            ["osascript", "-e", script],
             capture_output=True,
-            timeout=IMSG_SEND_SUBPROCESS_TIMEOUT_SECONDS,
+            timeout=IMESSAGE_SEND_SUBPROCESS_TIMEOUT_SECONDS,
         )
-    except Exception as imsg_error:
-        log(f"Failed to send iMessage alert: {imsg_error}")
+    except Exception as osascript_error:
+        log(f"Failed to send iMessage alert: {osascript_error}")
 
 
-def _run_imsg_in_thread(handle: str, body: str) -> threading.Thread:
-    """Fire-and-forget: spawn a daemon thread to run ``_do_imsg`` and return.
+def _run_osascript_in_thread(handle: str, body: str) -> threading.Thread:
+    """Fire-and-forget: spawn a daemon thread to run ``_do_osascript`` and return.
 
     Returns the ``Thread`` so tests can join it. Production callers ignore
     the return value; the thread is ``daemon=True`` so it never blocks
     process exit.
     """
     thread = threading.Thread(
-        target=_do_imsg,
+        target=_do_osascript,
         args=(handle, body),
         daemon=True,
-        name="landline-imsg-alert",
+        name="landline-imessage-alert",
     )
     with _pending_alerts_lock:
         # Drop any threads that have already finished so the list doesn't
@@ -71,9 +100,11 @@ def _run_imsg_in_thread(handle: str, body: str) -> threading.Thread:
 def send_network_alert(outage_seconds: float) -> None:
     """Send a one-shot iMessage alert when the network has been down.
 
-    Returns immediately — the imsg subprocess runs on a background thread
-    (M13). A missing owner-imsg-handle is a silent no-op except for a log
-    line; the poller must never crash because Keychain is empty in tests.
+    Returns immediately — the osascript subprocess runs on a background
+    thread (M13). A missing owner-imsg-handle (Keychain service name
+    kept for production compatibility) is a silent no-op except for a
+    log line; the poller must never crash because Keychain is empty in
+    tests.
     """
     try:
         owner_handle = keychain_get("owner-imsg-handle")
@@ -86,7 +117,7 @@ def send_network_alert(outage_seconds: float) -> None:
             f"Messages may be delayed."
         )
         log(f"Sent network-down iMessage alert (outage {int(outage_seconds)}s)")
-        _run_imsg_in_thread(owner_handle, msg)
+        _run_osascript_in_thread(owner_handle, msg)
     except Exception as alert_error:
         # Any failure BEFORE the thread starts (Keychain lookup, log
         # handler, etc.) must not propagate to the poller thread.
@@ -114,7 +145,7 @@ def send_health_alert(subject: str, body: str) -> bool:
             return False
         msg = f"[{AGENT_NAME}] {subject}\n{body}"
         log(f"Sent health iMessage alert (subject={subject!r})")
-        _run_imsg_in_thread(owner_handle, msg)
+        _run_osascript_in_thread(owner_handle, msg)
         return True
     except Exception as alert_error:
         # Same contract as send_network_alert — the caller must never see
@@ -127,7 +158,7 @@ def _wait_for_pending_alerts(timeout: float = 2.0) -> None:
     """Test-only helper: block until every spawned alert thread finishes.
 
     Production code never calls this — the whole point of the async path
-    is that the poller thread doesn't wait on imsg. Tests use it to
+    is that the poller thread doesn't wait on osascript. Tests use it to
     observe the subprocess call site after ``send_*_alert`` returned.
     """
     with _pending_alerts_lock:
