@@ -45,8 +45,12 @@ whenever the work finishes.
   Claude can read.
 - **Reactions as ACKs** — 👀 the moment your message is accepted,
   👌 when the turn completes.
-- **`/status`** — daemon uptime, cursor age, today's turns / tokens /
-  notional-cost, live launchd processes.
+- **`/status`** — a compact system report: agent name header, count of
+  loaded/running launchd jobs matching your label prefix, the last
+  workspace git commit (as "Last backup"), current Claude session id +
+  turn count, today's usage (turns / tokens / notional USD), and the
+  session lock state. Adds a "Last morning brief" line if
+  `morning_brief_glob` is configured.
 - **`/pause` and `/new`** — interrupt an in-flight turn; force a fresh
   Claude session.
 - **Passphrase lock** — the session locks on startup, on `/new`, and on
@@ -66,7 +70,7 @@ whenever the work finishes.
   a one-shot iMessage alert.
 - **Zero runtime dependencies** — pure standard library on Python 3.9.
   A fresh Mac can run this with nothing installed.
-- **~1,000 tests** — every module has coverage, including the
+- **A 1,079-test suite** — every module has coverage, including the
   desync-regression tests that make the design of `StreamPump` load-bearing.
 - **launchd-supervised** — `KeepAlive` for in-place restarts, a separate
   watchdog plist that re-bootstraps the label if it falls off launchd

@@ -28,11 +28,12 @@ git clone https://github.com/Maninae/claude-landline.git ~/claude-landline
 You will also want a separate **agent workspace directory** where the
 daemon reads and writes state — logs, cache, media, the conversation log.
 This is the launchd `WorkingDirectory` for the daemon and is where
-`landline.json` lives. It can be anywhere; a common choice is
-`~/agent-home`.
+`landline.json` lives. It can be anywhere; the `deploy/restart.sh` and
+`deploy/watchdog.sh` scripts default to `~/.landline`, so using that path
+lets you run them with no environment variables.
 
 ```bash
-mkdir -p ~/agent-home/{cache,logs/landline,memory/daily}
+mkdir -p ~/.landline/{cache,logs/telegram-daemon,memory/daily}
 ```
 
 Keep the code and the workspace separate: the code is a checkout you can
@@ -114,7 +115,7 @@ runtime — that's what the daemon does.
 
 ## 4. Write `landline.json`
 
-Create `~/agent-home/landline.json`. Every key is optional — omit any key
+Create `~/.landline/landline.json`. Every key is optional — omit any key
 to accept the default. The full table is below the example.
 
 ```json
@@ -123,7 +124,7 @@ to accept the default. The full table is below the example.
   "user_name": "Alex",
   "agent_name": "Rook",
   "timezone": "America/Los_Angeles",
-  "launchd_label_prefix": "com.example.landline"
+  "launchd_label_prefix": "com.landline"
 }
 ```
 
@@ -140,7 +141,7 @@ Start with something this minimal. Add keys as needed.
 | `user_name` | `"User"` | How the daemon addresses you in prompts, log role labels, and the daily Markdown log header. Purely cosmetic; not a security control. | `"Alex"` |
 | `agent_name` | `"Assistant"` | How the daemon labels the agent side of the conversation. Purely cosmetic. | `"Rook"` |
 | `timezone` | `null` (system zone) | IANA timezone name (via `ZoneInfo`) used for date/time formatting in `/status` and log filenames. `null` reads `/etc/localtime` and falls back to UTC. | `"America/Los_Angeles"` |
-| `launchd_label_prefix` | `"com.landline"` | Prefix `/status` matches against `launchctl list` to report which Landline processes are alive. Match your actual plist label prefix. | `"com.example.landline"` |
+| `launchd_label_prefix` | `"com.landline"` | Prefix `/status` matches against `launchctl list` to report which Landline processes are alive. Match your actual plist label prefix. | `"com.landline"` |
 | `morning_brief_glob` | `null` | Optional glob relative to the workspace. If set, `/status` reports the newest matching file. `null` skips the briefs line entirely — safe default for public installs. | `"briefs_morning/morning-*.md"` |
 | `whisper_bin` | `"whisper"` | Whisper CLI binary. Absolute path recommended so the launchd-slim `PATH` doesn't need `/opt/homebrew/bin`. | `"/opt/homebrew/bin/whisper"` |
 | `whisper_model` | `"base"` | Whisper model name. `"base"` is ~145 MB, ~4× real-time on Apple Silicon — a good default for short voice notes. `"large-v3-turbo"` is higher quality and ~8× slower. | `"base"` |
@@ -178,22 +179,25 @@ Design implications:
 
 The templates in `deploy/` are what launchd loads. Copy them into
 `~/Library/LaunchAgents/`, replace the `YOU`-placeholder paths with your
-real ones, then bootstrap.
+real ones, then bootstrap. The template filenames and labels
+(`com.landline.telegram-daemon`, `com.landline.daemon-watchdog`) match the
+defaults baked into `deploy/restart.sh` and `deploy/watchdog.sh`, so no
+env vars are required if you keep them as-is.
 
 ```bash
-cp deploy/com.example.landline.plist \
-   ~/Library/LaunchAgents/com.example.landline.plist
-cp deploy/com.example.landline-watchdog.plist \
-   ~/Library/LaunchAgents/com.example.landline-watchdog.plist
+cp deploy/com.landline.telegram-daemon.plist \
+   ~/Library/LaunchAgents/com.landline.telegram-daemon.plist
+cp deploy/com.landline.daemon-watchdog.plist \
+   ~/Library/LaunchAgents/com.landline.daemon-watchdog.plist
 
-# Edit both to replace /Users/YOU/agent-home and /Users/YOU/claude-landline
-# with your real paths, and match the Label to the filename if you renamed.
-${EDITOR:-vi} ~/Library/LaunchAgents/com.example.landline.plist
-${EDITOR:-vi} ~/Library/LaunchAgents/com.example.landline-watchdog.plist
+# Edit both to replace /Users/YOU/.landline and /Users/YOU/claude-landline
+# with your real paths.
+${EDITOR:-vi} ~/Library/LaunchAgents/com.landline.telegram-daemon.plist
+${EDITOR:-vi} ~/Library/LaunchAgents/com.landline.daemon-watchdog.plist
 
 # Load both.
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.example.landline.plist
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.example.landline-watchdog.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.landline.telegram-daemon.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.landline.daemon-watchdog.plist
 
 # Confirm.
 launchctl list | grep landline
@@ -222,10 +226,14 @@ next message to Claude.
 
 Then:
 
-- Send `/status`. You should get the daemon uptime, cursor age,
-  today's usage stats (turns / tokens / notional USD), and — if
-  `launchd_label_prefix` is set — a list of live launchd processes.
-- Watch the log tail: `tail -f ~/agent-home/logs/landline/daemon.log`.
+- Send `/status`. You should get a header (`**<agent_name> System
+  Status**`), a count of loaded/running launchd jobs matching
+  `launchd_label_prefix`, the last workspace git commit as the last
+  backup, the current Claude session id + turn count, today's usage stats
+  (turns / tokens / notional USD) if any turns have run, and the lock
+  status line. If `morning_brief_glob` is configured, a "Last morning
+  brief" line lands above the backup line.
+- Watch the log tail: `tail -f ~/.landline/logs/telegram-daemon/daemon.log`.
 - Try a voice note (if whisper is installed) — a 👀 should appear on
   your message, transcription runs locally, and the transcript is
   handed to Claude inside XML delimiters.
@@ -244,7 +252,7 @@ If something isn't working:
   common cause is a Python 3.10+ syntax error introduced by an edit.
   Compile-check with the one-liner in [`../CLAUDE.md`](../CLAUDE.md).
 - **`launchctl bootstrap` fails with `service already loaded`.** Run
-  `launchctl bootout gui/$UID ~/Library/LaunchAgents/com.example.landline.plist`
+  `launchctl bootout gui/$UID ~/Library/LaunchAgents/com.landline.telegram-daemon.plist`
   first, then bootstrap.
 
 ## 7. Day-two operations

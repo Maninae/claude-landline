@@ -61,11 +61,12 @@ built to keep those two streams from stepping on each other.
 
 ## Module map
 
-The package is ~29 modules. `orchestrator.py` is the coordinator that wires
-them together and hosts the main loop; the rest are focused on one concern
-each. Two thin facade modules (`claude.py`, `client.py`) exist to keep
-import paths stable across internal refactors — always import from the
-facade, never the sub-module.
+The package is 37 focused modules (`landline/*.py`, excluding the
+one-line `__init__.py` and the `tests/` tree). `orchestrator.py` is the
+coordinator that wires them together and hosts the main loop; the rest
+are focused on one concern each. Two thin facade modules (`claude.py`,
+`client.py`) exist to keep import paths stable across internal refactors —
+always import from the facade, never the sub-module.
 
 | Module | Purpose |
 |---|---|
@@ -283,9 +284,9 @@ overflow, batch-error, brush-off. Several review rounds have been spent
 pinning down every bail-out branch. Consult the reaction tests before
 touching any of them.
 
-Kill switch: `REACTION_ACKS_ENABLED = False` in `landline.json` disables
-the whole subsystem — useful if Telegram ever removes an emoji from the
-allowed set for `setMessageReaction`.
+Kill switch: set `"reaction_acks_enabled": false` in `landline.json` to
+disable the whole subsystem — useful if Telegram ever removes an emoji
+from the allowed set for `setMessageReaction`.
 
 ---
 

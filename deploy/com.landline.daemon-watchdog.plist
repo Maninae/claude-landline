@@ -8,9 +8,13 @@
   in place; the watchdog rescues the *label* if it fell off launchd.
 
   Copy to ~/Library/LaunchAgents/, then edit:
-    - Label            => your watchdog label
     - ProgramArguments => absolute path to deploy/watchdog.sh in your checkout
     - StandardOutPath / StandardErrorPath => wherever the watchdog log goes
+
+  The Label and the LANDLINE_PLIST / LANDLINE_LABEL env values here match
+  deploy/watchdog.sh's defaults and deploy/com.landline.telegram-daemon.plist's
+  label, so a user following docs/SETUP.md verbatim can load this with no
+  extra edits beyond the /Users/YOU paths.
 
   Environment overrides the watchdog script honors (see deploy/watchdog.sh):
     LANDLINE_PLIST              path to the main daemon plist
@@ -19,12 +23,12 @@
     LANDLINE_KEYCHAIN_ACCOUNT   Keychain account (default: landline)
 
   Load with:
-    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.example.landline-watchdog.plist
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.landline.daemon-watchdog.plist
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.example.landline-watchdog</string>
+    <string>com.landline.daemon-watchdog</string>
 
     <key>ProgramArguments</key>
     <array>
@@ -35,9 +39,9 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>LANDLINE_PLIST</key>
-        <string>/Users/YOU/Library/LaunchAgents/com.example.landline.plist</string>
+        <string>/Users/YOU/Library/LaunchAgents/com.landline.telegram-daemon.plist</string>
         <key>LANDLINE_LABEL</key>
-        <string>com.example.landline</string>
+        <string>com.landline.telegram-daemon</string>
         <key>LANDLINE_KEYCHAIN_ACCOUNT</key>
         <string>landline</string>
     </dict>
@@ -46,9 +50,9 @@
     <integer>300</integer>
 
     <key>StandardOutPath</key>
-    <string>/Users/YOU/agent-home/logs/landline/watchdog.out.log</string>
+    <string>/Users/YOU/.landline/logs/telegram-daemon/watchdog.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/YOU/agent-home/logs/landline/watchdog.err.log</string>
+    <string>/Users/YOU/.landline/logs/telegram-daemon/watchdog.err.log</string>
 
     <key>RunAtLoad</key>
     <true/>

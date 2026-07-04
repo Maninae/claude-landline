@@ -472,7 +472,11 @@ The script:
 6. Tails the log to verify.
 
 Config via env: `LANDLINE_WORKSPACE`, `LANDLINE_REPO`, `LANDLINE_PLIST`,
-`LANDLINE_LABEL` — all have sane defaults matching the repo layout.
+`LANDLINE_LABEL` — all default to values that match the `docs/SETUP.md`
+walkthrough (workspace `~/.landline`, plist
+`~/Library/LaunchAgents/com.landline.telegram-daemon.plist`, label
+`com.landline.telegram-daemon`), so a stock install runs `./deploy/restart.sh`
+with no env vars.
 
 ### Restart continuation
 
