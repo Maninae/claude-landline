@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Landline launchd template. Copy to ~/Library/LaunchAgents/, then edit:
+    - Label                      => your reverse-DNS label (must match filename)
+    - WorkingDirectory           => your agent workspace (where landline.json lives)
+    - PYTHONPATH                 => the checkout of claude-landline (contains the landline/ package)
+    - StandardOutPath/ErrorPath  => wherever you want the launchd wrapper's stdio to land
+  Then load with:
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.example.landline.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.landline</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>-m</string>
+        <string>landline</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/YOU/agent-home</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/Users/YOU/claude-landline</string>
+        <!-- Optional overrides:
+        <key>LANDLINE_WORKSPACE</key>
+        <string>/Users/YOU/agent-home</string>
+        <key>LANDLINE_DAEMON_LOG</key>
+        <string>/Users/YOU/agent-home/logs/landline/daemon.log</string>
+        -->
+    </dict>
+
+    <!-- Restart on exit; ThrottleInterval bounds the crash loop launchd will run. -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>ExitTimeOut</key>
+    <integer>45</integer>
+
+    <!-- launchd's own wrapper log — the daemon writes its structured log via
+         landline.logging (default: <workspace>/logs/telegram-daemon/daemon.log). -->
+    <key>StandardOutPath</key>
+    <string>/Users/YOU/agent-home/logs/landline/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOU/agent-home/logs/landline/launchd.err.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

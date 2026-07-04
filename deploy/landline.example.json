@@ -1,0 +1,17 @@
+{
+  "keychain_account": "landline",
+  "claude_binary": "claude",
+  "claude_model": null,
+  "claude_permission_mode": "bypassPermissions",
+  "user_name": "User",
+  "agent_name": "Assistant",
+  "timezone": null,
+  "launchd_label_prefix": "com.landline",
+  "morning_brief_glob": null,
+  "whisper_bin": "whisper",
+  "whisper_model": "base",
+  "whisper_model_dir": "~/.cache/whisper",
+  "whisper_language": "en",
+  "reaction_acks_enabled": true,
+  "rejection_mode": "silent"
+}

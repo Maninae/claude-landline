@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Landline watchdog template. Runs every 5 minutes; if the daemon has
+  disappeared from launchd entirely (bootout without bootstrap, boot glitch,
+  crash-loop giving up), re-bootstraps it. This is orthogonal to
+  KeepAlive on the daemon plist — KeepAlive restarts a *crashed* process
+  in place; the watchdog rescues the *label* if it fell off launchd.
+
+  Copy to ~/Library/LaunchAgents/, then edit:
+    - Label            => your watchdog label
+    - ProgramArguments => absolute path to deploy/watchdog.sh in your checkout
+    - StandardOutPath / StandardErrorPath => wherever the watchdog log goes
+
+  Environment overrides the watchdog script honors (see deploy/watchdog.sh):
+    LANDLINE_PLIST              path to the main daemon plist
+    LANDLINE_LABEL              launchd label to re-bootstrap
+    LANDLINE_WATCHDOG_LOG       log file the watchdog appends to
+    LANDLINE_KEYCHAIN_ACCOUNT   Keychain account (default: landline)
+
+  Load with:
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.example.landline-watchdog.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.landline-watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/YOU/claude-landline/deploy/watchdog.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LANDLINE_PLIST</key>
+        <string>/Users/YOU/Library/LaunchAgents/com.example.landline.plist</string>
+        <key>LANDLINE_LABEL</key>
+        <string>com.example.landline</string>
+        <key>LANDLINE_KEYCHAIN_ACCOUNT</key>
+        <string>landline</string>
+    </dict>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOU/agent-home/logs/landline/watchdog.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOU/agent-home/logs/landline/watchdog.err.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
