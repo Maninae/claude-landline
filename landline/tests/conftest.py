@@ -16,20 +16,15 @@ import pytest
 # ---------------------------------------------------------------------------
 # Workspace isolation (must run BEFORE the first ``landline.*`` import)
 # ---------------------------------------------------------------------------
-# ``landline.config`` resolves ``WORKSPACE`` from ``LANDLINE_WORKSPACE`` at
-# import time and loads ``<WORKSPACE>/landline.json`` if present. Point the
-# env var at a fresh empty tmp dir so a real config file in the checkout's
-# cwd can never leak into the test run. Pytest imports conftest.py before
-# any test module and any ``from landline...`` import, so setting the env
-# var here wins the race even for module-level imports in test files.
+# `landline.config` resolves WORKSPACE from LANDLINE_WORKSPACE at import time.
+# Pytest imports conftest before any test-module `from landline...`, so
+# setting the env var here wins the race.
 #
-# UNCONDITIONAL assignment, never ``setdefault``: the deploy gate
-# (deploy/restart.sh) runs this suite with LANDLINE_WORKSPACE exported and
-# pointing at the LIVE workspace. Inheriting that value would bind
-# import-time WORKSPACE-derived constants (inject queue, image cache,
-# project dir, ...) to production paths — the exact "tests touch
-# production" incident class this suite exists to prevent. The suite never
-# legitimately needs the shell's workspace; per-test paths use tmp_path.
+# LOAD-BEARING: UNCONDITIONAL assignment, never `setdefault`. The deploy
+# gate (deploy/restart.sh) exports LANDLINE_WORKSPACE pointing at the LIVE
+# workspace; inheriting that would bind import-time WORKSPACE-derived
+# constants (inject queue, image cache, project dir, ...) to production
+# paths — the exact "tests touch production" class this suite prevents.
 _TEST_WORKSPACE = tempfile.mkdtemp(prefix="landline-test-workspace-")
 os.environ["LANDLINE_WORKSPACE"] = _TEST_WORKSPACE
 
@@ -59,7 +54,7 @@ def _fake_keychain_get(service: str, account: str = "landline") -> Optional[str]
 
 
 def _fake_keychain_get_status(service: str, account: str = "landline"):
-    """Mirror of _fake_keychain_get for the new B5 status helper.
+    """Mirror of _fake_keychain_get for the status helper.
     All mocked services return (value, "ok"); unknown returns (None, "absent")."""
     value = _KEYCHAIN_MAP.get(service)
     if value is None:
@@ -99,17 +94,14 @@ def reset_guard_cache():
 def reset_persistent_claude_singleton():
     """Reset the PersistentClaude module-level singleton between tests.
 
-    The dispatcher's _seed_pc_session_from_state_once (E1) reads and writes
-    the singleton. Without this reset, the sid set by one test leaks into
-    the seed-once defensive branch (`if pc.get_session_id() is not None:
-    return`) of the next test, blocking the new state's seed and causing
-    the always-mirror line in _finalize_response to write the stale sid
-    back into the new test's state dict. That breaks every existing test
-    that asserts on state['session_id'].
+    Without this reset, a sid set by one test leaks into the dispatcher's
+    seed-once defensive branch (`if pc.get_session_id() is not None: return`)
+    of the next test, blocking its seed — then `_finalize_response`'s
+    always-mirror line writes the stale sid back into the new test's state,
+    breaking every assertion on `state['session_id']`.
 
-    Drop the reference on both entry and exit so any test that constructs
-    a dispatcher (and thus touches the singleton via the lazy import)
-    leaves a clean slate for the next test.
+    Drop the reference on entry AND exit so any dispatcher-constructing test
+    leaves a clean slate.
     """
     import landline.claude.persistent as pc_mod
     pc_mod._persistent_claude = None
@@ -121,8 +113,8 @@ def reset_persistent_claude_singleton():
 def isolate_daemon_log(tmp_path, monkeypatch):
     """Redirect landline.runtime.logging file output to tmp_path for every test.
 
-    Without this, any test that calls log() (directly or through code under
-    test) attaches a RotatingFileHandler to the real production daemon.log.
+    LOAD-BEARING: without this, any test that calls `log()` attaches a
+    RotatingFileHandler to the real production daemon.log.
     """
     from landline.runtime import logging as _dlog
     monkeypatch.setenv("LANDLINE_DAEMON_LOG", str(tmp_path / "daemon.log"))
@@ -133,18 +125,16 @@ def isolate_daemon_log(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def isolate_conversation_log(tmp_path, monkeypatch):
-    """Redirect landline.runtime.state's WORKSPACE so log_conversation writes daily
-    conversation logs under tmp_path, never the real memory/daily/.
+    """Redirect landline.runtime.state's WORKSPACE so log_conversation writes
+    under tmp_path, never the real memory/daily/.
 
-    Without this, any test that drives an orchestrator/handler path calling
-    log_conversation() appends synthetic fixture messages (e.g. "/pause"
-    floods, "[photo] check this out") into the REAL
-    memory/daily/YYYY-MM-DD_telegram.md — the same file the live daemon
-    writes and the nightly consolidation reads as the operator's actual
-    conversation. Observed polluting the build worktree on 2026-07-03.
-    state.py binds WORKSPACE into its own namespace at import, so patching
-    landline.runtime.state.WORKSPACE is surgical (config.WORKSPACE and other modules
-    are unaffected).
+    LOAD-BEARING: without this, any orchestrator/handler path that calls
+    log_conversation() appends synthetic fixture messages into the REAL
+    memory/daily/YYYY-MM-DD_telegram.md — the file the live daemon writes and
+    the nightly consolidation reads as the operator's actual conversation
+    (observed polluting the build worktree). state.py binds WORKSPACE at
+    import so patching `landline.runtime.state.WORKSPACE` is surgical —
+    config.WORKSPACE and other modules are unaffected.
     """
     monkeypatch.setattr("landline.runtime.state.WORKSPACE", tmp_path)
     yield
@@ -152,13 +142,12 @@ def isolate_conversation_log(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def isolate_usage_stats_file(tmp_path, monkeypatch):
-    """Cluster 4: redirect usage_stats.USAGE_STATS_FILE to tmp_path.
+    """Redirect usage_stats.USAGE_STATS_FILE to tmp_path.
 
-    Any test that exercises the dispatcher's finalize path or the pump's
-    unsolicited-turn branch would otherwise persist real files into
-    ``cache/usage-stats.json``. Redirect at both the config and
-    usage_stats module reference so patches through either seam land in
-    the tmp file.
+    Without this, tests exercising the dispatcher's finalize path or the
+    pump's unsolicited-turn branch would persist real files into
+    `cache/usage-stats.json`. Redirect at BOTH the config and usage_stats
+    module references so patches through either seam land in the tmp file.
     """
     stats_file = tmp_path / "usage-stats.json"
     monkeypatch.setattr("landline.config.USAGE_STATS_FILE", stats_file)
@@ -168,13 +157,13 @@ def isolate_usage_stats_file(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def isolate_outbound_spool_dir(tmp_path, monkeypatch):
-    """Cluster 5: redirect outbound_spool.SPOOL_DIR to tmp_path for every test.
+    """Redirect outbound_spool.SPOOL_DIR to tmp_path for every test.
 
-    Without this, any test that exercises _send_with_retry (many do, via
-    send_response) persists real files into the workspace's real
-    cache/telegram-outbound-spool/. Beyond leaking test artifacts, subsequent
-    integration tests would then find those files at startup and try to
-    replay them (real network calls, or spurious 30–60s stalls per test).
+    LOAD-BEARING: without this, any test hitting `_send_with_retry` (many
+    do, via `send_response`) persists real files into the workspace's real
+    `cache/telegram-outbound-spool/`. Subsequent integration tests would
+    then find those files at startup and try to replay them — real network
+    calls or spurious 30–60s stalls per test.
     """
     spool_dir = tmp_path / "telegram-outbound-spool"
     monkeypatch.setattr("landline.config.SPOOL_DIR", spool_dir)
@@ -194,16 +183,14 @@ def pytest_configure(config):
 
 @pytest.fixture(autouse=True)
 def disable_reactions_network(request, monkeypatch):
-    """Disable REACTION_ACKS_ENABLED globally in tests to prevent leaking
-    real ``setMessageReaction`` POSTs to api.telegram.org.
+    """Disable REACTION_ACKS_ENABLED globally so tests can't leak real
+    `setMessageReaction` POSTs to api.telegram.org.
 
-    The classifier's ``_ack_and_record`` and dispatcher's finalize call
-    ``reactions.set_reaction_async`` / ``set_reactions_batch_async`` — both
-    early-return when the flag is False, so no daemon thread and no
-    ``urllib.request.urlopen`` call is made.
+    Classifier `_ack_and_record` and dispatcher finalize both early-return
+    when the flag is False — no daemon thread, no `urlopen` call.
 
-    Tests that exercise the reactions HTTP path (test_reactions.py) opt back
-    in with ``pytestmark = pytest.mark.reactions_network``.
+    Tests exercising the reactions HTTP path (test_reactions.py) opt back in
+    with `pytestmark = pytest.mark.reactions_network`.
     """
     if "reactions_network" in request.keywords:
         return

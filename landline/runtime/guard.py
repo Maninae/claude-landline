@@ -23,14 +23,10 @@ _CACHE_TTL = 60.0
 def allowed_chat_ids() -> Set[str]:
     """Load the allowlist from Keychain with 60s TTL cache.
 
-    Resilience contract: if the Keychain read fails (returns None — e.g. the
-    Keychain is locked after sleep/wake, or `security` times out), we KEEP the
-    previously cached allowlist instead of falling back to an empty set. An
-    empty set would lock the operator out for the next 60s with "This bot is
-    private." Only successful reads (non-None) replace the cache.
-
-    On cold start with no prior cache, a Keychain failure still degrades to
-    fail-closed (empty set) — there's no safe alternative.
+    - On Keychain read failure (locked after sleep/wake, `security` timeout):
+      keep the previous cache. Blanking to empty would lock the operator out
+      for 60s. Only successful non-None reads replace the cache.
+    - Cold start with no cache still fails closed (empty set) — no safe alternative.
     """
     global _cached_allowed, _cached_at
     now = time.time()
@@ -42,8 +38,8 @@ def allowed_chat_ids() -> Set[str]:
         # Keychain unavailable. Preserve the previous cache if we have one;
         # only fall through to empty on cold start.
         if _cached_allowed is not None:
-            # B5 - distinguish locked (transient, actionable - unlock login
-            # keychain) from absent/error (likely misconfiguration). Logging-only.
+            # Distinguish locked (transient, actionable) from absent/error
+            # (misconfiguration) so the log points at the right fix.
             if status == "locked":
                 print(
                     "telegram_guard: keychain locked — keeping cached allowlist "
@@ -56,8 +52,8 @@ def allowed_chat_ids() -> Set[str]:
                     "allowlist".format(status),
                     file=sys.stderr,
                 )
-            # Refresh the timestamp so we don't hammer Keychain on every call
-            # while it's still broken; we'll retry after the next TTL window.
+            # Refresh timestamp so we don't hammer Keychain per-call while it's
+            # broken; retry after the next TTL window.
             _cached_at = now
             return _cached_allowed
         # Cold start with no cache: fail closed.
@@ -82,11 +78,9 @@ def is_allowed(chat_id) -> bool:
 def reject_message(token: str, chat_id, text: str = "This bot is private.") -> None:
     """Send a rejection notice to an unauthorized sender.
 
-    When REJECTION_MODE == "silent" (default), no outbound reply is sent —
-    the rejected chat_id is still logged at the call site (batch_classifier)
-    so abuse/replay detection is preserved without giving the sender an
-    enumeration oracle. Set REJECTION_MODE = "reply" in config to restore
-    the legacy loud reply (e.g. for incident-response signal).
+    - Default `REJECTION_MODE == "silent"` sends nothing (no enumeration oracle);
+      the rejected chat_id is still logged at the batch_classifier call site so
+      abuse/replay signal is preserved. Set `"reply"` for the legacy loud reply.
     """
     if REJECTION_MODE == "silent":
         return

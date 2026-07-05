@@ -48,10 +48,8 @@ def _format_tool_status(block: Dict[str, Any]) -> Optional[str]:
         cmd = inp.get("command", "") or ""
         if not cmd:
             return None
-        # A Bash command whose executable is an absolute path under the
-        # workspace's ``bin/`` directory renders as just the bare tool name +
-        # its args — hides the noise of the full absolute path in the
-        # status line. Deployer-neutral: any workspace, any bin script.
+        # Strip the workspace `bin/` prefix so the status shows just the tool
+        # name + args, not the full absolute path.
         if cmd.startswith(_WORKSPACE_BIN_PREFIX):
             trimmed = cmd[len(_WORKSPACE_BIN_PREFIX):]
             display = trimmed if len(trimmed) <= _MAX_CMD_LEN else trimmed[:_MAX_CMD_LEN] + "…"

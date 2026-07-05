@@ -48,11 +48,8 @@ def _status_text(
     except Exception:
         lines.append("Scheduled jobs: unable to check")
 
-    # Wrapped defensively for the same reason as the usage_stats block below:
-    # a bad glob value (e.g. an absolute pathlib pattern raises
-    # NotImplementedError) or an inaccessible directory must never break the
-    # whole /status reply — the operator loses the brief line, not their
-    # diagnostics.
+    # Defensive: a bad glob or inaccessible dir must never break /status —
+    # operator loses the brief line, not their diagnostics.
     if MORNING_BRIEF_GLOB:
         try:
             briefs = sorted(workspace.glob(MORNING_BRIEF_GLOB))
@@ -76,11 +73,8 @@ def _status_text(
     session_id_display = (session_id[:12] + "...") if session_id else "none"
     lines.append(f"Session: {session_id_display} ({turns} turns)")
 
-    # Cluster 4: append today's usage/cost line if we have any data. When
-    # usage-stats.json is missing (fresh install) format_status_line
-    # returns "" and /status still succeeds. Wrapped defensively so a
-    # broken stats file never breaks /status — the operator loses the
-    # number, not their diagnostics.
+    # Today's usage/cost line if any; missing file → "". Defensive so a
+    # broken stats file never breaks /status.
     try:
         from landline.runtime import usage_stats
         stats_line = usage_stats.format_status_line()
@@ -113,13 +107,10 @@ class CommandRouter:
         self._lock_manager = lock_manager
         self._persist_state = persist_state_fn
         self._workspace = workspace
-        # Injected callback that resets the live PersistentClaude subprocess
-        # (kill the child + clear its session id) so the next dispatch spawns
-        # a brand-new Claude session. Optional + defaults to None purely for
-        # back-compat with tests that construct CommandRouter directly without
-        # exercising the reset path. In production this is ALWAYS wired by
-        # the orchestrator — without it, /new would silently fail to reset
-        # the live subprocess (the bug this parameter fixes).
+        # Reset callback: kills the live PersistentClaude child + clears its
+        # session id so the next dispatch spawns a fresh Claude. Optional for
+        # test back-compat; production always wires it (else /new would leave
+        # the subprocess on the old session).
         self._reset_claude_fn = reset_claude_fn
 
     def handle(self, text: str) -> Optional[str]:
@@ -139,22 +130,19 @@ class CommandRouter:
     def _handle_new(self) -> str:
         """Reset session state, re-lock, and reset the live Claude subprocess.
 
-        The persisted state reset alone is NOT sufficient — PersistentClaude
-        owns the live session id (E1 refactor moved ownership there). Without
-        invoking ``reset_claude_fn``, the next dispatch would still see the
-        OLD session id on the singleton and `--resume` the same conversation,
-        defeating /new entirely.
+        - `PersistentClaude` owns the live session id (single source of truth),
+          so resetting `state` alone would leave the singleton on the old sid
+          and the next `--resume` would keep the same conversation. Must call
+          `reset_claude_fn` too.
         """
         self._state["session_id"] = None
         self._state["turn_count"] = 0
         self._state.pop("_context_warned_at", None)
         self._lock_manager.reset()
         self._persist_state(self._state)
-        # Reset the live PersistentClaude AFTER state has been persisted, so a
-        # crash during the proc-kill can't leave behind a state file that still
-        # thinks the old session is live. Wrapped in try/except so a singleton
-        # hiccup never blocks the operator from getting the locked confirmation
-        # back.
+        # Order matters: persist first, then kill — a crash during proc-kill
+        # can't leave state pointing at the dead session. Swallow errors so a
+        # singleton hiccup never blocks the operator's locked confirmation.
         if self._reset_claude_fn is not None:
             try:
                 self._reset_claude_fn()

@@ -1,22 +1,15 @@
-"""Update-batch classification — split a drained list of Telegram updates
-into command / text / photo / pause groups.
+"""Update-batch classification — split drained Telegram updates into
+command / text / photo / pause / document / voice buckets.
 
-The classifier walks each update once, handling the trivial-skip side effects
-inline (cursor advance for edited messages, missing chat.id, unauthorized
-chats, non-text/non-photo media, too-long text). What remains is bucketed
-and returned for the orchestrator's dispatch passes.
-
-State lives on the ``TelegramDaemon`` coordinator — this module is a
-stateless helper that receives the daemon and the updates list, mutates the
-daemon's per-batch tracker (``_batch_processed_ids``) via
-``_advance_update_cursor``, and returns the four buckets.
-
-Note: ``BackgroundPoller`` requests ``allowed_updates=["message"]`` (see
-``poller.py``), so callback queries / edited_channel_post / inline_query
-never reach this classifier. The ``message`` key lookup below is the
-single entry point. If that filter is ever loosened, this module must be
-updated alongside it (and ``test_poller.test_request_url_and_payload``
-will fail first).
+- Stateless helper: `classify_updates(daemon, updates)` walks once, handles
+  trivial-skip side effects inline (cursor advance for edits, missing chat.id,
+  unauthorized chats, non-text/non-photo media, too-long text), and returns the
+  buckets for the dispatch passes.
+- State lives on the `TelegramDaemon` coordinator; this module mutates only
+  the daemon's per-batch tracker via `_advance_update_cursor`.
+- `BackgroundPoller` requests `allowed_updates=["message"]` so callback queries
+  / edited_channel_post / inline_query never reach here. If that filter is
+  loosened, update this module alongside it (test_poller fails first).
 """
 
 from typing import Dict, List, TYPE_CHECKING, Tuple
@@ -44,23 +37,23 @@ def _is_pause_command(text: str) -> bool:
 
 
 def extract_chat_id(message: Dict, default: str = "") -> str:
-    """Pull ``str(chat.id)`` from a Telegram message dict, defaulting on miss.
+    """Pull `str(chat.id)` from a Telegram message dict, defaulting on miss.
 
-    The Telegram envelope nests ``chat.id`` two levels deep; this helper
-    centralizes the defensive ``.get("chat", {}).get("id", ...)`` walk + the
-    ``str(...)`` coercion that the rest of the daemon (allowlist cache key,
-    lock checks, log fields) depends on. Returns ``default`` if either
-    ``chat`` or ``chat.id`` is missing. Always returns a ``str``.
+    - Centralizes the defensive two-level `.get("chat", {}).get("id", ...)`
+      walk + `str(...)` coercion the rest of the daemon depends on
+      (allowlist cache key, lock checks, log fields).
+    - Always returns a `str`; `default` on missing chat / chat.id.
     """
     return str(message.get("chat", {}).get("id", default))
 
 
 def _is_acceptable_document(document_field: Dict) -> bool:
-    """Return True iff the Telegram document envelope is acceptable for
-    ingestion. Rejects on: missing filename, unsafe basename, disallowed
-    extension, over-cap size, or mime that (when present) doesn't match one
-    of the allowed prefixes. Extension is the primary gate; mime is a
-    belt-and-suspenders confirmation and its absence does NOT block."""
+    """True iff the Telegram document envelope passes ingestion gates.
+
+    Rejects on missing filename, unsafe basename, disallowed extension,
+    over-cap size, or mismatched mime (when present). Extension is the primary
+    gate; mime is belt-and-suspenders and absent mime does NOT block.
+    """
     file_name = document_field.get("file_name")
     if not isinstance(file_name, str) or not file_name:
         return False
@@ -91,12 +84,12 @@ def classify_updates(
     List[Tuple[Dict, int, str]],  # document_updates (message, update_id, chat_id)
     List[Tuple[Dict, int, str]],  # voice_updates (message, update_id, chat_id)
 ]:
-    """Pass 1 of ``_process_update_batch``: classify each update and perform
-    the trivial-skip side effects inline (cursor advance, reject, too-long
-    notice). Returns the four classified buckets for the dispatch passes.
+    """Pass 1 of `_process_update_batch`: classify each update; trivial-skip
+    side effects (cursor advance, reject, too-long notice) run inline.
 
-    /pause is intercepted BEFORE the ``/``-prefix branch so it never reaches
-    ``CommandRouter`` (which would reply with "Unknown command").
+    - `/pause` is intercepted BEFORE the `/`-prefix branch so it never reaches
+      `CommandRouter` (which would reply "Unknown command").
+    - Returns the six classified buckets in dispatch-pass order.
     """
     command_updates: List[Tuple[Dict, int, str]] = []
     text_updates: List[Tuple[Dict, int, str]] = []
@@ -106,14 +99,13 @@ def classify_updates(
     voice_updates: List[Tuple[Dict, int, str]] = []
 
     def _ack_and_record(msg: Dict, chat: str) -> None:
-        """Cluster 3: fire 👀 for accepted content messages and record the
-        server-side message_id on the daemon's per-batch tracker so the
-        dispatcher can fire 👌 on the same ids at finalize time.
+        """Fire 👀 for accepted content messages, record the message_id on the
+        daemon's per-batch tracker so the dispatcher can fire 👌 at finalize.
 
-        Only called AFTER the guard passes — an unauthorized sender must
-        never receive a reaction (that would be an enumeration oracle).
-        Never called for /pause (control) or slash commands (they render
-        as text; no receipt semantics).
+        - Only called AFTER the guard passes — a reaction to an unauthorized
+          sender would be an enumeration oracle.
+        - Never called for /pause (control) or slash commands (text-rendered,
+          no receipt semantics).
         """
         mid = msg.get("message_id")
         if not isinstance(mid, int):
@@ -154,10 +146,9 @@ def classify_updates(
             photo_updates.append((message, update_id, chat_id))
             continue
 
-        # Voice / audio / video_note: transcribed locally with whisper.
-        # The classifier only buckets — the handler enforces duration
-        # limits and picks a filename. No mime/ext gate here; the
-        # handler's ``_voice_filename`` sanitizes any advertised name.
+        # Voice / audio / video_note: classifier only buckets; the handler
+        # enforces duration limits, picks a filename, and sanitizes any
+        # advertised name via `_voice_filename`.
         voice_key = next(
             (k for k in ("voice", "audio", "video_note") if k in message),
             None,
@@ -178,12 +169,8 @@ def classify_updates(
                 _ack_and_record(message, chat_id)
                 document_updates.append((message, update_id, chat_id))
                 continue
-            # Rejected — fall through to the non-text notice path.
-            # PRIVACY: never log the attacker-controlled file_name here —
-            # a rejection ("../../../etc/passwd.evil", or a sensitive
-            # legit name that just failed the extension gate) would land
-            # in the rotating daemon log verbatim. Metadata-only: size
-            # and mime are safe.
+            # PRIVACY: never log the attacker-controlled `file_name` — it
+            # would land in the rotating daemon log verbatim. Metadata only.
             log(
                 "Rejecting document from chat %s: size=%r mime=%r" % (
                     chat_id,
@@ -201,18 +188,16 @@ def classify_updates(
 
         stripped_lower = text.strip().lower()
 
-        # /pause intercepted BEFORE the `/`-prefix branch — never reaches
-        # CommandRouter (which would return "Unknown command"). Accept
-        # `/pause` and `/pause <anything>` (e.g. `/pause now`) — first
-        # whitespace-token is what matters.
+        # /pause intercepted BEFORE the `/`-prefix branch — CommandRouter
+        # would else reply "Unknown command". Accepts `/pause` and
+        # `/pause <anything>` (first token wins).
         if _is_pause_command(stripped_lower):
-            # NO reaction on /pause — it's control, not content.
+            # No reaction on /pause — control, not content.
             pause_updates.append((message, update_id, chat_id))
             continue
 
         if text.strip().startswith("/"):
-            # NO reaction on slash commands — they render as text
-            # (CommandRouter reply); no receipt semantics needed.
+            # No reaction on slash commands — they render as text.
             command_updates.append((message, update_id, text))
         elif len(text) > MAX_MESSAGE_LENGTH:
             log(f"Message too long: {len(text)} chars (max {MAX_MESSAGE_LENGTH})")

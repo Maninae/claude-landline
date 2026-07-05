@@ -51,9 +51,9 @@ class TestClaudeStreamResult:
         assert r.has_content is False
 
     def test_cluster4_usage_fields_default_to_none(self):
-        """Cluster 4: new usage/cost mirror fields default to None so tests
-        that construct ClaudeStreamResult by hand keep working, and
-        downstream code treats None as 'no data' (recorded as zero)."""
+        """Usage/cost mirror fields default to None so hand-constructed
+        ClaudeStreamResult tests keep working, and downstream code treats
+        None as 'no data' (recorded as zero)."""
         r = ClaudeStreamResult()
         assert r.result_usage is None
         assert r.result_model_usage is None
@@ -1019,13 +1019,12 @@ class TestBackoffQueueCrossChat:
 
 
 class TestSessionIdSingleSource:
-    """E1 — PersistentClaude is the single source of truth for session_id.
+    """PersistentClaude is the single source of truth for session_id.
 
-    All new tests in this class patch the canonical seam
-    ``landline.claude._get_persistent_claude`` so they can inject a fake pc
-    and assert on its method calls. The autouse
-    ``reset_persistent_claude_singleton`` fixture in conftest.py keeps
-    real-singleton hygiene for tests that don't patch.
+    Tests patch the canonical seam `landline.claude._get_persistent_claude`
+    to inject a fake pc and assert on its method calls. Autouse
+    `reset_persistent_claude_singleton` in conftest keeps real-singleton
+    hygiene for tests that don't patch.
     """
 
     def _make_dispatcher(self, state=None, run_claude_fn=None,
@@ -1469,9 +1468,10 @@ class TestTryEnqueueOrSendCallers:
 
 
 class TestLooksLikePrunedResume:
-    """Cluster 2 (stale-resume auto-recovery) — the pruned/nonexistent-session
-    predicate. Orthogonal to looks_like_stale_session (clean-empty shape);
-    this one catches the is_error + no-init shape verified empirically against the Claude Code CLI.
+    """Stale-resume auto-recovery — the pruned/nonexistent-session predicate.
+    Orthogonal to looks_like_stale_session (clean-empty shape); this one
+    catches the is_error + no-init shape verified empirically against the
+    Claude Code CLI.
     """
 
     def test_looks_like_pruned_resume_true_for_no_init_is_error(self):
@@ -1553,12 +1553,12 @@ class TestLooksLikePrunedResume:
         assert looks_like_pruned_resume(r) is False
 
     def test_looks_like_pruned_resume_false_when_stderr_is_auth_failure(self):
-        """CLUSTER 2/3 COLLISION: an OAuth-expiry 401 also produces
+        """AUTH-EXPIRY COLLISION: an OAuth-expiry 401 also produces
         (is_error=True, saw_init=False) because the CLI aborts BEFORE
-        emitting system/init. If we classify that as pruned-resume we (a)
-        show the operator the wrong "(Previous session expired…)" notice, (b) wipe
-        the still-valid server-side session UUID, and (c) delay the real
-        Cluster 3 auth alert by an extra failed retry. The canonical
+        emitting system/init. Classifying it as pruned-resume would
+        (a) show the operator the wrong "(Previous session expired…)"
+        notice, (b) wipe the still-valid server-side session UUID, and
+        (c) delay the real auth alert by an extra failed retry. The
         pruned-resume branch must exclude the auth stderr shape first."""
         for marker in daemon_config.CLAUDE_AUTH_ERROR_MARKERS:
             r = ClaudeStreamResult()
@@ -1606,9 +1606,9 @@ class TestLooksLikePrunedResume:
 
 
 class TestPrunedResumeRetryIntegration:
-    """Cluster 2 regression proofs — the dispatcher must fall back to a
-    fresh session on the pruned-resume shape, and must NOT fall back on a
-    mid-session error (which also carries is_error=True)."""
+    """Regression: the dispatcher must fall back to a fresh session on the
+    pruned-resume shape, and must NOT fall back on a mid-session error
+    (which also carries is_error=True)."""
 
     def _make_dispatcher(self, state, run_claude_fn):
         ft = ClaudeFailureTracker()
@@ -1747,14 +1747,14 @@ class TestPrunedResumeRetryIntegration:
         assert state["session_id"] == "healthy-sid"
 
     def test_invoke_with_stale_retry_does_not_wipe_session_on_auth_failure(self):
-        """CLUSTER 2/3 COLLISION REGRESSION: a Claude CLI 401 (auth expiry)
+        """AUTH-EXPIRY COLLISION REGRESSION: a Claude CLI 401 (auth expiry)
         emits the same (is_error=True, saw_init=False) shape as a pruned
         --resume, plus an auth marker in stderr. The dispatcher must NOT
         (a) send the operator "(Previous session expired, starting fresh.)",
         (b) clear pc.session_id, or (c) zero state['session_id']/turn_count
-        on that shape — those are all destructive on a session that is
-        still perfectly valid server-side. Only ONE run_claude call must
-        happen; the auth stderr keeps Cluster 3's alert unmolested.
+        on that shape — all destructive on a still-valid server-side session.
+        Only ONE run_claude call must happen; the auth stderr keeps the
+        out-of-band auth alert unmolested.
         """
         call_count = [0]
         calls_seen = []
@@ -1827,21 +1827,21 @@ class TestPrunedResumeRetryIntegration:
             "misleading the operator and wiping the session"
         )
 
-        # Cluster 3's out-of-band auth alert still fires on turn 1.
+        # Out-of-band auth alert still fires on turn 1.
         mock_alert.assert_called_once()
         _, kwargs = mock_alert.call_args
         assert kwargs.get("subject") == "claude-auth-expired"
 
 
 class TestClaudeAuthExpiryAlert:
-    """Cluster 3 — Claude CLI auth-expiry detection.
+    """Claude CLI auth-expiry detection.
 
-    a multi-day silent auth outage (June 2026): every headless ``claude -p`` call 401ed
-    silently for two days before he noticed. These tests pin the shape of
-    the one-shot iMessage alert that fires on the FIRST failure whose
-    stderr tail matches the OAuth-expiry pattern, independent of the
-    existing failure_tracker "Claude unavailable" alert (which fires on
-    the 10th consecutive failure).
+    Regression against a multi-day silent auth outage (June 2026): every
+    headless `claude -p` call 401'd silently for two days before it was
+    noticed. These tests pin the shape of the one-shot iMessage alert that
+    fires on the FIRST failure whose stderr matches the OAuth-expiry
+    pattern, independent of the failure_tracker "Claude unavailable" alert
+    (which fires on the 10th consecutive failure).
     """
 
     def _make_dispatcher(self, failure_tracker=None):
@@ -2125,9 +2125,9 @@ class TestClaudeAuthExpiryAlert:
 
 
 class TestReactionCompletionAcks:
-    """Cluster 3 — dispatcher fires 👌 (completion) on the message_ids
-    that earned a 👀 at classify time, but ONLY on genuinely successful
-    turns (non-interrupted, non-error).
+    """Dispatcher fires 👌 (completion) on the message_ids that earned a 👀
+    at classify time, but ONLY on genuinely successful turns
+    (non-interrupted, non-error).
 
     Coverage:
       - success → 👌 dispatched with the exact ids and DONE emoji
@@ -2390,8 +2390,8 @@ class TestReactionCompletionAcks:
 
 
 class TestUsageStatsRecording:
-    """Cluster 4 — dispatcher persists usage/cost per turn to the daily
-    aggregate on genuinely successful turns only.
+    """Dispatcher persists usage/cost per turn to the daily aggregate
+    on genuinely successful turns only.
 
     Coverage:
       - success → usage_stats.record_turn called once with dispatched=True

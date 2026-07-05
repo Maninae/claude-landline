@@ -78,23 +78,13 @@ def main() -> None:
 
         secure_daily_logs()
 
-        # Cluster 5: reclaim any orphaned inflight spool files from a prior
-        # daemon process (its pid died with the process) so the background
-        # replayer sees them as ``pending``. Reclaim is a cheap directory
-        # scan + rename — no network I/O — so it stays synchronous.
-        #
-        # The synchronous ``replay_all`` pass that used to run here was
-        # REMOVED (finding: it could block daemon startup for tens of
-        # minutes when Telegram was unreachable — ~200 files × 10s urlopen
-        # timeout each — during which the poller wasn't running and the
-        # launchd watchdog saw the daemon as "starting"). The background
-        # ``OutboundSpoolReplayer`` (started inside ``TelegramDaemon.run``
-        # after restart-continuation and before the poller) runs
-        # ``replay_all`` on its first tick and provides identical
-        # at-least-once coverage without the availability hole. The 60s
-        # replay interval + 5s ``SPOOL_REPLAY_MIN_AGE_SECONDS`` gate mean
-        # newly reclaimed files reach the replayer promptly once the
-        # daemon is up.
+        # Reclaim orphaned inflight spool files from a prior process (pid
+        # died with it) so the background replayer sees them as pending.
+        # Cheap dir scan + rename — no network I/O.
+        # Do NOT add a synchronous `replay_all` pass here; see
+        # ARCHITECTURE.md "Outbound spool" — it can block startup for
+        # tens of minutes when Telegram is unreachable. Background
+        # `OutboundSpoolReplayer` covers replay from `TelegramDaemon.run`.
         outbound_spool.ensure_spool_dir()
         reclaimed = outbound_spool.startup_reclaim_orphaned_inflight()
         if reclaimed:

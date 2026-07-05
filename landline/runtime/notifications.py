@@ -1,19 +1,11 @@
 """iMessage alert delivery for the daemon.
 
-Extracted from BackgroundPoller._send_network_alert so notification
-logic is reusable by other modules (e.g. crash alerts, health checks).
-
-Cluster 1 (M13): the actual ``osascript`` subprocess is dispatched on a
-short-lived daemon thread so a hung AppleScript event or slow Messages
-handoff never blocks the poller / dispatcher / StreamSender worker that
-fired the alert. The caller sees a fire-and-forget contract: build the
-message, log the intent, return.
-
-Transport: ``osascript -e 'tell application "Messages" to send "<body>"
-to participant "<handle>"'``. This mirrors ``deploy/watchdog.sh`` and
-removes the previous dependency on a private per-user CLI, which
-silently no-op'd on any machine without that personal tool and made
-the auth-expiry / network alerts inert.
+- Fire-and-forget contract: `osascript` runs on a short-lived daemon thread so
+  a hung AppleScript event never blocks the poller / dispatcher / StreamSender
+  worker that fired the alert.
+- Transport: `osascript -e 'tell application "Messages" to send "<body>" to
+  participant "<handle>"'` — mirrors `deploy/watchdog.sh`. Replaces an earlier
+  per-user CLI dep that silently no-op'd on any machine without it.
 """
 
 import subprocess
@@ -25,37 +17,26 @@ from landline.runtime.logging import log
 from landline.runtime.security import keychain_get
 
 
-# Threads we've spawned that are still (or may still be) running the
-# ``osascript`` subprocess. Populated by ``_run_osascript_in_thread`` and
-# drained by ``_wait_for_pending_alerts`` — the latter is a test-only
-# helper so the sync-vs-async alert contract stays observable in unit
-# tests. Guarded by ``_pending_alerts_lock`` because threads are
-# started from the poller, dispatcher, and StreamSender workers.
+# Live osascript worker threads — populated on spawn, drained by the
+# test-only `_wait_for_pending_alerts` (production never joins). Lock guards
+# multi-thread producers (poller / dispatcher / StreamSender workers).
 _pending_alerts_lock = threading.Lock()
 _pending_alert_threads: List[threading.Thread] = []
 
 
 def _escape_applescript_literal(s: str) -> str:
-    """Escape a Python string so it can be embedded inside an AppleScript
-    string literal (between double quotes) without breaking parsing.
+    """Escape a Python string for embedding in an AppleScript "…" literal.
 
-    Backslashes go first so the double-quote pass doesn't re-escape the
-    escape character we just inserted. Even though the Keychain-sourced
-    handle is trusted, we escape both operands defensively — the body is
-    agent-generated free text and a stray `"` in either operand would
-    unbalance the AppleScript literal and either silently drop the send
-    or produce a compile error we'd only see in the log.
+    - Backslashes escaped first so the "-pass doesn't re-escape them.
+    - Both operands escaped defensively: body is agent-generated free text;
+      a stray `"` would unbalance the literal and silently drop the send.
     """
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _do_osascript(handle: str, body: str) -> None:
-    """Run the ``osascript`` subprocess on the worker thread.
-
-    Swallows every exception (subprocess timeout, missing binary,
-    unicode-encode issues) and logs it — the caller has already
-    returned, so a raise here would only kill this daemon thread.
-    """
+    """Run `osascript` on the worker thread. Logs and swallows every failure —
+    the caller has already returned, so a raise would only kill this thread."""
     esc_body = _escape_applescript_literal(body)
     esc_handle = _escape_applescript_literal(handle)
     script = (
@@ -76,11 +57,10 @@ def _do_osascript(handle: str, body: str) -> None:
 
 
 def _run_osascript_in_thread(handle: str, body: str) -> threading.Thread:
-    """Fire-and-forget: spawn a daemon thread to run ``_do_osascript`` and return.
+    """Fire-and-forget: spawn a daemon thread running `_do_osascript`, return it.
 
-    Returns the ``Thread`` so tests can join it. Production callers ignore
-    the return value; the thread is ``daemon=True`` so it never blocks
-    process exit.
+    - Returned Thread is for tests to join; production callers discard it.
+    - `daemon=True` so it never blocks process exit.
     """
     thread = threading.Thread(
         target=_do_osascript,
@@ -89,8 +69,7 @@ def _run_osascript_in_thread(handle: str, body: str) -> threading.Thread:
         name="landline-imessage-alert",
     )
     with _pending_alerts_lock:
-        # Drop any threads that have already finished so the list doesn't
-        # grow without bound over the daemon's lifetime.
+        # Reap finished threads so the list can't grow unbounded.
         _pending_alert_threads[:] = [t for t in _pending_alert_threads if t.is_alive()]
         _pending_alert_threads.append(thread)
     thread.start()
@@ -100,11 +79,9 @@ def _run_osascript_in_thread(handle: str, body: str) -> threading.Thread:
 def send_network_alert(outage_seconds: float) -> None:
     """Send a one-shot iMessage alert when the network has been down.
 
-    Returns immediately — the osascript subprocess runs on a background
-    thread (M13). A missing owner-imsg-handle (Keychain service name
-    kept for production compatibility) is a silent no-op except for a
-    log line; the poller must never crash because Keychain is empty in
-    tests.
+    - Returns immediately (osascript runs on a background thread).
+    - Missing `owner-imsg-handle` is a silent no-op + log line; the poller must
+      never crash because Keychain is empty (test envs).
     """
     try:
         owner_handle = keychain_get("owner-imsg-handle")
@@ -119,21 +96,21 @@ def send_network_alert(outage_seconds: float) -> None:
         log(f"Sent network-down iMessage alert (outage {int(outage_seconds)}s)")
         _run_osascript_in_thread(owner_handle, msg)
     except Exception as alert_error:
-        # Any failure BEFORE the thread starts (Keychain lookup, log
-        # handler, etc.) must not propagate to the poller thread.
+        # Never propagate to the poller thread — swallow pre-spawn failures.
         log(f"send_network_alert error: {alert_error}")
 
 
 def send_health_alert(subject: str, body: str) -> bool:
     """General-purpose async health alert.
 
-    Builds ``[<AGENT_NAME>] <subject>\\n<body>`` and dispatches it on a background
-    thread (same fire-and-forget contract as ``send_network_alert``).
+    Args:
+        subject: single-line title (prefixed with `[<AGENT_NAME>]`).
+        body: message body, joined with `\\n`.
+    Returns:
+        True iff the alert thread was started (owner handle present).
+        Callers gate one-shot latches on this: a False means nothing went out.
 
-    Returns True iff the alert thread was started (owner handle present in
-    Keychain). Cluster 3 uses this return value to gate its auth-alert
-    latch — a False result means the alert never went out, so the latch
-    should NOT be set.
+    - Same fire-and-forget contract as `send_network_alert`.
     """
     try:
         owner_handle = keychain_get("owner-imsg-handle")
@@ -148,18 +125,17 @@ def send_health_alert(subject: str, body: str) -> bool:
         _run_osascript_in_thread(owner_handle, msg)
         return True
     except Exception as alert_error:
-        # Same contract as send_network_alert — the caller must never see
-        # an exception, even if Keychain / logging misbehave.
+        # Same contract as send_network_alert — never propagate.
         log(f"send_health_alert error: {alert_error}")
         return False
 
 
 def _wait_for_pending_alerts(timeout: float = 2.0) -> None:
-    """Test-only helper: block until every spawned alert thread finishes.
+    """Test-only: block until every spawned alert thread finishes.
 
-    Production code never calls this — the whole point of the async path
-    is that the poller thread doesn't wait on osascript. Tests use it to
-    observe the subprocess call site after ``send_*_alert`` returned.
+    Production never calls this — the whole point of the async path is that
+    the poller doesn't wait on osascript. Tests use it to observe the
+    subprocess call site after `send_*_alert` returned.
     """
     with _pending_alerts_lock:
         pending = list(_pending_alert_threads)

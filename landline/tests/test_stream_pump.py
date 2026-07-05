@@ -192,7 +192,7 @@ class TestDispatchedTurn(_PumpTestCase):
 
         self.assertTrue(handle.done.wait(2))
         ops = sender.snapshot()
-        # Trailing flush is the pump-side end-of-turn boundary (H1 fix).
+        # Trailing flush is the pump-side end-of-turn boundary.
         self.assertEqual(
             ops,
             [("text", "first bubble"), ("flush", None),
@@ -203,7 +203,7 @@ class TestDispatchedTurn(_PumpTestCase):
         """The result payload extending the streamed deltas must be sent as
         a tail INSIDE the turn's bubble, before the end-of-turn flush, and
         streamed_parts must join to the full final text (old-reader parity;
-        the append moved pump-side for the H1 race fix)."""
+        the append moved pump-side to fix a back-to-back turn race)."""
         sender = _FakeSender()
         handle = TurnHandle()
         self.pump.register_turn(handle, sender)
@@ -495,14 +495,13 @@ class TestPumpLifecycle(_PumpTestCase):
 
 
 class TestH1BackToBackRaceRegression(_PumpTestCase):
-    """2026-07-02 audit finding H1: a dispatched turn whose result extends
-    its streamed text, with an unsolicited block back-to-back in the pipe.
+    """Regression: a dispatched turn whose result extends its streamed text,
+    with an unsolicited block back-to-back in the pipe.
 
-    Broken behavior (tail appended by the dispatch thread after done.wait):
+    - Broken (tail appended by dispatch thread after done.wait):
         text 'hello' | text BG | flush | text ', world!' | flush
-    → Telegram bubbles "helloBG" and ", world!".
-
-    Required behavior (pump is the sole producer of turn content):
+      → Telegram bubbles "helloBG" and ", world!".
+    - Required (pump is sole producer of turn content):
         text 'hello' | text ', world!' | flush | text BG | flush
     """
 
@@ -635,7 +634,7 @@ class TestPumpRegistry(unittest.TestCase):
 
 
 class TestPrunedResumeSignals(_PumpTestCase):
-    """Cluster 2 (stale-resume auto-recovery) — the pump records the terminal
+    """Stale-resume auto-recovery — the pump records the terminal
     result event's error flag / subtype and whether an init opened the block.
 
     ``landline.claude.dispatch.looks_like_pruned_resume`` consumes those fields
@@ -687,7 +686,7 @@ class TestPrunedResumeSignals(_PumpTestCase):
 
 
 class TestUsageCapture(_PumpTestCase):
-    """Cluster 4 (usage/cost stats) — the pump captures optional accounting
+    """Usage/cost stats — the pump captures optional accounting
     fields from the terminal ``result`` event onto the TurnHandle so the
     streaming layer can surface them on the ClaudeStreamResult.
     """
@@ -811,11 +810,10 @@ class TestUsageCapture(_PumpTestCase):
             self.assertTrue(handle.done.wait(2))
 
     def test_unsolicited_usage_record_is_async_from_pump(self):
-        """PIN (Cluster 4 fsync-under-lock hardening): the pump thread must
-        NOT block on ``usage_stats.record_turn`` — that call performs
-        synchronous fsync inside a module-level lock, and a stall there
-        would freeze the pump (violating the "stdout pipe has exactly one
-        continuously-reading reader" invariant in ``CLAUDE.md``).
+        """PIN: the pump thread must NOT block on `usage_stats.record_turn` —
+        it fsyncs inside a module-level lock and a stall would freeze the pump
+        (violating the "stdout has exactly one continuously-reading reader"
+        invariant in CLAUDE.md).
 
         Simulate an SSD stall by making record_turn block, then verify the
         pump processes a follow-up turn while record_turn is still stuck.

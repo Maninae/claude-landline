@@ -1,21 +1,16 @@
 """Inject queue — just-in-time context prepended to the next Claude turn.
 
-Cron jobs and other scripts drop JSON files into the inject-queue directory.
-Before each Claude call, the daemon drains all queued files and formats them
-as a context block prepended to the user's message.
+Cron jobs and other scripts drop JSON files into the inject-queue directory;
+the daemon drains them before each Claude call and prepends them to the
+user's message.
 
-Two-phase commit: ``drain_inject_queue`` reads the files and returns the
-text plus the list of paths that produced it, but does NOT delete anything.
-After the caller has handed the message off to Claude successfully, it calls
-``commit_inject_queue`` to unlink the consumed files.  If the Claude call
-crashes, times out, or is in backoff, the files remain on disk and get
-re-injected on the next attempt — the operator never silently loses a morning brief
-or news report.
-
-Files that are malformed (bad JSON or bad UTF-8 bytes) are unlinked
-immediately so they don't keep failing on every drain. Transient I/O errors
-(``OSError``: EACCES/EIO) are the opposite — the file is left on disk and
-retried next drain, so a momentarily-unreadable good report is never lost.
+- Two-phase commit: `drain_inject_queue` returns text + paths but does NOT
+  unlink. `commit_inject_queue` runs only after Claude accepted the stdin
+  write, so a crashed / backed-off dispatch re-injects on retry — the operator
+  never silently loses a morning brief or news report.
+- Malformed files (bad JSON / bad UTF-8) are unlinked on first read so they
+  can't jam the queue. Transient I/O errors (OSError EACCES/EIO) are left on
+  disk for the next drain — a momentarily-unreadable good report is never lost.
 """
 
 import json
@@ -28,25 +23,23 @@ from landline.runtime.logging import log
 
 
 def drain_inject_queue(queue_dir: Path) -> Tuple[str, List[Path]]:
-    """Read all queued inject files and build a formatted context block.
+    """Read all queued inject files and build the formatted context block.
 
-    Returns a ``(text, consumed_paths)`` tuple.  ``text`` is empty when
-    nothing is queued or every file is corrupt; ``consumed_paths`` is the
-    list of well-formed files whose content was incorporated into ``text``
-    and that should be deleted after a successful Claude dispatch via
-    :func:`commit_inject_queue`.
+    Args:
+        queue_dir: directory holding `*.json` inject files.
+    Returns:
+        `(text, consumed_paths)`: `text` empty when nothing queued or every
+        file is corrupt; `consumed_paths` are the paths the caller must pass
+        to `commit_inject_queue` after Claude accepted the stdin write.
 
-    The caller is responsible for checking lock state before calling —
-    inject is only active when unlocked.
+    - Caller must check lock state first — inject only runs when unlocked.
     """
     if not queue_dir.exists():
         return "", []
     def _sort_key(p):
-        # Sort by mtime (when the producer finished writing the file). Filename
-        # tiebreak gives deterministic order on filesystem-mtime ties. If stat
-        # raises (file vanished between glob and stat), sort it last so the
-        # subsequent read_text routes through the existing OSError branch and
-        # leaves it for retry — never silently drop it from the batch.
+        # mtime = producer's finish time; filename tiebreak for determinism.
+        # stat() raising (vanished file) sorts last so the read_text below
+        # routes through the OSError branch — never silently drop.
         try:
             return (p.stat().st_mtime, p.name)
         except OSError:
@@ -63,16 +56,13 @@ def drain_inject_queue(queue_dir: Path) -> Tuple[str, List[Path]]:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except OSError as e:
-            # Transient I/O / permission error — DO NOT unlink. A good report
-            # file briefly unreadable (EACCES/EIO) is not corrupt; leave it on
-            # disk so the next drain retries it.
+            # Transient I/O — DO NOT unlink; retry next drain.
             log(f"[inject] I/O error reading {path.name} (leaving for retry): {e}")
             continue
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            # Malformed payload (bad JSON or bad UTF-8 bytes): unlink now so it
-            # doesn't jam the queue and drop every later message on each drain.
-            # UnicodeDecodeError is NOT an OSError, so without this it would
-            # propagate up and re-fail forever — the infinite-reprocess trap.
+            # Malformed payload — unlink now so it doesn't jam the queue and
+            # drop every later message forever (the infinite-reprocess trap:
+            # UnicodeDecodeError isn't an OSError, so it re-fails on every read).
             log(f"[inject] Bad queue file {path.name}: {e}")
             try:
                 path.unlink()
@@ -83,7 +73,7 @@ def drain_inject_queue(queue_dir: Path) -> Tuple[str, List[Path]]:
         label = data.get("label", "cron")
         content = data.get("content")
         if not isinstance(content, str):
-            # Malformed/missing content — skip this entry rather than crashing dispatch.
+            # Malformed/missing content — skip, don't crash dispatch.
             log(
                 "[inject] skipping %s: 'content' is not a string (%s)"
                 % (path.name, type(content).__name__)
@@ -127,11 +117,9 @@ def drain_inject_queue(queue_dir: Path) -> Tuple[str, List[Path]]:
 
 
 def commit_inject_queue(paths: List[Path]) -> None:
-    """Delete inject-queue files that were successfully handed to Claude.
+    """Delete inject-queue files after Claude accepted the stdin write.
 
-    Called after :func:`drain_inject_queue` returned paths AND the message
-    was accepted by Claude (stdin write returned).  Already-missing files
-    are tolerated — the goal is best-effort cleanup, not strict accounting.
+    Best-effort: missing files are tolerated.
     """
     for path in paths:
         try:

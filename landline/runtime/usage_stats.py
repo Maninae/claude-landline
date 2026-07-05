@@ -1,49 +1,27 @@
-"""Cluster 4: daily aggregate of Claude persistent-stream usage/cost data.
+"""Daily aggregate of Claude persistent-stream usage/cost data.
 
-the operator is on flat-rate Max, so any dollar figure surfaced here is labelled
-"notional" — the aggregate is a signal of intensity, not a bill.
+The operator is on flat-rate Max, so any dollar figure is labelled "notional" —
+a signal of intensity, not a bill.
 
-Schema (JSON, stored at ``config.USAGE_STATS_FILE`` at ``0o600``)::
-
-    {
-      "days": {
-        "2026-07-03": {
-          "turns_dispatched": 4,
-          "turns_unsolicited": 1,
-          "input_tokens": 1234,
-          "output_tokens": 4321,
-          "cache_read_input_tokens": 0,
-          "cache_creation_input_tokens": 0,
-          "total_cost_usd_notional": 0.0123,
-          "duration_ms_sum": 45000,
-          "by_model": {
-            "claude-opus-4-8": {"input_tokens": 12, "output_tokens": 34}
-          }
-        }
-      }
-    }
-
-Recording is single-writer per process but the pump-thread AND the
-dispatcher thread can both call in, so a module-level ``threading.Lock``
-serialises reads and writes.
-
-Design notes:
-    * Attribution split: dispatched turns and unsolicited (background
-      subagent completions / ``run_in_background`` Bash tasks) are counted
-      separately so the operator can distinguish "my messages" cost from
-      "background stuff" cost. The /status one-liner rolls them into a
-      single "Today: N turns" but the JSON keeps the split for future
-      breakdowns.
-    * Known attribution race (documented in stream_pump.py): a background
-      turn that starts in the sub-second window between ``register_turn``
-      and the dispatched turn's ``system/init`` can swap attribution. That
-      moves ONE turn between the dispatched/unsolicited buckets — accepted;
-      matches the CLAUDE.md "do not fix with counting" invariant.
-    * Retention: buckets older than ``USAGE_STATS_RETENTION_DAYS`` are
-      pruned on save. ISO ``YYYY-MM-DD`` string compare gives correct
-      ordering without parsing.
-    * Corrupt-file recovery mirrors ``landline.runtime.state.load_state``: rename
-      to a ``.corrupt`` sibling, log loudly, and proceed with a fresh dict.
+- Schema: JSON at `config.USAGE_STATS_FILE` (`0o600`); top level `{"days":
+  {"YYYY-MM-DD": <bucket>}}`. Bucket keys: `turns_dispatched`,
+  `turns_unsolicited`, `input_tokens`, `output_tokens`,
+  `cache_read_input_tokens`, `cache_creation_input_tokens`,
+  `total_cost_usd_notional`, `duration_ms_sum`, `by_model`.
+- Attribution split: dispatched vs unsolicited (background subagent /
+  `run_in_background` completions) counted separately so the operator can
+  distinguish "my messages" from "background" cost. `/status` rolls them into
+  one line; JSON keeps the split.
+- Attribution race (see `stream_pump.py`): a background turn starting in the
+  sub-second window between `register_turn` and the dispatched turn's
+  `system/init` can swap attribution — moves ONE turn between buckets;
+  accepted per the "do not fix with counting" invariant.
+- Concurrency: pump-thread AND dispatcher-thread both write — a module-level
+  `threading.Lock` serialises reads and writes.
+- Retention: buckets older than `USAGE_STATS_RETENTION_DAYS` pruned on save.
+  ISO `YYYY-MM-DD` lexicographic compare — no parsing needed.
+- Corrupt-file recovery mirrors `landline.runtime.state.load_state`:
+  rename to `.corrupt` sibling, log loudly, proceed with a fresh dict.
 """
 
 import json
@@ -75,12 +53,9 @@ def _empty_data() -> Dict[str, Any]:
 
 
 def _load_unlocked() -> Dict[str, Any]:
-    """Read USAGE_STATS_FILE from disk. Missing / malformed => fresh dict.
-
-    On a malformed file, rename to a ``.corrupt`` sibling before returning
-    defaults — same defensive pattern as ``landline.runtime.state.load_state`` so a
-    partial write cannot silently zero the aggregate on every subsequent
-    read.
+    """Read USAGE_STATS_FILE. Missing/malformed → rename to `.corrupt`,
+    return a fresh dict. Mirrors `landline.runtime.state.load_state` so a
+    partial write can't silently zero the aggregate on every subsequent read.
     """
     path = USAGE_STATS_FILE
     try:
@@ -102,11 +77,8 @@ def _load_unlocked() -> Dict[str, Any]:
 
 
 def _backup_corrupt(error: BaseException) -> None:
-    """Rename USAGE_STATS_FILE to a ``.corrupt`` sibling and log loudly.
-
-    Any failure inside the backup itself is logged but swallowed so the
-    daemon keeps going — worst case we lose the corrupt bytes.
-    """
+    """Rename USAGE_STATS_FILE to `.corrupt` sibling; log loudly.
+    Backup failures are logged and swallowed — worst case we lose corrupt bytes."""
     path = USAGE_STATS_FILE
     backup = path.with_suffix(path.suffix + ".corrupt")
     try:
@@ -123,12 +95,10 @@ def _backup_corrupt(error: BaseException) -> None:
 
 
 def _save_unlocked(data: Dict[str, Any]) -> None:
-    """Atomic write of the aggregate to USAGE_STATS_FILE at ``0o600``.
-
-    Uses the same race-free ``os.open`` + ``os.fchmod`` + ``os.replace``
-    pattern as ``landline.runtime.state.save_state`` — process-wide ``os.umask`` is
-    forbidden across the daemon (races with the poller/sender threads).
-    """
+    """Atomic write to USAGE_STATS_FILE at `0o600`.
+    Uses `os.open` + `os.fchmod` + `os.replace` (same pattern as
+    `landline.runtime.state.save_state`) — process-wide `os.umask` is
+    forbidden across the daemon (races with the poller/sender threads)."""
     path = USAGE_STATS_FILE
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
@@ -154,11 +124,8 @@ def _save_unlocked(data: Dict[str, Any]) -> None:
 
 def _prune(data: Dict[str, Any]) -> None:
     """Drop day buckets older than USAGE_STATS_RETENTION_DAYS.
-
-    ISO ``YYYY-MM-DD`` lexicographic ordering is correct — no strptime
-    needed. Any key that isn't a parseable date is left alone (defensive:
-    a hand-authored JSON file shouldn't lose custom sentinels).
-    """
+    ISO `YYYY-MM-DD` lexicographic compare — no strptime.
+    Non-date keys are left alone (custom sentinels survive)."""
     today = datetime.now(TIMEZONE).date()
     cutoff = today - timedelta(days=USAGE_STATS_RETENTION_DAYS)
     cutoff_str = cutoff.isoformat()
@@ -214,13 +181,12 @@ def record_turn(
     duration_ms: Optional[int],
     dispatched: bool,
 ) -> None:
-    """Aggregate one turn's usage into today's bucket and persist.
+    """Aggregate one turn into today's bucket and persist.
 
-    None-safe on every argument — a turn that reports no usage still bumps
-    the turn count (dispatched vs unsolicited) so the /status "N turns
-    today" line stays honest even when tokens are missing. Never raises;
-    logs and swallows any disk/JSON failure so a broken aggregate cannot
-    corrupt the finalize path.
+    - None-safe on every arg — a turn reporting no usage still bumps
+      the turn count so `/status` "N turns today" stays honest.
+    - Never raises: logs and swallows disk/JSON failures so a broken
+      aggregate can't corrupt the finalize path.
     """
     try:
         with _lock:
@@ -275,9 +241,8 @@ def record_turn(
             _prune(data)
             _save_unlocked(data)
     except Exception as record_error:
-        # Belt-and-suspenders: any unexpected exception (e.g. a monkeypatch
-        # that broke _load_unlocked) must never propagate — this is a
-        # metrics side-effect and finalize / the pump must stay alive.
+        # Belt-and-suspenders: metrics side-effect must never crash
+        # finalize / the pump.
         log(f"usage_stats.record_turn failed: {record_error}")
 
 
@@ -294,11 +259,11 @@ def today_summary() -> Dict[str, Any]:
 
 
 def format_status_line() -> str:
-    """One line for /status. Empty string when there's no data today.
+    """One line for `/status`; empty when there's no data today.
 
-    Wording is deliberately conservative: the operator is on flat-rate Max so the
-    dollar figure is labelled 'notional' — a signal of intensity, not a
-    bill. Never leaks per-model or per-message content, only aggregates.
+    - Flat-rate Max: dollar figure labelled 'notional' — signal of intensity,
+      not a bill.
+    - Aggregates only; never leaks per-model or per-message content.
     """
     bucket = today_summary()
     if not bucket:
