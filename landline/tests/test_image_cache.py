@@ -1,5 +1,5 @@
-"""Tests for landline.media.cache — Cluster 1 (generalized multi-dir sweep +
-single-dir back-compat wrapper)."""
+"""Tests for landline.media.cache — generalized multi-dir sweep +
+single-dir back-compat wrapper."""
 
 import os
 import time
@@ -197,11 +197,10 @@ class TestSweepDir:
     def test_per_entry_error_log_never_leaks_filename_or_path(
         self, tmp_path, monkeypatch,
     ):
-        """Finding #3 regression: the per-entry ``except`` in ``_sweep_dir``
-        must NEVER emit ``entry.name`` (sanitized-but-still-sensitive
-        filenames like ``private_medical_records.pdf`` or
-        ``<ts>_voice_note.oga``) OR the exception's ``__str__`` (an
-        ``OSError`` renders as e.g.
+        """The per-entry ``except`` in ``_sweep_dir`` must NEVER emit
+        ``entry.name`` (sanitized-but-still-sensitive filenames like
+        ``private_medical_records.pdf`` or ``<ts>_voice_note.oga``) OR
+        the exception's ``__str__`` (an ``OSError`` renders as e.g.
         ``[Errno 13] Permission denied: '/.../<ts>_<name>'`` — embedding
         the FULL absolute path in the daemon log). Both would land in
         the 25MB rotating ``daemon.log`` and outlive the 0700 cache dir

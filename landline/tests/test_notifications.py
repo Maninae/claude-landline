@@ -1,9 +1,9 @@
 """Tests for landline.runtime.notifications — iMessage alert delivery.
 
-Cluster 1 (M13): sends are async — ``send_network_alert`` and
-``send_health_alert`` spawn a daemon thread and return immediately.
-Tests that observe the ``osascript`` subprocess must call
-``_wait_for_pending_alerts()`` before asserting on ``no_subprocess``.
+Sends are async — ``send_network_alert`` and ``send_health_alert``
+spawn a daemon thread and return immediately. Tests that observe the
+``osascript`` subprocess must call ``_wait_for_pending_alerts()``
+before asserting on ``no_subprocess``.
 
 Transport: ``osascript -e 'tell application "Messages" to send "<body>"
 to participant "<handle>"'``. Argv shape is ``["osascript", "-e", script]``;
@@ -171,21 +171,19 @@ class TestSendNetworkAlert:
 
 
 # ---------------------------------------------------------------------------
-# Cluster 1 M13 — async fire-and-forget contract
+# Async fire-and-forget contract
 # ---------------------------------------------------------------------------
 
 
 class TestSendNetworkAlertAsync:
-    """M13 regression: the osascript subprocess must run on a background
-    thread so the poller thread returns immediately, no matter how slow
-    Messages is."""
+    """Regression: the osascript subprocess must run on a background thread
+    so the poller thread returns immediately, no matter how slow Messages is."""
 
     def test_send_network_alert_returns_before_subprocess_completes(self):
         """subprocess.run sleeps 5s; send_network_alert must return in <500ms.
 
-        Reverting the M13 refactor (in-line subprocess.run inside
-        send_network_alert) makes the caller block the full 5s and this
-        assertion fails.
+        Reverting to an in-line ``subprocess.run`` inside send_network_alert
+        makes the caller block the full 5s and this assertion fails.
         """
         released = threading.Event()
         subprocess_started = threading.Event()
@@ -245,7 +243,7 @@ class TestSendNetworkAlertAsync:
 
 
 # ---------------------------------------------------------------------------
-# Cluster 1 — send_health_alert (general-purpose async alert)
+# send_health_alert (general-purpose async alert)
 # ---------------------------------------------------------------------------
 
 
@@ -268,8 +266,8 @@ class TestSendHealthAlert:
 
     def test_send_health_alert_no_handle_returns_false(self, no_subprocess):
         """When the Keychain lookup returns nothing, no thread is spawned
-        AND the caller sees ``False`` — Cluster 3 uses this to gate its
-        auth-alert latch (don't set the latch if the alert didn't go out)."""
+        AND the caller sees ``False`` — the auth-alert latch uses this to
+        gate itself (don't set the latch if the alert didn't go out)."""
         with patch("landline.runtime.notifications.keychain_get", return_value=None):
             result = send_health_alert(
                 subject="unused-subject",

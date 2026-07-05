@@ -256,6 +256,15 @@ bubble and orphaning the tail into the next one. Reproduced 100% with
 back-to-back events. As a consequence, `run_claude_streaming` must not
 touch the sender after `handle.done.wait()` returns.
 
+### The watchdog must close stdout if the process dies
+
+If the Claude subprocess dies while a grandchild process still holds
+the write end of its stdout pipe, the pump would block forever in its
+read loop — the pipe never reaches EOF. The streaming watchdog detects
+`proc.poll() is not None` and closes stdout from the outside to unbreak
+the reader. Without this, a crashed Claude with an orphaned child would
+hang the dispatched turn until restart.
+
 ### Usage-stats fsync back-pressure hazard
 
 `usage_stats.record_turn` performs synchronous `os.fsync` inside its
@@ -567,6 +576,16 @@ swap.
   stay meaningful. Short fixed backoff instead of exponential
   escalation. Throttled log: first + every Nth; non-`RuntimeError` code
   bugs get the full traceback on the first hit only.
+
+### Dedup set is never pruned on cursor advance
+
+The poller keeps a bounded-growth set of seen `update_id`s. It is
+deliberately **not** pruned when the cursor advances: an in-flight long
+poll can return updates the main thread already processed, and if their
+ids had been pruned they would be re-queued and double-processed. The
+set grows by one `int` per message — negligible over the daemon's
+lifetime. (`advance_processed_cursor` carries the same invariant as a
+docstring bullet.)
 
 ### Auth-expiry outage alert
 
@@ -912,7 +931,11 @@ See [`SETUP.md`](SETUP.md) for the full key reference table.
   `<stem>-<label>.json` where
   `<stem> = datetime.now().strftime("%Y%m%dT%H%M%S")`. The producer
   keeps the literal (not an import) to stay `landline/`-import-free so
-  cron deliveries survive any landline import-time error.
+  cron deliveries survive any landline import-time error. **Do not
+  "clean this up" by importing the constant on the producer side** —
+  that coupling would take out every out-of-band delivery the first
+  time the package has an import-time error. If the format ever
+  changes, update both sides in lockstep.
 
 ---
 

@@ -101,7 +101,7 @@ class TestKeychainGetMocked:
 
 
 class TestKeychainGetStatus:
-    """B5 - classification of Keychain failure modes via rc + stderr phrase.
+    """Classification of Keychain failure modes via rc + stderr phrase.
 
     Mocks subprocess.run directly (bypasses conftest's autouse fixture which
     patches `keychain_get` and `keychain_get_status` symbols, not subprocess).
@@ -134,7 +134,7 @@ class TestKeychainGetStatus:
         assert status == "absent"
 
     def test_status_locked_by_stderr_phrase(self):
-        """CORE regression guard for B5 - the locked-vs-absent distinction.
+        """Core regression guard for the locked-vs-absent distinction.
 
         Reverting to 'rc!=0 -> error' loses the locked classification and
         the operator has no signal that his login keychain needs unlocking."""

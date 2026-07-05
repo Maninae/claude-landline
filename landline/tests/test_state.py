@@ -470,7 +470,7 @@ class TestGetContextPercent:
 
 
 class TestDailyLogPermissions:
-    """B4 - daily-log + state-file PII permissions."""
+    """Daily-log + state-file PII permissions."""
 
     def test_log_conversation_creates_file_at_0o600(self, tmp_workspace):
         """A fresh daily log must land at 0o600. Reverting os.open + fchmod
@@ -567,7 +567,7 @@ class TestDailyLogPermissions:
     def test_secure_daily_logs_backcompat_wrapper_still_chmods_daily(
         self, tmp_workspace
     ):
-        """Cluster 1 back-compat: ``secure_daily_logs`` is a wrapper for
+        """Back-compat: ``secure_daily_logs`` is a wrapper for
         ``secure_workspace_paths``; the daily-log tightening it used to do
         directly must still happen through the wrapper."""
         daily_dir = tmp_workspace / "memory" / "daily"
@@ -789,7 +789,7 @@ class TestProjectDirDerivation:
 
 
 class TestSecureWorkspacePaths:
-    """Cluster 1 — top-level workspace-sensitive dirs get 0o700 at startup."""
+    """Top-level workspace-sensitive dirs get 0o700 at startup."""
 
     def _mk_workspace(self, root, dirs):
         for d in dirs:

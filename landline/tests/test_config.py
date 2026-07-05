@@ -149,12 +149,12 @@ def test_locked_help_mentions_passphrase():
 
 
 # ---------------------------------------------------------------------------
-# Wave 0 contract assertions for Tier 3 hardening constants
+# Contract assertions for hardening constants
 # ---------------------------------------------------------------------------
 
 
 def test_unlock_lockout_max_seconds_caps_escalation():
-    """B1 - hard cap on the exponentially-escalated lockout window.
+    """Hard cap on the exponentially-escalated lockout window.
 
     Mandatory DoS guard: without the cap, an attacker who triggers lockouts
     could push the operator's next lockout beyond any reasonable recovery time
@@ -176,7 +176,7 @@ def test_unlock_lockout_max_seconds_caps_escalation():
 
 
 def test_rejection_mode_defaults_silent():
-    """B3 - default mode for unauthorized-sender replies.
+    """Default mode for unauthorized-sender replies.
 
     Silent default removes the enumeration oracle that lets an
     unauthenticated probe confirm the bot exists. Detection survives via
@@ -190,7 +190,7 @@ def test_rejection_mode_defaults_silent():
 
 
 def test_rejection_text_is_legacy_default():
-    """B3 - text used when REJECTION_MODE == 'reply' (legacy/incident path).
+    """Text used when REJECTION_MODE == 'reply' (legacy/incident path).
 
     Pinned so a future commit that flips REJECTION_MODE to 'reply' for
     incident response gets the historical message rather than something
@@ -202,7 +202,7 @@ def test_rejection_text_is_legacy_default():
 
 
 def test_conversation_log_tail_bytes_is_positive():
-    """C3 - tail-read window for the daily Telegram conversation log."""
+    """Tail-read window for the daily Telegram conversation log."""
     from landline.config import CONVERSATION_LOG_TAIL_BYTES
     assert CONVERSATION_LOG_TAIL_BYTES == 32768
     assert isinstance(CONVERSATION_LOG_TAIL_BYTES, int)
@@ -210,7 +210,7 @@ def test_conversation_log_tail_bytes_is_positive():
 
 
 def test_session_jsonl_tail_bytes_is_positive():
-    """C3 - tail-read window for the per-session Claude Code JSONL."""
+    """Tail-read window for the per-session Claude Code JSONL."""
     from landline.config import SESSION_JSONL_TAIL_BYTES
     assert SESSION_JSONL_TAIL_BYTES == 32768
     assert isinstance(SESSION_JSONL_TAIL_BYTES, int)
@@ -218,7 +218,7 @@ def test_session_jsonl_tail_bytes_is_positive():
 
 
 def test_tail_bytes_constants_have_distinct_names():
-    """C3 - conversation-log tail and JSONL tail are semantically distinct.
+    """Conversation-log tail and JSONL tail are semantically distinct.
 
     They happen to be equal today (32768) but the names must remain separate
     so a tuner can change one without dragging the other. Collapsing them
@@ -243,12 +243,11 @@ def test_tail_bytes_constants_have_distinct_names():
 
 
 def test_inject_timestamp_format_is_condensed_iso():
-    """D2 - canonical inject-queue filename timestamp format.
+    """Canonical inject-queue filename timestamp format.
 
     Consumer (daemon/inject.py) imports this constant; producer
     (scripts/deliver-output.py) duplicates the literal with a cross-reference
-    comment (producer is intentionally daemon/-import-free; see D2 spec
-    section 3 point 3). The wave-4 reviewer's grep gate (D2 section 6 step 4)
+    comment (producer is intentionally daemon/-import-free). A grep gate
     catches drift between the two.
 
     Fails on revert if the constant disappears or the format is changed
@@ -266,14 +265,14 @@ def test_inject_timestamp_format_is_condensed_iso():
 
 
 def test_daily_log_dir_mode_is_owner_only():
-    """B4 - daily-log parent dir mode (0o700, owner-only traverse)."""
+    """Daily-log parent dir mode (0o700, owner-only traverse)."""
     from landline.config import DAILY_LOG_DIR_MODE
     assert DAILY_LOG_DIR_MODE == 0o700
     assert isinstance(DAILY_LOG_DIR_MODE, int)
 
 
 def test_daily_log_file_mode_is_owner_only():
-    """B4 - daily-log file mode (0o600, owner read/write only).
+    """Daily-log file mode (0o600, owner read/write only).
 
     The daily logs contain unredacted PII (passphrase-typing context, family
     details, medical/legal/work content). Fails on revert if the mode is
@@ -287,7 +286,7 @@ def test_daily_log_file_mode_is_owner_only():
 
 
 def test_state_file_mode_is_owner_only():
-    """B4 - state-file write mode (0o600). Mirrors DAILY_LOG_FILE_MODE."""
+    """State-file write mode (0o600). Mirrors DAILY_LOG_FILE_MODE."""
     from landline.config import STATE_FILE_MODE
     assert STATE_FILE_MODE == 0o600
     assert isinstance(STATE_FILE_MODE, int)
@@ -295,12 +294,12 @@ def test_state_file_mode_is_owner_only():
 
 
 def test_failure_tracker_consts_live_in_config():
-    """E6 - failure-tracker tunables live in landline.config (canonical source).
+    """Failure-tracker tunables live in landline.config (canonical source).
 
     They were moved out of landline.claude.failure_tracker so the daemon's full
     tunable surface is visible from one file. failure_tracker imports them
-    back (Wave 3b); the unit-test boundary still imports from
-    failure_tracker (which re-exports), but the source of truth is here.
+    back; the unit-test boundary still imports from failure_tracker (which
+    re-exports), but the source of truth is here.
 
     Fails on revert if any constant is removed from config.py, any value
     is changed (e.g. a "tighten the alert threshold" forgets to update the
@@ -332,13 +331,12 @@ def test_failure_tracker_consts_live_in_config():
 
 
 # ---------------------------------------------------------------------------
-# Cluster 3 — Claude CLI OAuth-expiry markers + alert min-interval
+# Claude CLI OAuth-expiry markers + alert min-interval
 # ---------------------------------------------------------------------------
 
 
 def test_claude_auth_error_markers_is_non_empty_tuple():
-    """Cluster 3 — markers used by
-    ``claude_dispatch._stderr_looks_like_auth_failure``.
+    """Markers used by ``claude_dispatch._stderr_looks_like_auth_failure``.
 
     Must be a non-empty tuple of str (not a list — tuples pin the value
     against accidental mutation). Every entry must be lower-castable so
@@ -390,7 +388,7 @@ def test_claude_auth_error_markers_covers_known_shapes():
 
 
 def test_claude_auth_alert_min_interval_seconds_is_positive_int():
-    """Cluster 3 — belt-and-suspenders time floor for auth-expiry re-alerts.
+    """Belt-and-suspenders time floor for auth-expiry re-alerts.
 
     Guards against a broken latch reset spamming the operator. Must be a positive
     int (a zero or negative would degenerate the interval check to
@@ -403,7 +401,7 @@ def test_claude_auth_alert_min_interval_seconds_is_positive_int():
 
 
 # ---------------------------------------------------------------------------
-# Cluster 4 — Poller staleness threshold + check interval
+# Poller staleness threshold + check interval
 # ---------------------------------------------------------------------------
 
 
@@ -434,7 +432,7 @@ def test_poll_stale_check_interval_is_positive_int_and_less_than_threshold():
 
 
 # ---------------------------------------------------------------------------
-# Cluster 5 — outbound spool tunables
+# Outbound spool tunables
 # ---------------------------------------------------------------------------
 
 
@@ -497,7 +495,7 @@ def test_spool_ordering_invariants():
 
 
 # ---------------------------------------------------------------------------
-# Cluster 1: media pipeline generalization + document ingestion constants
+# Media pipeline generalization + document ingestion constants
 # ---------------------------------------------------------------------------
 
 
@@ -552,7 +550,7 @@ def test_telegram_file_retention_hours_positive():
     assert TELEGRAM_FILE_RETENTION_HOURS > 0
 
 
-# --- Cluster 2: voice transcription constants ---
+# --- Voice transcription constants ---
 
 
 def test_media_cache_dirs_include_voice():
@@ -638,7 +636,7 @@ def test_voice_allowed_extensions_lowercase_and_dotted():
 
 
 # ---------------------------------------------------------------------------
-# Cluster 3: reaction ACKs (setMessageReaction) — constant contracts
+# Reaction ACKs (setMessageReaction) — constant contracts
 # ---------------------------------------------------------------------------
 
 # Telegram Bot API 7.x allowed reaction emoji (verified against
@@ -748,7 +746,7 @@ def test_reaction_max_attempts_at_least_two():
 
 
 # ---------------------------------------------------------------------------
-# Cluster 4: usage/cost stats constants
+# Usage/cost stats constants
 # ---------------------------------------------------------------------------
 
 def test_usage_stats_file_named_correctly():

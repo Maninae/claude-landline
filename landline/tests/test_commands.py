@@ -287,8 +287,8 @@ class TestCommandRouter:
 
 
 class TestStatusSubprocessTimeouts:
-    """M12: /status subprocess timeouts must be tightened to 3s each
-    so the worst-case orchestrator stall is 6s, not 10s."""
+    """/status subprocess timeouts must be tightened to 3s each so the
+    worst-case orchestrator stall is 6s, not 10s."""
 
     def _make_lock_manager(self):
         persist = MagicMock()
@@ -333,9 +333,9 @@ class TestStatusSubprocessTimeouts:
 
 
 class TestStatusUsageStatsLine:
-    """Cluster 4 — /status appends today's usage/cost line when data
-    exists, and degrades gracefully to no line + no crash when the stats
-    file is missing (fresh install)."""
+    """/status appends today's usage/cost line when data exists, and
+    degrades gracefully to no line + no crash when the stats file is
+    missing (fresh install)."""
 
     def _make_lock_manager(self):
         persist = MagicMock()

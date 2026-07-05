@@ -925,7 +925,7 @@ class TestDedupCapLogged:
 
 
 class TestLastSuccessfulPoll:
-    """Cluster 4 — silent-TCP-stall detection primitives on BackgroundPoller."""
+    """Silent-TCP-stall detection primitives on BackgroundPoller."""
 
     def test_last_successful_poll_seeded_to_construction_time(self):
         """A fresh poller must not look stale — seed to time.time() so the
@@ -1046,7 +1046,7 @@ class TestLastSuccessfulPoll:
 
 
 class TestSnapshotAndLoadDedupIds:
-    """Cluster 4 — dedup handoff across in-process poller replacement."""
+    """Dedup handoff across in-process poller replacement."""
 
     def test_snapshot_and_load_dedup_preserves_ids(self):
         """A snapshot + load roundtrip must preserve the exact set of ids."""
@@ -1090,7 +1090,7 @@ class TestSnapshotAndLoadDedupIds:
 
 class TestPreloadQueue:
     """Regression: the poller-swap path forwards orphaned updates from the
-    old poller's queue into the new poller via preload_queue (finding 1)."""
+    old poller's queue into the new poller via preload_queue."""
 
     def test_preload_queue_appends_updates_and_returns_count(self):
         bp = BackgroundPoller("token", 0)
@@ -1120,9 +1120,9 @@ class TestPreloadQueue:
 
 
 class TestQueuePutInsideDedupLock:
-    """Regression for finding 1's dedup-add/queue-put atomicity: the queue
-    write MUST happen under the dedup lock so a poller-swap's snapshot
-    either sees the dedup entry AND the queued update, or neither."""
+    """Regression for dedup-add/queue-put atomicity: the queue write MUST
+    happen under the dedup lock so a poller-swap's snapshot either sees
+    the dedup entry AND the queued update, or neither."""
 
     def test_dedup_and_queue_updated_atomically(self):
         """Interleave a snapshot with a polling cycle: when we hold the

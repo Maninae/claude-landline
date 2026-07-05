@@ -715,8 +715,8 @@ class TestRunClaudeStreamingLifecycle:
             assert sender.worker_alive
 
     def test_usage_fields_propagate_to_claude_stream_result(self):
-        """Cluster 4: usage / cost / duration fields captured by the pump on
-        the terminal result event must be copied onto ClaudeStreamResult so
+        """Usage / cost / duration fields captured by the pump on the
+        terminal result event must be copied onto ClaudeStreamResult so
         the dispatcher's finalize path can persist them to the daily
         aggregate. Uses the queue-fed proc + send_message side_effect pattern
         so the pump is alive when register_turn is called — mirrors the
@@ -1462,7 +1462,7 @@ class TestStreamSenderEmitFailureTracking:
     def test_fallback_notice_sent_after_threshold_failures(self):
         """3 consecutive text-emit failures -> exactly one fallback notice.
 
-        Cluster 1 M7: the notice now routes through
+        The notice routes through
         ``landline.runtime.notifications.send_health_alert`` (async iMessage), NOT
         the failing text transport. See ``_record_emit_failure``.
         """
@@ -1559,14 +1559,14 @@ class TestStreamSenderEmitFailureTracking:
                 time.sleep(0.12)
             time.sleep(0.15)
             sender.close()
-        # Fallback dispatched via the async iMessage transport (M7).
+        # Fallback dispatched via the async iMessage transport.
         assert mock_alert.call_count == 1
 
     def test_emit_failure_fallback_uses_notifications_not_text_transport(self):
-        """Cluster 1 M7 regression: the failing text transport must NOT be
-        used for the fallback notice.
+        """Regression: the failing text transport must NOT be used for the
+        fallback notice.
 
-        The pre-M7 code called ``self._text_send_fn`` a 4th time to deliver
+        The pre-fix code called ``self._text_send_fn`` a 4th time to deliver
         the "some messages failed to deliver" alert — through the same
         callable that had just failed 3 times in a row, so the alert
         reliably never landed. The fix routes it to
@@ -1954,11 +1954,11 @@ class TestF1EventWaitResponsiveness:
 
 
 class TestClaudeStreamResultClusterTwoDefaults:
-    """Cluster 2 (stale-resume auto-recovery) added three fields to
-    ClaudeStreamResult: result_is_error, result_subtype, saw_init. Pin the
-    default values so existing tests that hand-construct ClaudeStreamResult
-    keep working, and so the pruned-resume predicate never fires on a
-    freshly-constructed empty result."""
+    """Stale-resume auto-recovery added three fields to ClaudeStreamResult:
+    result_is_error, result_subtype, saw_init. Pin the default values so
+    existing tests that hand-construct ClaudeStreamResult keep working, and
+    so the pruned-resume predicate never fires on a freshly-constructed
+    empty result."""
 
     def test_defaults_are_safe(self):
         from landline.claude.types import ClaudeStreamResult

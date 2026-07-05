@@ -22,7 +22,7 @@ from landline.config import (
 from landline.runtime.lock import LockManager, _normalize_passphrase
 
 
-# B1/B2/B5 helpers — used by the new regression-tests classes below.
+# Helpers for the lockout / clock-skew / keychain regression classes below.
 FAKE_UNLOCK_PASSPHRASE = "coconut pudding"
 FAKE_UNLOCK_HASH = hashlib.sha256(
     FAKE_UNLOCK_PASSPHRASE.encode("utf-8")
@@ -95,7 +95,7 @@ class TestLockManagerInit:
         lm.restore_from_state(default_state)
         assert lm._failed_unlock_attempts == 3
         assert lm._unlock_lockout_until > time.time()
-        # B1: consecutive_lockouts must round-trip from persisted state.
+        # consecutive_lockouts must round-trip from persisted state.
         assert lm._consecutive_lockouts == 3
 
 
@@ -140,7 +140,7 @@ class TestReset:
         lm.reset()
         assert lm._failed_unlock_attempts == 4
         assert lm._unlock_lockout_until > time.time()
-        # B1: escalation counter must survive /new the same way the other
+        # Escalation counter must survive /new the same way the other
         # lockout counters do — otherwise /new becomes a side-door reset.
         assert lm._consecutive_lockouts == 4
 
@@ -184,7 +184,7 @@ class TestUnlockStatusLine:
 
 
 # ---------------------------------------------------------------------------
-# B1 — lockout escalation regression tests
+# Lockout escalation regression tests
 # ---------------------------------------------------------------------------
 
 
@@ -203,7 +203,7 @@ def _drive_lockout_cycle(lm):
 
 
 class TestLockoutEscalation:
-    """B1: escalating consecutive_lockouts ramp with hard cap + self-rescue."""
+    """Escalating consecutive_lockouts ramp with hard cap + self-rescue."""
 
     def test_lockout_escalates(self, persist_state_fn, default_state):
         """Cycle k=1 lockout duration ~= UNLOCK_LOCKOUT_SECONDS * 2."""
@@ -276,7 +276,7 @@ class TestLockoutEscalation:
         ):
             assert lm.try_silent_unlock(FAKE_UNLOCK_PASSPHRASE) is True
 
-        # B1 self-rescue invariant: any successful unlock resets escalation.
+        # Self-rescue invariant: any successful unlock resets escalation.
         assert lm._consecutive_lockouts == 0
         assert lm._failed_unlock_attempts == 0
         assert lm._unlock_lockout_until == 0.0
@@ -341,13 +341,13 @@ class TestLockoutEscalation:
 
 
 # ---------------------------------------------------------------------------
-# B2 — clock-skew lockout regression tests
+# Clock-skew lockout regression tests
 # ---------------------------------------------------------------------------
 
 
 class TestClockSkew:
-    """B2: persisted wall deadline + in-memory monotonic floor; lockout active
-    iff EITHER is in the future. Forward wall-clock jumps cannot retire the
+    """Persisted wall deadline + in-memory monotonic floor; lockout active iff
+    EITHER is in the future. Forward wall-clock jumps cannot retire the
     lockout early; restart falls back to wall-only."""
 
     def test_lockout_resists_forward_wall_jump(
@@ -418,7 +418,7 @@ class TestClockSkew:
         assert lm2._lockout_monotonic_until == 0.0
         # Wall-only path still gates the lockout.
         assert lm2._lockout_remaining() > 0.0
-        # Snapshot must not carry a persisted monotonic value (B2 invariant).
+        # Snapshot must not carry a persisted monotonic value.
         assert "lockout_monotonic_until" not in snapshot
 
     def test_register_lockout_arms_both_clocks(
@@ -564,13 +564,13 @@ class TestClockSkew:
 
 
 # ---------------------------------------------------------------------------
-# B5 — Keychain locked vs absent regression tests
+# Keychain locked vs absent regression tests
 # ---------------------------------------------------------------------------
 
 
 class TestKeychainLocked:
-    """B5: a locked login keychain must NOT count as a failed attempt; the
-    daemon must log a distinct, actionable warning. Logging-only — never block."""
+    """A locked login keychain must NOT count as a failed attempt; the daemon
+    must log a distinct, actionable warning. Logging-only — never block."""
 
     def test_silent_unlock_returns_false_when_keychain_locked(
         self, persist_state_fn, default_state,

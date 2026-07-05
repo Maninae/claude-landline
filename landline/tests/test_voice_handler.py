@@ -1,4 +1,4 @@
-"""Tests for landline.media.voice — Cluster 2 (voice dispatch)."""
+"""Tests for landline.media.voice — voice dispatch."""
 
 from unittest.mock import MagicMock, patch
 

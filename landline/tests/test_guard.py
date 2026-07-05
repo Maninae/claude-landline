@@ -123,13 +123,13 @@ class TestRejectMessageLoudMode:
 
 
 class TestRejectMessageSilentMode:
-    """B3 - default silent mode removes the enumeration oracle. Unauthorized
+    """Default silent mode removes the enumeration oracle. Unauthorized
     senders get no outbound reply; rejected chat_id is still logged at the
     classifier (batch_classifier.log) so detection is preserved."""
 
     def test_silent_is_default_mode(self):
-        """Pins the Wave 0 default. Fails if a future commit flips the default
-        to 'reply' without updating the security review."""
+        """Pins the default. Fails if a future commit flips it to 'reply'
+        without updating the security review."""
         from landline.config import REJECTION_MODE as cfg_mode
         assert cfg_mode == "silent"
 
@@ -179,7 +179,7 @@ class TestCacheBehavior:
         TTL expiry, the previously cached allowlist must be preserved — NOT
         replaced with an empty set. Otherwise a transient Keychain failure
         (locked after sleep/wake) would drop every message for the next 60s.
-        Uses 'locked' status to also exercise the B5 locked-branch log path."""
+        Uses 'locked' status to also exercise the locked-branch log path."""
         with patch(
             "landline.runtime.guard.keychain_get_status",
             side_effect=[("111", "ok"), (None, "locked")],
@@ -227,7 +227,7 @@ class TestCacheBehavior:
             assert is_allowed("111") is False
 
     def test_guard_logs_locked_distinctly_after_cache_expiry(self, capsys):
-        """B5 - when keychain is locked, the guard must log a DISTINCT message
+        """When keychain is locked, the guard must log a DISTINCT message
         mentioning 'locked' and 'unlock login keychain' so the operator sees an
         actionable signal. Cache must still be preserved."""
         with patch(
@@ -242,7 +242,7 @@ class TestCacheBehavior:
         assert "unlock login keychain" in captured.err
 
     def test_guard_logs_generic_message_on_absent(self, capsys):
-        """B5 - the 'absent' branch must NOT say 'locked' (that's a different
+        """The 'absent' branch must NOT say 'locked' (that's a different
         actionable signal). Catches a builder that hardcodes 'locked' for
         every failure mode."""
         with patch(
@@ -257,8 +257,8 @@ class TestCacheBehavior:
         assert "keychain locked" not in captured.err
 
     def test_guard_locked_does_not_thrash_keychain(self):
-        """B5 - after a locked failure, the cache timestamp advances so we
-        don't hammer the keychain. Same throttle as the existing error path."""
+        """After a locked failure, the cache timestamp advances so we don't
+        hammer the keychain. Same throttle as the existing error path."""
         with patch(
             "landline.runtime.guard.keychain_get_status",
             side_effect=[("111", "ok"), (None, "locked")],
@@ -270,8 +270,8 @@ class TestCacheBehavior:
         assert mock_kc.call_count == 2
 
     def test_guard_preserves_cache_on_locked(self):
-        """B5 variant of the resilience contract - locked path specifically
-        must preserve the prior cache (not invert to empty)."""
+        """Locked path specifically must preserve the prior cache (not invert
+        to empty) — variant of the resilience contract above."""
         with patch(
             "landline.runtime.guard.keychain_get_status",
             side_effect=[("123,456", "ok"), (None, "locked")],

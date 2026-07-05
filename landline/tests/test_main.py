@@ -1,4 +1,4 @@
-"""Tests for daemon/__main__.py — B4 wiring of secure_daily_logs().
+"""Tests for daemon/__main__.py — wiring of secure_daily_logs().
 
 These tests guard the one-line wire-up that activates the daily-log
 permissions backfill at daemon startup. Reverting either the import
@@ -12,12 +12,12 @@ from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
 # Shim: the suite-wide conftest patches `daemon.{guard,lock,security,
-# notifications,orchestrator}.keychain_get`. A sibling Wave-2 builder (B5)
-# restructured some of those modules to use `keychain_get_status` instead,
-# removing the `keychain_get` attribute at the call sites. We don't exercise
-# the keychain here, so we install a no-op `keychain_get` attribute on any
-# module that's missing it, so the conftest's `patch.object` succeeds and
-# the B4 wire-up tests below can run on their own.
+# notifications,orchestrator}.keychain_get`. Some of those modules were
+# restructured to use `keychain_get_status` instead, removing the
+# `keychain_get` attribute at the call sites. We don't exercise the keychain
+# here, so we install a no-op `keychain_get` attribute on any module that's
+# missing it, so the conftest's `patch.object` succeeds and the wire-up
+# tests below can run on their own.
 # ---------------------------------------------------------------------------
 def _noop_keychain_get(service, account="landline"):  # type: ignore[no-untyped-def]
     return None
@@ -142,13 +142,13 @@ def test_secure_daily_logs_called_before_telegram_daemon_constructed():
 
 
 # ---------------------------------------------------------------------------
-# Cluster 5 — outbound-spool startup wiring
+# Outbound-spool startup wiring
 # ---------------------------------------------------------------------------
 
 
 def test_main_calls_startup_reclaim_before_daemon_run_and_no_sync_replay():
-    """Cluster 5: main() must call outbound_spool.startup_reclaim_orphaned_inflight
-    BEFORE TelegramDaemon.run() and AFTER secure_daily_logs (Cluster 1
+    """main() must call outbound_spool.startup_reclaim_orphaned_inflight
+    BEFORE TelegramDaemon.run() and AFTER secure_daily_logs (the workspace
     backfill). The synchronous ``replay_all`` pass that used to run here is
     intentionally REMOVED: it could block daemon startup for tens of
     minutes on network failure (~200 spool files × 10s urlopen timeout

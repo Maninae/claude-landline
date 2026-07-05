@@ -1,4 +1,4 @@
-"""Tests for landline.media.document — Cluster 1 (document dispatch)."""
+"""Tests for landline.media.document — document dispatch."""
 
 from unittest.mock import MagicMock, patch
 

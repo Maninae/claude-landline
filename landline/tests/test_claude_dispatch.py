@@ -2288,8 +2288,8 @@ class TestReactionCompletionAcks:
         assert mock_logconv.called
 
     def test_ack_ids_survive_backoff_queue_drain(self):
-        """PIN (finding #4): messages queued during Claude backoff must
-        still receive 👌 when the drained batch eventually finalizes.
+        """PIN: messages queued during Claude backoff must still receive 👌
+        when the drained batch eventually finalizes.
 
         Repro:
           1. Backoff active → send_to_claude(m1, ack=[11]) → gated + queued.

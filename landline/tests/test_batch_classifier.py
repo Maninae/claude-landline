@@ -1,9 +1,9 @@
 """Regression tests for landline.runtime.batch_classifier.
 
 Covers:
-  - E4: ``extract_chat_id`` helper centralizes the Telegram-envelope
+  - ``extract_chat_id`` helper centralizes the Telegram-envelope
     ``str(chat.id)`` walk with a defaulting fallback.
-  - M2: BackgroundPoller filters Telegram to ``allowed_updates=["message"]``,
+  - BackgroundPoller filters Telegram to ``allowed_updates=["message"]``,
     so the classifier never sees callback_query / edited_channel_post /
     inline_query. If anyone re-adds the old dead callback_query branch (or
     weakens the invariant), the source-level guard fails immediately.
@@ -31,7 +31,7 @@ def _make_daemon(running: bool = True) -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# E4 — extract_chat_id helper
+# extract_chat_id helper
 # ---------------------------------------------------------------------------
 
 class TestExtractChatId:
@@ -258,7 +258,7 @@ class TestClassifierStillWorksAfterPrune:
 
 
 # ---------------------------------------------------------------------------
-# Cluster 3 — reactions must NEVER leak real HTTP calls to Telegram in tests
+# Reactions must NEVER leak real HTTP calls to Telegram in tests
 # ---------------------------------------------------------------------------
 
 
@@ -313,12 +313,12 @@ class TestReactionNetworkIsolation:
 
 
 # ---------------------------------------------------------------------------
-# Cluster 1 — document ingestion bucket
+# Document ingestion bucket
 # ---------------------------------------------------------------------------
 
 
 class TestDocumentBucket:
-    """Cluster 1: document classification, sanitization, size cap, mime gate."""
+    """Document classification, sanitization, size cap, mime gate."""
 
     def _make_doc_update(
         self,
@@ -410,12 +410,12 @@ class TestDocumentBucket:
 
 
 # ---------------------------------------------------------------------------
-# Cluster 2 — voice-note bucket
+# Voice-note bucket
 # ---------------------------------------------------------------------------
 
 
 class TestVoiceBucket:
-    """Cluster 2: voice / audio / video_note lands in the voice bucket."""
+    """Voice / audio / video_note lands in the voice bucket."""
 
     def _make_voice_update(self, uid=200, media_key="voice", duration=10):
         return {
@@ -477,7 +477,7 @@ class TestVoiceBucket:
 
 
 # ---------------------------------------------------------------------------
-# Cluster 3 — reaction ACKs (👀 at classify time)
+# Reaction ACKs (👀 at classify time)
 # ---------------------------------------------------------------------------
 
 

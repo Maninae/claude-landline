@@ -1379,9 +1379,9 @@ class TestRestartContinuation:
     def test_restart_continuation_trigger_preserved_on_dispatch_error(
         self, tmp_path,
     ):
-        """M1: if _inject_and_dispatch raises, the trigger file MUST be
-        preserved so the next restart retries. Reverting M1 (unlink-before-
-        dispatch) would consume the trigger and silently lose the payload."""
+        """If _inject_and_dispatch raises, the trigger file MUST be preserved
+        so the next restart retries. Reverting to unlink-before-dispatch
+        would consume the trigger and silently lose the payload."""
         daemon, _mocks = _make_daemon()
         daemon._lock_manager._lock_state = "unlocked"
         daemon._lock_manager._state["unlock_timestamp"] = time.time()
@@ -1404,7 +1404,7 @@ class TestRestartContinuation:
     def test_restart_continuation_trigger_unlinked_on_dispatch_success(
         self, tmp_path,
     ):
-        """M1: success path is unchanged — trigger unlinked after dispatch."""
+        """Success path is unchanged — trigger unlinked after dispatch."""
         daemon, mocks = _make_daemon()
         daemon._lock_manager._lock_state = "unlocked"
         daemon._lock_manager._state["unlock_timestamp"] = time.time()
@@ -1429,8 +1429,8 @@ class TestRestartContinuation:
     def test_restart_continuation_unlink_ordered_after_dispatch(
         self, tmp_path,
     ):
-        """M1 two-phase commit: dispatch must run BEFORE unlink. Records the
-        order of events; reverting M1 would put 'unlink' before 'dispatch'."""
+        """Two-phase commit: dispatch must run BEFORE unlink. Records the
+        order of events; a revert would put 'unlink' before 'dispatch'."""
         daemon, _ = _make_daemon()
         daemon._lock_manager._lock_state = "unlocked"
         daemon._lock_manager._state["unlock_timestamp"] = time.time()
@@ -1471,7 +1471,7 @@ class TestRestartContinuation:
     def test_restart_continuation_post_dispatch_unlink_failure_is_swallowed(
         self, tmp_path,
     ):
-        """M1: a failure to unlink AFTER successful dispatch is benign (next
+        """A failure to unlink AFTER successful dispatch is benign (next
         restart overwrites). Helper must NOT re-raise — that would crash the
         startup path even though the continuation already succeeded."""
         daemon, _ = _make_daemon()
@@ -1502,7 +1502,7 @@ class TestRestartContinuation:
 
 
 class TestDispatcherClearPauseWiring:
-    """E3: TelegramDaemon wires dispatcher.clear_pause_fn at construction
+    """TelegramDaemon wires dispatcher.clear_pause_fn at construction
     (constructor arg), not via post-construction private-attr reach-through."""
 
     def test_daemon_wires_clear_pause_at_construction(self):
@@ -1699,9 +1699,9 @@ class TestSweepTelegramImageCache:
         """run() must call sweep_media_caches before the main loop —
         proves the daemon actually wires the sweep in at startup.
 
-        Cluster 1: the generalized ``sweep_media_caches`` replaced the
-        single-dir ``_sweep_telegram_image_cache`` at the run() call site;
-        the back-compat wrapper is still importable.
+        The generalized ``sweep_media_caches`` replaced the single-dir
+        ``_sweep_telegram_image_cache`` at the run() call site; the
+        back-compat wrapper is still importable.
         """
         daemon, _ = _make_daemon()
         daemon._lock_manager._lock_state = "unlocked"
@@ -1829,7 +1829,7 @@ class TestNotifyAdvanceOrdering:
 
 
 class TestCheckPollerLiveness:
-    """Cluster 4 — silent-TCP-stall detection + in-process replacement."""
+    """Silent-TCP-stall detection + in-process replacement."""
 
     def test_no_op_when_fresh(self):
         """A poller whose last_successful_poll is 'now' must NOT be swapped."""
@@ -1957,7 +1957,7 @@ class TestCheckPollerLiveness:
         Without this, they're orphaned in the discarded old queue while
         their ids sit in the new poller's dedup snapshot — Telegram's
         re-delivery gets blocked by dedup and the updates are silently
-        lost (finding 1)."""
+        lost."""
         from landline.config import POLL_STALE_ALERT_THRESHOLD_SECONDS
         import threading as _threading
 
@@ -2106,8 +2106,8 @@ class TestCheckPollerLiveness:
 
 
 class TestMainLoopCallsCheckPollerLiveness:
-    """Cluster 4 — regression: the main loop must invoke
-    ``_check_poller_liveness`` on every drain tick (idle or busy)."""
+    """Regression: the main loop must invoke ``_check_poller_liveness`` on
+    every drain tick (idle or busy)."""
 
     def test_main_loop_calls_check_poller_liveness_when_idle(self):
         """When the drain returns no updates, the loop still calls the check
@@ -2182,7 +2182,7 @@ class TestMainLoopCallsCheckPollerLiveness:
 
 
 class TestDocumentBatch:
-    """Cluster 1: end-to-end document routing through _process_update_batch."""
+    """End-to-end document routing through _process_update_batch."""
 
     def _make_doc_update(self, uid, file_name="report.pdf", file_size=1024, caption=None):
         message = {
@@ -2297,7 +2297,7 @@ class TestDocumentBatch:
 
 
 class TestVoiceBatchWiring:
-    """Cluster 2: end-to-end voice routing through _process_update_batch."""
+    """End-to-end voice routing through _process_update_batch."""
 
     def _make_voice_update(self, uid, duration=15, key="voice"):
         return {
@@ -2374,8 +2374,7 @@ class TestVoiceBatchWiring:
 
 
 class TestNonTextBrushOffWording:
-    """Cluster 2: brush-off notice now mentions voice notes alongside
-    text/photos/documents."""
+    """Brush-off notice now mentions voice notes alongside text/photos/documents."""
 
     def test_brush_off_mentions_voice_notes(self):
         daemon, mocks = _make_daemon()
@@ -2393,10 +2392,10 @@ class TestNonTextBrushOffWording:
 
 
 class TestReactionAcksPerBatchState:
-    """Cluster 3 — the orchestrator manages a per-batch ``_batch_ack_message_ids``
-    tracker that the classifier populates on 👀 and the dispatcher
-    consumes on 👌. State MUST be cleared in the finally so a
-    mid-batch exception can't leak ids into the next batch."""
+    """The orchestrator manages a per-batch ``_batch_ack_message_ids`` tracker
+    that the classifier populates on 👀 and the dispatcher consumes on 👌.
+    State MUST be cleared in the finally so a mid-batch exception can't leak
+    ids into the next batch."""
 
     def test_tracker_cleared_after_batch(self):
         """After ``_process_update_batch`` returns, the tracker is None."""

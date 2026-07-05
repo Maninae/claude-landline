@@ -1,5 +1,5 @@
-"""Tests for landline.telegram.download — Cluster 1 (generalized download +
-safe-basename sanitizer)."""
+"""Tests for landline.telegram.download — generalized download +
+safe-basename sanitizer."""
 
 import os
 import stat
@@ -54,18 +54,18 @@ class TestSafeBasename:
         )
 
     def test_del_stripped_from_stem(self):
-        """PIN: finding #6 — DEL (0x7F) was preserved by the prior
-        ``ord(ch) >= 0x20`` gate. Must now be stripped."""
+        """PIN: DEL (0x7F) was preserved by the prior ``ord(ch) >= 0x20``
+        gate. Must now be stripped."""
         assert (
             _safe_basename("\x7fname.pdf", frozenset({".pdf"}))
             == "name.pdf"
         )
 
     def test_rtl_override_stripped_from_stem(self):
-        """PIN: finding #6 — U+202E RTL-override flips subsequent chars'
-        display direction and could disguise the extension in the daemon
-        log tail or in the ``[document: <name>, ...]`` Claude prompt
-        fragment. Must be stripped (category ``Cf``)."""
+        """PIN: U+202E RTL-override flips subsequent chars' display direction
+        and could disguise the extension in the daemon log tail or in the
+        ``[document: <name>, ...]`` Claude prompt fragment. Must be stripped
+        (category ``Cf``)."""
         # "‮fdp.evil" would render right-to-left as "live.pdf".
         raw = "safe‮fdp.pdf"
         result = _safe_basename(raw, frozenset({".pdf"}))
@@ -74,9 +74,8 @@ class TestSafeBasename:
         assert result == "safefdp.pdf"
 
     def test_bom_zwsp_stripped_from_stem(self):
-        """PIN: finding #6 — Unicode format-class chars (BOM U+FEFF,
-        ZWSP U+200B) sneaked through the old byte-value gate. Must be
-        stripped (category ``Cf``)."""
+        """PIN: Unicode format-class chars (BOM U+FEFF, ZWSP U+200B) sneaked
+        through the old byte-value gate. Must be stripped (category ``Cf``)."""
         raw = "﻿name​.pdf"
         assert (
             _safe_basename(raw, frozenset({".pdf"}))
@@ -84,10 +83,10 @@ class TestSafeBasename:
         )
 
     def test_line_separator_stripped_from_stem(self):
-        """PIN: finding #6 — U+2028 LINE SEPARATOR is treated as a
-        newline by many parsers and could inject an apparent new line
-        into the ``[document: ...]`` prompt fragment. Category ``Zl`` is
-        also caught by ``str.isprintable()``. Must be stripped."""
+        """PIN: U+2028 LINE SEPARATOR is treated as a newline by many
+        parsers and could inject an apparent new line into the
+        ``[document: ...]`` prompt fragment. Category ``Zl`` is also caught
+        by ``str.isprintable()``. Must be stripped."""
         raw = "line break.pdf"
         assert (
             _safe_basename(raw, frozenset({".pdf"}))
@@ -95,8 +94,8 @@ class TestSafeBasename:
         )
 
     def test_c1_control_stripped_from_stem(self):
-        """PIN: finding #6 — C1 controls (0x80–0x9F) passed the old
-        ``ord(ch) >= 0x20`` gate. Category ``Cc``, must be stripped."""
+        """PIN: C1 controls (0x80–0x9F) passed the old ``ord(ch) >= 0x20``
+        gate. Category ``Cc``, must be stripped."""
         raw = "rep\x85ort.pdf"  # 0x85 = NEL (Next Line, C1 control)
         assert (
             _safe_basename(raw, frozenset({".pdf"}))

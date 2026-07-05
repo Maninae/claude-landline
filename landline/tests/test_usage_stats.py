@@ -1,4 +1,4 @@
-"""Tests for landline.runtime.usage_stats — Cluster 4 daily aggregate.
+"""Tests for landline.runtime.usage_stats — daily aggregate.
 
 Scenarios covered:
     * record_turn writes today's bucket with correct token counts,

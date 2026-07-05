@@ -220,7 +220,8 @@ class StreamPump:
             if error is not None and not handle.saw_result:
                 handle.error = error
             # Flush partial text BEFORE done.set() — same sole-producer rule
-            # as _close_block (see docs/ARCHITECTURE.md § H1).
+            # as _close_block (see docs/ARCHITECTURE.md § "Pump is sole
+            # producer for turn tail + flush").
             if sender is not None:
                 try:
                     sender.flush()
@@ -397,8 +398,9 @@ class StreamPump:
             # appended the tail after done.wait(), a back-to-back unsolicited
             # block already in the pipe would race text between this turn's
             # deltas and the tail — welding background text into this bubble
-            # and orphaning the tail into the next. See docs/ARCHITECTURE.md
-            # § H1 (100% reproducible with back-to-back events).
+            # and orphaning the tail into the next (100% reproducible with
+            # back-to-back events). See docs/ARCHITECTURE.md § "Pump is sole
+            # producer for turn tail + flush".
             try:
                 # done.set() below is unconditional — a sender defect must
                 # not leave the handle pending (would hang dispatch until

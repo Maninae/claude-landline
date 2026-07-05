@@ -1117,8 +1117,8 @@ class TestA4LogContentDownload:
 
 class TestSendTyping:
     def test_sends_typing_action(self):
-        """Cluster 5: send_typing uses a pooled http.client.HTTPSConnection
-        (not urllib.request.urlopen) on the happy path. Assert the request
+        """send_typing uses a pooled http.client.HTTPSConnection (not
+        urllib.request.urlopen) on the happy path. Assert the request
         line/body/URL still describe a sendChatAction: typing."""
         import landline.telegram.typing as tt
         tt._reset_typing_conn()
@@ -1144,10 +1144,10 @@ class TestSendTyping:
     def test_survives_network_error(self):
         """A network failure during typing notice must not propagate.
 
-        Cluster 5: the pooled HTTPSConnection can raise, then the one-shot
+        The pooled HTTPSConnection can raise, then the one-shot
         ``telegram_api`` fallback also raises — send_typing must swallow
-        both. This is the semantics-preserving contract for the pool
-        change (matches pre-cluster behaviour when the network is down).
+        both. Semantics-preserving contract for the pool change: matches
+        prior behaviour when the network is down.
         """
         import landline.telegram.typing as tt
         tt._reset_typing_conn()
@@ -1162,14 +1162,14 @@ class TestSendTyping:
 
 
 # ---------------------------------------------------------------------------
-# Cluster 5 — outbound spool integration on _send_with_retry
+# Outbound spool integration on _send_with_retry
 # ---------------------------------------------------------------------------
 
 
 class TestSpoolPersistOnSendWithRetry:
-    """Cluster 5: every entry to _send_with_retry persists to the spool
-    BEFORE the first attempt, marks success on ok, and marks failed on any
-    terminal failure branch."""
+    """Every entry to _send_with_retry persists to the spool BEFORE the
+    first attempt, marks success on ok, and marks failed on any terminal
+    failure branch."""
 
     def test_send_with_retry_persists_before_send_and_deletes_on_success(self):
         """Patch outbound_spool.persist + mark_success; call _send_with_retry
@@ -1267,8 +1267,7 @@ class TestSpoolPersistOnSendWithRetry:
 
 
 class TestSpoolAndSendTypingPool:
-    """Cluster 5: per-thread pooled HTTPSConnection for send_typing (and
-    only send_typing)."""
+    """Per-thread pooled HTTPSConnection for send_typing (and only send_typing)."""
 
     def test_send_typing_uses_pooled_https_connection(self):
         """Call send_typing twice; assert conn.request called twice on the

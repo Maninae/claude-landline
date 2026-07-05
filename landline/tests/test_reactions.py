@@ -1,4 +1,4 @@
-"""Cluster 3 — Regression tests for landline.telegram.reactions (setMessageReaction).
+"""Regression tests for landline.telegram.reactions (setMessageReaction).
 
 Contracts covered:
   - Fire-and-forget: the entrypoint enqueues to the single worker and

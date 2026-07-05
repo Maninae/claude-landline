@@ -1,4 +1,4 @@
-"""Tests for landline.media.transcribe — Cluster 2 (whisper wrapper).
+"""Tests for landline.media.transcribe — whisper wrapper.
 
 Covers the subprocess contract, timeout non-raising, cleanup, and the
 privacy invariant that transcript text NEVER reaches the daemon log.
