@@ -1,10 +1,9 @@
 """Result-shape predicates for the Claude call lifecycle.
 
-These pure functions read a ``ClaudeStreamResult`` and classify the shape of
-the outcome — success, stale-session, auth-failure stderr, pruned-resume —
-without any side effects. Hoisted out of ``landline.claude.dispatch`` so the
-dispatcher's file stays about lifecycle orchestration and these predicates
-can be read (and tested) in isolation.
+Pure classifiers of ``ClaudeStreamResult`` outcome (success / stale-session /
+auth-failure stderr / pruned-resume). Hoisted out of ``landline.claude.dispatch``
+so the dispatcher file stays about lifecycle orchestration and these read
+(and test) in isolation.
 """
 
 from landline import config
@@ -20,10 +19,9 @@ def is_result_successful(result: ClaudeStreamResult) -> bool:
 def looks_like_stale_session(result: ClaudeStreamResult) -> bool:
     """True if the result suggests --resume hit a dead session.
 
-    A stale session is specifically a clean exit (code 0 or None) with no
-    content. ANY nonzero exit code means the process died, not that the
-    session was pruned. Misclassifying a crash as stale silently wipes
-    the conversation.
+    Stale = clean exit (0 or None) with no content. ANY nonzero exit means
+    the process died — misclassifying a crash as stale silently wipes the
+    conversation.
     """
     if result.error:
         return False
@@ -37,12 +35,9 @@ def looks_like_stale_session(result: ClaudeStreamResult) -> bool:
 def _stderr_looks_like_auth_failure(stderr_tail: str) -> bool:
     """True if the CC stderr tail matches an OAuth-expiry shape.
 
-    Cluster 3: a multi-day silent auth outage (June 2026) had every
-    ``claude -p`` call 401ing without surfacing anywhere. Match generously
-    (case-insensitive): the exact strings are Anthropic-CLI-owned and
-    change without notice, and the cost of a false positive is one
-    iMessage the operator can ignore — strictly better than missing a
-    multi-day outage.
+    Match generously (case-insensitive) — Anthropic-CLI strings drift; false
+    positive = one ignorable iMessage, false negative = multi-day silent
+    outage. See docs/ARCHITECTURE.md "June 2026 auth-expiry outage".
     """
     if not stderr_tail:
         return False
@@ -54,50 +49,29 @@ def _stderr_looks_like_auth_failure(stderr_tail: str) -> bool:
 def looks_like_pruned_resume(result: ClaudeStreamResult) -> bool:
     """True if the result matches the pruned/nonexistent-session shape.
 
-    Verified empirically against the Claude Code CLI: resuming a pruned uuid emits a bare
-    ``result`` event with ``subtype=error_during_execution``,
-    ``is_error=true``, NO preceding ``system/init``, and the process exits
-    code 1. Stderr contains ``No conversation found with session ID: <uuid>``.
+    Empirically-verified shape: bare ``result`` with ``is_error=true`` +
+    ``subtype=error_during_execution``, NO preceding ``system/init``, exit 1,
+    stderr contains "No conversation found with session ID: <uuid>".
 
-    Distinguisher from a mid-session API error (which also emits is_error):
-    the mid-session case DID see an init on this turn (``saw_init=True``);
-    the pruned-resume case did not. This is the load-bearing predicate that
-    keeps a genuine mid-session failure from being wiped into a fresh
-    session (which would destroy conversation context).
+    - Distinguisher vs mid-session API error (which also emits is_error):
+      mid-session ``saw_init=True``; pruned-resume ``saw_init=False``.
+      Load-bearing — a false positive wipes conversation context.
+    - Orthogonal to ``looks_like_stale_session`` (clean-empty shape).
+    - Auth-expiry collision: 401 also produces is_error + no-init. Detecting
+      the auth stderr shape first prevents a destructive session wipe on an
+      auth outage.
+    - Corroborating stderr marker required: is_error + no-init alone is
+      ambiguous with "pump missed init" (JSONDecodeError on the init line
+      leaves saw_init False for a healthy turn). No marker → preserve the
+      session ("(no response — exit N)" is recoverable; a wipe is not).
 
-    Orthogonal to ``looks_like_stale_session``: that predicate catches the
-    clean-empty shape (exit 0 / None, no content). This one catches the
-    is_error + no-init shape (and, as belt-and-suspenders defense-in-depth,
-    the stderr-marker shape if the result-event path didn't populate
-    is_error — e.g. process death before result emit).
-
-    Cluster 2/3 collision guard: a Claude CLI auth failure ALSO produces the
-    is_error + no-init shape (401 happens before any system/init event). If
-    we classified an auth expiry as a pruned resume we would (a) show the
-    operator the misleading "(Previous session expired, starting fresh.)"
-    notice, (b) wipe the still-valid server-side session UUID, and (c)
-    delay the real Cluster 3 auth alert by an extra failed retry. Detect
-    the auth stderr shape first and hand the result to Cluster 3 unmolested.
+    See docs/ARCHITECTURE.md "Stale-resume vs mid-session-error discriminator".
     """
     if result.interrupted:
         return False
-    # Auth-expiry stderr shape must NOT be treated as pruned-resume; it is
-    # Cluster 3's territory and wiping the session on it is destructive.
     if _stderr_looks_like_auth_failure(result.stderr_tail or ""):
         return False
     if result.saw_init:
         return False
-    # Corroborating evidence required: is_error + no-init ALONE is ambiguous
-    # with the "pump missed init" path — a JSONDecodeError on the system/init
-    # line (or an exception inside _handle_event on that line) leaves
-    # saw_init=False on the handle even for a healthy mid-session turn that
-    # later failed. Wiping the still-valid server-side session in that case
-    # destroys the whole conversation. Real pruned-resume ALWAYS emits
-    # "No conversation found with session ID" (or "session not found") into
-    # stderr (verified empirically against the Claude Code CLI); demand the marker before we
-    # decide to nuke a session. If saw_init=False + is_error but no marker,
-    # fall back to preserving the session (pre-Cluster-2 behavior) — the
-    # operator sees the "(no response — exit N)" notice and can retry,
-    # which is strictly recoverable, vs. an irreversible session wipe.
     tail = (result.stderr_tail or "")
     return any(m in tail for m in config.STALE_RESUME_STDERR_MARKERS)

@@ -1,9 +1,8 @@
 """Restart-continuation handling for the ``TelegramDaemon``.
 
-Extracted from ``daemon.py`` in Wave 2 of the restructure. See ``batch.py``
-for the shared patch-seam reach-back rationale — ``WORKSPACE`` here is
-resolved through the daemon module so tests that patch
-``landline.orchestrator.WORKSPACE`` still see the redirected path.
+- ``WORKSPACE`` resolves through the daemon module so
+  ``patch("landline.orchestrator.WORKSPACE")`` in tests still redirects here;
+  see ``batch.py`` for the shared patch-seam rationale.
 """
 
 from landline.runtime.logging import log
@@ -12,18 +11,16 @@ from landline.orchestrator import daemon as _d
 
 
 def handle_restart_continuation(daemon) -> None:
-    """If a restart-continuation trigger file exists, inject its content
-    as a synthetic message to Claude so it can resume mid-task.
+    """Inject the restart-continuation trigger file (if present) as a synthetic
+    message so Claude resumes mid-task.
 
-    Routed through ``_inject_and_dispatch`` so any cron reports queued in
-    ``cache/inject-queue/`` during the restart window are prepended too —
-    otherwise they'd sit until the operator's next message.
-
-    Two-phase commit (M1): the trigger file is unlinked ONLY AFTER
-    ``_inject_and_dispatch`` returns without raising. A dispatch-time
-    exception leaves the file in place so the next restart retries —
-    otherwise a transient crash silently drops the operator's cross-restart
-    instruction (no Telegram update_id exists to replay it).
+    - Routed through ``_inject_and_dispatch`` so any cron reports queued in
+      ``cache/inject-queue/`` during the restart window get prepended.
+    - Two-phase commit: unlink ONLY after ``_inject_and_dispatch`` returns
+      without raising. A dispatch-time exception leaves the file in place so
+      the next restart retries (no Telegram update_id exists to replay it).
+    - Locked-session path LEAVES the file so the payload survives until the
+      next unlock/restart.
     """
     trigger = _d.WORKSPACE / "cache" / "restart-continuation.txt"
     if not trigger.exists():
@@ -41,9 +38,6 @@ def handle_restart_continuation(daemon) -> None:
             pass
         return
     if daemon._lock_manager.is_locked:
-        # LEAVE the file in place so the payload survives until the next
-        # unlock/restart. Unlinking here would permanently lose the operator's
-        # continuation message.
         log(
             "Restart continuation skipped — session locked; "
             "will retry on next unlock/restart"
@@ -53,17 +47,15 @@ def handle_restart_continuation(daemon) -> None:
     try:
         daemon._inject_and_dispatch(msg, daemon.chat_id, update_ids=[])
     except Exception as e:
-        # Two-phase commit: dispatch failed — LEAVE the trigger file in
-        # place so the next restart retries. Re-raise so the run() loop's
-        # existing handlers (and any startup error path) still see this.
+        # Two-phase commit: dispatch failed — leave the file in place; the
+        # run() loop's existing handlers still see the exception.
         log(
             "Restart continuation dispatch failed (trigger %s preserved "
             "for retry): %s" % (trigger, e)
         )
         raise
-    # Dispatch succeeded — commit by unlinking the trigger. A failure
-    # here is benign: the next restart will overwrite-then-unlink, and
-    # the payload was already delivered to Claude.
+    # Dispatch succeeded — unlink. Failure here is benign (next restart
+    # overwrites-then-unlinks; payload already delivered).
     try:
         trigger.unlink()
     except Exception as e:

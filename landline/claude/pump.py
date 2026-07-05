@@ -1,59 +1,33 @@
 """Persistent stdout pump for the long-lived Claude subprocess.
 
-THE INVARIANT THIS MODULE ENFORCES: the persistent Claude process's stdout is
-ONE continuous stream shared by every agent turn — both turns the daemon
-dispatches (the operator's messages) and turns the Claude Code harness starts on its
-own (background task completions: subagents, `run_in_background` Bash). That
-stream must have exactly ONE reader for the LIFE of the process.
+Invariant: the persistent Claude process's stdout has exactly ONE reader for
+the LIFE of the process. It is a single stream shared by dispatched turns
+(operator messages) AND unsolicited turns (harness-initiated background-task
+completions: subagents, `run_in_background` Bash).
 
-Why (the 2026-06/07 "desync" root cause): the old design attached a fresh
-reader per dispatched turn and read "until the first `result` event". When a
-background task completed while no turn was in flight, the harness ran an
-UNSOLICITED turn whose events — including a `result` — piled up unread in the
-pipe. The next dispatched turn then consumed that stale turn's output, stopped
-at the stale `result`, and left its OWN response unread. Every turn after that
-delivered the PREVIOUS turn's answer (the user sends A and gets nothing;
-sends B and receives A's answer; every reply thereafter lags one turn behind),
-until a daemon restart or /new killed the process. Verified empirically:
-after `result`, a finished background task emits
-`system/task_notification` -> `system/init` -> assistant... -> `result`
-on stdout with no stdin write at all.
+- Turn blocks are delimited by `system/init` ... `result`. Dispatched turns
+  register a `TurnHandle` BEFORE their stdin write; the next `system/init` is
+  attributed to it. Events route to the per-chat StreamSender AND accumulate
+  on the handle; `result` completes the handle.
+- Blocks with no registered handle are unsolicited: text routes to the chat
+  sender IMMEDIATELY (background results reach the operator when they finish,
+  not one message later).
+- A registered handle is ALWAYS completed (result / EOF / read error), so
+  dispatch can never wait on a turn the pump has abandoned.
+- Attribution race: a background turn in the sub-second window between
+  `register_turn` and the dispatched turn's `system/init` can swap handles.
+  All text is delivered either way; the burst self-heals. Do NOT counter with
+  task-notification counting — a miscount orphans a dispatched turn (hang),
+  strictly worse than cosmetic skew.
+- Watchdog note: `_touch()` bumps the pending turn's activity clock on EVERY
+  event (any block) — deliberate OLD-code parity. Scoping it to the owned
+  block would let a >CLAUDE_TIMEOUT background turn kill a healthy process
+  while a dispatch waits behind it.
 
-The pump reads every event as it arrives, for the life of the process:
-
-  * Turn blocks are delimited by `system/init` ... `result` (every turn,
-    dispatched or unsolicited, opens with `system/init` — verified).
-  * A dispatched turn registers a `TurnHandle` BEFORE its stdin write; the
-    next `system/init` is attributed to it. Its events are routed to the
-    per-chat StreamSender AND accumulated on the handle; its `result`
-    completes the handle.
-  * Blocks with no registered handle are unsolicited (background-task turns):
-    their text is routed to the chat sender IMMEDIATELY — the operator receives
-    background results when they finish, not one message later.
-
-Attribution note: if a background turn begins in the sub-second window between
-`register_turn` and the dispatched turn's `system/init`, the handle may be
-attributed to the background block (stream order is authoritative and the two
-are indistinguishable in-band). ALL text is routed to the sender either way,
-so nothing is lost and nothing hangs; in the common idle case the dispatched
-turn's real output simply arrives as an unsolicited block moments later. If a
-follow-up dispatch is already queued when that happens (rapid-fire messages
-overlapping a background completion), attribution can skew by one turn until
-the burst ends — a rare, compound-race, self-healing echo of the old bug, not
-a persistent state. One sharper edge inside the same race: if the
-misattributed background block happens to be the empty-clean-exit shape, the
-dispatched turn's result can look stale (`looks_like_stale_session`) and
-trigger a fresh-session retry — background turns essentially always carry
-content, so this is a compound-compound rarity, but don't let the word
-"cosmetic" lull you. Do not "fix" any of this with task-notification
-counting: a miscount can orphan a dispatched turn (a hang), which is strictly
-worse than cosmetic skew.
-
-Watchdog note: `_touch()` bumps the pending turn's activity clock on EVERY
-event, including another block's — deliberate OLD-code parity (the old reader
-also reset its silence clock on any line of the shared pipe). Scoping it to
-the owned block would let a >CLAUDE_TIMEOUT background turn get a healthy
-process killed while a dispatch waits behind it.
+Symptom of violating the invariant (one-turn lag): sends A and gets nothing;
+sends B and receives A's answer; every reply lags one turn until restart or
+/new. Full desync narrative + attribution-race sharper edges:
+docs/ARCHITECTURE.md § StreamPump.
 """
 
 import json
@@ -69,53 +43,42 @@ from landline.claude.tool_status import _extract_text_blocks, _format_tool_statu
 class TurnHandle:
     """Bookkeeping for one dispatched turn.
 
-    Registered with the pump BEFORE the user message is written to stdin.
-    The pump completes it (``done.set()``) when the block attributed to it
-    closes with a `result` event, or on EOF / read error — a registered
-    handle is ALWAYS completed eventually, so the dispatch thread can never
-    wait on a turn the pump has abandoned.
+    Registered with the pump BEFORE the stdin write; the pump completes it
+    (``done.set()``) on the attributed block's `result`, or on EOF / read
+    error — completion is unconditional so dispatch can't hang on an
+    abandoned turn.
     """
 
     def __init__(self) -> None:
         self.done = threading.Event()
-        # Session id observed on this turn's `system/init` (init_session_id)
-        # and on its `result` event (result_session_id). The result-event id
-        # wins, mirroring the old reader's precedence.
+        # Session ids observed on init/result events; result-event id wins
+        # (mirrors the old reader's precedence).
         self.init_session_id: Optional[str] = None
         self.result_session_id: Optional[str] = None
         self.final_result: str = ""
         self.saw_result: bool = False
-        # Text deltas the pump routed to the sender for this turn's block —
-        # joined by the streaming layer into ClaudeStreamResult.streamed_text.
+        # Text deltas routed to the sender for this block — joined into
+        # ClaudeStreamResult.streamed_text by the streaming layer.
         self.streamed_parts: List[str] = []
-        # Set by the read-error/EOF paths so the streaming layer can surface
-        # the same "Stream read error" result.error the old reader produced.
+        # Set on read-error/EOF paths so the streaming layer surfaces the
+        # same "Stream read error" result.error the old reader produced.
         self.error: Optional[str] = None
-        # Set by the interrupt watchdog: the pump stops routing/accumulating
-        # this turn's assistant events (parity with the old `interrupt_sent`
-        # skip). Unsolicited blocks are unaffected.
+        # Interrupt watchdog: pump stops routing/accumulating this turn's
+        # assistant events (parity with old ``interrupt_sent`` skip).
+        # Unsolicited blocks are unaffected.
         self.interrupt_suppress = threading.Event()
-        # Single-cell activity clock (same shape the old reader used) —
-        # bumped by the pump on EVERY event while this handle is pending, so
-        # the caller's CLAUDE_TIMEOUT watchdog keeps working unchanged.
+        # Activity clock (single-cell list, same shape as the old reader) —
+        # bumped on EVERY event while this handle is pending so the caller's
+        # CLAUDE_TIMEOUT watchdog keeps working unchanged.
         self.last_active: List[float] = [time.time()]
-        # Cluster 2 (stale-resume auto-recovery) — the pump records the
-        # dispatched turn's terminal `result` event's error flag / subtype
-        # (in _close_block) and whether a `system/init` opened this turn's
-        # block (in _open_block). Together they distinguish the
-        # pruned/nonexistent --resume shape (is_error + no init on this
-        # turn) from a mid-session API error (is_error + saw_init True) —
-        # see landline.claude.dispatch.looks_like_pruned_resume. Pump-thread
-        # writes are read by the streaming layer AFTER handle.done.wait()
-        # completes, same happens-before rule as session_id/final_result.
+        # Result-shape fields for the pruned-resume vs mid-session-error
+        # discriminator (see landline.claude.predicates.looks_like_pruned_resume).
+        # Pump-thread writes read by the streaming layer AFTER handle.done.wait().
         self.result_is_error: bool = False
         self.result_subtype: Optional[str] = None
         self.saw_init: bool = False
-        # Cluster 4 (usage/cost stats): pump captures the optional
-        # accounting fields from the terminal `result` event so the
-        # dispatcher can persist a daily aggregate on successful turns.
-        # All safe defaults — existing tests that build TurnHandle by
-        # hand keep working unchanged.
+        # Optional accounting fields from the terminal `result` event;
+        # safe defaults so hand-built TurnHandles in tests still work.
         self.result_usage: Optional[Dict[str, Any]] = None
         self.result_model_usage: Optional[Dict[str, Any]] = None
         self.result_total_cost_usd: Optional[float] = None
@@ -142,10 +105,10 @@ class StreamPump:
     """Single long-lived reader of one Claude subprocess's stdout.
 
     Created once per process by ``get_or_create_pump`` and never replaced:
-    if the pump thread dies while the process lives, the pipe's read position
-    is no longer trustworthy and the caller must kill/respawn the process
-    (see ``landline.streaming``). All producer-side state (``_pending``,
-    ``_idle_route``) is lock-guarded; block state is pump-thread-only.
+    if the pump thread dies while the process lives, the pipe read position
+    is unknowable and the caller must kill/respawn (see landline.streaming).
+    Producer-side state (``_pending``, ``_idle_route``) is lock-guarded;
+    block state is pump-thread-only.
     """
 
     def __init__(self, proc: Any) -> None:
@@ -153,8 +116,8 @@ class StreamPump:
         self._lock = threading.Lock()
         self._pending: Optional[TurnHandle] = None
         self._pending_sender: Optional[Any] = None
-        # (chat_id, token, text_send_fn, status_send_fn) for routing
-        # unsolicited blocks. Refreshed on every dispatched turn.
+        # (chat_id, token, text_send_fn, status_send_fn) for unsolicited
+        # blocks; refreshed on every dispatched turn.
         self._idle_route: Optional[Tuple[str, str, Callable, Callable]] = None
         self._read_error: Optional[str] = None
         self._init_anomaly_logged = False
@@ -163,9 +126,7 @@ class StreamPump:
         )
         self._thread.start()
 
-    # ------------------------------------------------------------------
-    # Producer interface (dispatch thread)
-    # ------------------------------------------------------------------
+    # Producer interface (dispatch thread).
 
     @property
     def alive(self) -> bool:
@@ -179,12 +140,14 @@ class StreamPump:
             self._idle_route = (chat_id, token, text_send_fn, status_send_fn)
 
     def register_turn(self, handle: TurnHandle, sender: Any) -> None:
-        """Register the upcoming dispatched turn. Call BEFORE the stdin write
-        so the turn's `system/init` can never race past an empty slot."""
+        """Register the upcoming dispatched turn.
+
+        Call BEFORE the stdin write so the turn's `system/init` can never
+        race past an empty slot.
+        """
         with self._lock:
             if self._pending is not None:
-                # Dispatch is single-threaded; a second concurrent turn is a
-                # programmer error. Complete the orphan so nothing hangs.
+                # Dispatch is single-threaded; complete the orphan so nothing hangs.
                 log("StreamPump: register_turn found a pending handle — "
                     "completing the orphan (dispatch overlap?)")
                 self._pending.error = "orphaned by overlapping dispatch"
@@ -193,22 +156,18 @@ class StreamPump:
             self._pending_sender = sender
             handle.last_active[0] = time.time()
         if not self.alive:
-            # Pump died between the caller's liveness check and now — never
-            # leave a registered handle waiting on a dead reader.
+            # Pump died between the caller's liveness check and now.
             self._complete_pending("stream pump is not running")
 
     def cancel_turn(self, handle: TurnHandle) -> None:
-        """Unregister a turn whose stdin write failed (nothing was sent, so
-        no block will ever arrive for it)."""
+        """Unregister a turn whose stdin write failed (no block will arrive)."""
         with self._lock:
             if self._pending is handle:
                 self._pending = None
                 self._pending_sender = None
         handle.done.set()
 
-    # ------------------------------------------------------------------
-    # Pump thread
-    # ------------------------------------------------------------------
+    # Pump thread.
 
     def _run(self) -> None:
         block: Optional[_Block] = None
@@ -226,33 +185,29 @@ class StreamPump:
                     block = self._handle_event(block, event)
                 except Exception as event_error:
                     # One malformed event must not kill the process's only
-                    # reader — log and keep pumping. Behavioral drift vs the
-                    # old per-turn reader, accepted knowingly: a sender that
-                    # RAISES here is logged but no longer surfaces as
-                    # result.error on the turn (StreamSender's producer
-                    # methods are q.put behind a lock and don't raise in
-                    # practice; grep "StreamPump event error" if a turn ever
-                    # looks successful while nothing rendered).
+                    # reader — log and keep pumping. Drift from the old
+                    # per-turn reader accepted: a sender that RAISES here
+                    # is logged but no longer surfaces as result.error on
+                    # the turn (grep "StreamPump event error" if a turn
+                    # ever looks successful while nothing rendered).
                     log("StreamPump event error on %r: %s"
                         % (event.get("type"), event_error))
         except Exception as read_error:
             # Includes ValueError from the watchdog closing stdout mid-read
-            # (interrupt / timeout / process-death paths) — same class of
-            # exit the old per-turn reader surfaced as "Stream read error".
+            # (interrupt / timeout / process-death) — same class of exit the
+            # old per-turn reader surfaced as "Stream read error".
             self._read_error = str(read_error)
             log(f"Stream read error: {read_error}")
         finally:
-            # EOF or error: flush a dangling unsolicited block's tail and
-            # ALWAYS complete a pending handle so the dispatcher never hangs.
+            # EOF/error: flush a dangling unsolicited block's tail, ALWAYS
+            # complete a pending handle (so dispatcher never hangs).
             if block is not None and block.handle is None:
                 self._flush_block_sender(block)
             self._complete_pending(self._read_error)
-            # Break the `_pumps[proc] -> pump -> pump.proc -> proc` reference
-            # cycle: with a strong self.proc, the WeakKeyDictionary entry
-            # (and the dead proc) could never be collected, leaking one
-            # Popen + pump per respawn (/new, interrupts, watchdog kills)
-            # for the daemon's lifetime. The pump is spent once _run exits,
-            # so nothing reads self.proc after this.
+            # Break the _pumps[proc] → pump → pump.proc → proc ref cycle
+            # (WeakKeyDictionary entry would otherwise never collect →
+            # one leaked Popen+pump per respawn for the daemon's life).
+            # Pump is spent once _run exits; nothing reads self.proc after.
             self.proc = None
 
     def _complete_pending(self, error: Optional[str]) -> None:
@@ -264,10 +219,8 @@ class StreamPump:
         if handle is not None and not handle.done.is_set():
             if error is not None and not handle.saw_result:
                 handle.error = error
-            # Bubble boundary for any partial text this turn routed (the old
-            # reader's finally-flush did this for the EOF/error/interrupt
-            # exits). Must happen before done.set() — same sole-producer
-            # rule as _close_block.
+            # Flush partial text BEFORE done.set() — same sole-producer rule
+            # as _close_block (see docs/ARCHITECTURE.md § H1).
             if sender is not None:
                 try:
                     sender.flush()
@@ -281,9 +234,7 @@ class StreamPump:
         if handle is not None:
             handle.last_active[0] = time.time()
 
-    # ------------------------------------------------------------------
-    # Event handling (pump thread only)
-    # ------------------------------------------------------------------
+    # Event handling (pump thread only).
 
     def _handle_event(self, block: Optional[_Block],
                       event: Dict) -> Optional[_Block]:
@@ -294,9 +245,8 @@ class StreamPump:
 
         if etype == "assistant":
             if block is None:
-                # Assistant event with no init — not observed in practice;
-                # treat as the start of an unsolicited block so the text is
-                # still delivered rather than dropped.
+                # Assistant with no init — not observed; treat as start of an
+                # unsolicited block so text is delivered rather than dropped.
                 block = self._attribute_block()
             self._route_assistant(block, event)
             return block
@@ -304,19 +254,17 @@ class StreamPump:
         if etype == "result":
             return self._close_block(block, event)
 
-        # Everything else (rate_limit_event, system/thinking_tokens,
-        # system/task_started|updated|notification, user tool_results, ...)
-        # carries no routable content — _touch() above already counted it
-        # as activity.
+        # rate_limit_event / system/thinking_tokens / task_started|updated|
+        # notification / user tool_results — no routable content; _touch()
+        # already counted it as activity.
         return block
 
     def _open_block(self, block: Optional[_Block],
                     event: Dict) -> _Block:
         if block is not None:
-            # An init while a block is open means the previous turn never
-            # emitted a result (not observed in practice). Keep the SAME
-            # handle attached to the fresh block so a dispatched turn can
-            # never be orphaned by the anomaly; flush an unsolicited tail.
+            # init while a block is open — previous turn never emitted result
+            # (not observed). Keep the SAME handle so a dispatched turn is
+            # never orphaned; flush an unsolicited tail.
             if not self._init_anomaly_logged:
                 self._init_anomaly_logged = True
                 log("StreamPump: system/init arrived while a turn block was "
@@ -330,11 +278,9 @@ class StreamPump:
             block = self._attribute_block()
 
         if block.handle is not None:
-            # Cluster 2: mark saw_init BEFORE recording session_id so the
-            # ordering matches the load-bearing distinguisher — a mid-session
-            # error necessarily had an init on this turn (saw_init True); a
-            # pruned/nonexistent --resume never opens with init on the
-            # failing turn (saw_init stays False).
+            # Mark saw_init BEFORE recording session_id — ordering matches
+            # the pruned-resume-vs-mid-session-error discriminator (mid-error
+            # had init on this turn; pruned-resume never did).
             block.handle.saw_init = True
             sid = event.get("session_id")
             if sid:
@@ -342,9 +288,8 @@ class StreamPump:
         return block
 
     def _attribute_block(self) -> _Block:
-        """A new block goes to the pending dispatched turn if there is one,
-        else it is unsolicited (harness-initiated) and routes to the chat via
-        the idle route."""
+        """A new block goes to the pending dispatched turn if one is registered,
+        else it is unsolicited and routes via the idle route."""
         with self._lock:
             handle = self._pending
             sender = self._pending_sender
@@ -355,9 +300,8 @@ class StreamPump:
 
     def _idle_sender(self, idle_route: Optional[Tuple]) -> Optional[Any]:
         if idle_route is None:
-            # No dispatched turn has ever run on this process — nothing to
-            # route to. Not reachable in practice (a fresh process emits no
-            # events before its first message); log so a drop is observable.
+            # No dispatched turn has ever run on this process; not reachable
+            # in practice (fresh process emits no events pre-first-message).
             log("StreamPump: unsolicited turn before any dispatched turn — "
                 "no chat route yet, text will be dropped")
             return None
@@ -416,14 +360,11 @@ class StreamPump:
     def _close_block(self, block: Optional[_Block],
                      event: Dict) -> Optional[_Block]:
         if block is None:
-            # A result with no open block — anomalous in the common case, but
-            # ALSO the empirically-verified pruned/nonexistent --resume shape
-            # (Cluster 2): the CC process emits a bare `result` event with
-            # is_error=true / subtype=error_during_execution and no preceding
-            # system/init. If a dispatch is pending we must (a) record the
-            # is_error signal on its handle so the dispatcher's
-            # looks_like_pruned_resume can observe it, AND (b) complete the
-            # handle so the caller never hangs.
+            # Bare result with no open block: anomalous OR the verified
+            # pruned/nonexistent --resume shape (bare result with is_error=true
+            # + subtype=error_during_execution, no preceding system/init). If a
+            # dispatch is pending, record the is_error signal so
+            # looks_like_pruned_resume can observe it, then complete the handle.
             log("StreamPump: result event with no open turn block")
             with self._lock:
                 pending = self._pending
@@ -433,9 +374,8 @@ class StreamPump:
                 subtype = event.get("subtype")
                 if subtype is not None:
                     pending.result_subtype = subtype
-            # No saw_result on this path — the pruned shape did not emit a
-            # dispatched-turn result block, and _complete_pending's error
-            # branch is gated on ``not saw_result``.
+            # No saw_result on this path — _complete_pending's error branch
+            # is gated on ``not saw_result``.
             self._complete_pending("result event with no open turn block")
             return None
 
@@ -446,32 +386,23 @@ class StreamPump:
             if sid:
                 handle.result_session_id = sid
             handle.saw_result = True
-            # Cluster 2: capture the result event's error signal for the
-            # dispatcher's pruned-resume detector. An unsolicited block that
-            # emits is_error=True is discarded silently (block.handle is
-            # None in the fall-through path below) — parity with today; no
-            # dispatched turn is affected by a background is_error.
+            # Capture is_error for the pruned-resume discriminator. An
+            # unsolicited is_error is discarded (falls through below).
             if event.get("is_error") is True:
                 handle.result_is_error = True
             handle.result_subtype = event.get("subtype")
-            # Cluster 4: capture usage/cost fields from the result event.
-            # Defensive isinstance checks — CC event shapes drift and a
-            # missing/renamed key must never crash the pump thread. All
-            # fields are optional; downstream code treats None as "no data".
             self._capture_usage_fields(event, handle)
-            # Final-result tail + the turn-boundary flush happen HERE, on the
-            # pump thread, BEFORE the handle completes. The pump must be the
-            # SOLE producer of turn content on the per-chat sender: if the
-            # dispatch thread appended the tail after done.wait(), a
-            # back-to-back unsolicited block (already sitting in the pipe)
-            # would race its text in between this turn's deltas and the
-            # tail/flush, welding background text into this turn's bubble
-            # and orphaning the tail into the next one (2026-07-02 audit,
-            # finding H1 — reproduced 100% with back-to-back events).
+            # SOLE-PRODUCER rule: final-tail + turn-boundary flush run HERE
+            # on the pump thread, BEFORE done.set(). If the dispatch thread
+            # appended the tail after done.wait(), a back-to-back unsolicited
+            # block already in the pipe would race text between this turn's
+            # deltas and the tail — welding background text into this bubble
+            # and orphaning the tail into the next. See docs/ARCHITECTURE.md
+            # § H1 (100% reproducible with back-to-back events).
             try:
-                # A sender defect here must not leave the handle pending —
-                # the dispatch thread would hang until the CLAUDE_TIMEOUT
-                # watchdog. done.set() below is unconditional.
+                # done.set() below is unconditional — a sender defect must
+                # not leave the handle pending (would hang dispatch until
+                # the CLAUDE_TIMEOUT watchdog).
                 self._append_final_tail(block, handle)
             except Exception as tail_error:
                 log(f"StreamPump: final-tail append failed: {tail_error}")
@@ -483,32 +414,26 @@ class StreamPump:
             handle.done.set()
             return None
 
-        # Unsolicited block (background-task turn): if the model's text came
-        # only through the result payload, deliver that; then mark the bubble
-        # boundary so the next turn starts a fresh message.
+        # Unsolicited block: if model's text only arrived in the result
+        # payload, deliver it; then mark the bubble boundary.
         final_text = (event.get("result", "") or "").strip()
         if final_text and not block.routed_any_text and block.sender is not None:
             block.sender.text(final_text)
         self._flush_block_sender(block)
-        # Cluster 4: unsolicited-turn usage attribution. Background subagents
-        # / run_in_background completions consume tokens on the operator's Max plan,
-        # so they belong in the daily aggregate — but tagged separately from
-        # dispatched turns so the operator can distinguish "my messages" cost from
-        # "background stuff" cost. Lazy import so a broken usage_stats module
-        # never breaks the pump; swallow everything so this is truly
-        # fire-and-forget from the pump's perspective.
+        # Attribute background token cost to a separate bucket in the daily
+        # aggregate so "my messages" cost is distinguishable from background.
+        # Lazy import + fully swallowed — fire-and-forget from the pump.
         self._record_unsolicited_usage(event)
         return None
 
     @staticmethod
     def _capture_usage_fields(event: Dict, handle: TurnHandle) -> None:
-        """Copy the optional accounting fields from a ``result`` event onto
-        the handle. Defensive isinstance checks — CC event shapes drift and
-        a missing/renamed key must never crash the pump thread.
+        """Copy optional accounting fields from a ``result`` event onto the handle.
 
-        Cluster 4. Fields mirror the persistent-stream docstring:
-        ``usage`` (input/output/cache tokens), ``modelUsage`` (per-model
-        breakdown), ``total_cost_usd``, ``num_turns``, ``duration_ms``.
+        Fields: ``usage`` (in/out/cache tokens), ``modelUsage`` (per-model),
+        ``total_cost_usd``, ``num_turns``, ``duration_ms``. Defensive
+        isinstance checks — CC event shapes drift and a missing/renamed key
+        must never crash the pump thread.
         """
         usage = event.get("usage")
         if isinstance(usage, dict):
@@ -528,21 +453,16 @@ class StreamPump:
 
     @staticmethod
     def _record_unsolicited_usage(event: Dict) -> None:
-        """Persist an unsolicited (background) turn's usage into the daily
-        aggregate. Fully wrapped in try/except — a broken usage_stats module
-        must never affect the pump's routing responsibilities. Lazy import
-        keeps stream_pump import-time free of the state-file side effect.
+        """Persist an unsolicited (background) turn's usage into the daily aggregate.
 
-        Cluster 4 hardening: ``usage_stats.record_turn`` performs synchronous
-        ``os.fsync`` inside its module-level ``_lock``. Calling it from the
-        pump thread would let a competing dispatch-thread ``record_turn``
-        (holding ``_lock`` during an SSD stall) stall the pump — Claude's
-        stdout pipe would fill and back-pressure the subprocess, breaking
-        the "pump reads continuously for the process's life" invariant
-        (see ``CLAUDE.md`` -> "StreamPump" -> "NOTHING else may
-        read that pipe"). Dispatch it to a short-lived daemon thread so the
-        pump returns immediately; the daemon thread can afford to block on
-        the lock and fsync.
+        - Fire-and-forget: fully wrapped so a broken usage_stats never affects
+          the pump's routing. Lazy import keeps pump import-time side-effect-free.
+        - Dispatched to a daemon thread — ``usage_stats.record_turn`` does a
+          synchronous ``os.fsync`` inside its module-level ``_lock``; calling
+          it on the pump thread would let a competing dispatch-thread
+          ``record_turn`` (SSD stall) back-pressure the stdout pipe and break
+          the "one reader for the process's life" invariant. See
+          docs/ARCHITECTURE.md § StreamPump.
         """
         try:
             usage_snapshot = (
@@ -592,9 +512,8 @@ class StreamPump:
                 name="landline-usage-stats",
             ).start()
         except Exception as spawn_error:
-            # Thread creation failed (process resource exhaustion). Log
-            # metadata; the pump keeps going — losing one unsolicited
-            # bucket update is strictly better than stalling the pipe.
+            # Thread creation failed (resource exhaustion). Pump keeps going
+            # — losing one unsolicited bucket update beats stalling the pipe.
             log(
                 f"usage_stats.record_turn (unsolicited) thread spawn "
                 f"failed: {spawn_error}"
@@ -602,14 +521,13 @@ class StreamPump:
 
     @staticmethod
     def _append_final_tail(block: _Block, handle: TurnHandle) -> None:
-        """Mirror of the old reader's end-of-turn logic: if the result
-        payload extends (or entirely replaces) the streamed deltas, send the
-        missing tail so Telegram shows the full reply. Runs on the pump
-        thread so no other producer can interleave (see _close_block).
+        """Emit any tail-only portion of the result payload as a final delta.
 
-        ``handle.streamed_parts`` is updated so that
-        ``"".join(handle.streamed_parts)`` equals what the old code exposed
-        as ``result.streamed_text`` in every branch.
+        If the result payload extends (or replaces) the streamed deltas, send
+        the missing tail so Telegram shows the full reply. Runs on the pump
+        thread — sole-producer rule (see ``_close_block``). Updates
+        ``handle.streamed_parts`` so ``"".join(...)`` equals the old
+        ``result.streamed_text`` in every branch.
         """
         final = handle.final_result or ""
         if not final.strip():
@@ -638,14 +556,10 @@ class StreamPump:
                 log(f"StreamPump: flush failed: {flush_error}")
 
 
-# ---------------------------------------------------------------------------
-# Per-process pump registry
-# ---------------------------------------------------------------------------
-
-# One pump per subprocess, for the subprocess's whole life. Weak keys so
-# test fakes and dead Popen objects don't accumulate. A dead pump is never
-# replaced for a live process — the stream position is unknowable — the
-# caller must respawn the process instead (landline.claude.streaming enforces this).
+# One pump per subprocess for its whole life. Weak keys so test fakes and
+# dead Popen objects don't accumulate. A dead pump is never replaced for a
+# live process — stream position is unknowable → caller must respawn (see
+# landline.claude.streaming).
 _pumps: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 _pumps_lock = threading.Lock()
 

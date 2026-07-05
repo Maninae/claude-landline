@@ -1,7 +1,10 @@
 """Claude call lifecycle — rate limiting, backoff, invocation, and finalization.
 
-Decomposed from the original ~160-line _send_coalesced_text_to_claude method
-into focused sub-methods, each under 40 lines.
+- Rate-limit + drain backoff queue → gate on failure backoff → invoke with
+  stale/pruned-resume retry → finalize (outcome / paused notice / session-id
+  reconcile / usage stats / completion 👌 / context threshold warn).
+- Session-id ordering: pc updated BEFORE state, state mirrored BEFORE save;
+  see docs/ARCHITECTURE.md "Session id — single source of truth".
 """
 
 import collections
@@ -24,9 +27,9 @@ from landline.telegram import send_html
 from landline.claude.types import ClaudeStreamResult
 from landline.telegram.fmt import italic
 
-# Re-imported so existing patch strings on ``landline.claude.dispatch.<pred>``
-# and existing ``from landline.claude.dispatch import <pred>`` sites keep
-# resolving after the predicates moved to ``landline.claude.predicates``.
+# Re-imported so ``patch("landline.claude.dispatch.<pred>")`` and existing
+# ``from landline.claude.dispatch import <pred>`` sites keep resolving after
+# predicates moved to ``landline.claude.predicates``.
 from landline.claude.predicates import (  # noqa: F401
     is_result_successful,
     looks_like_stale_session,
@@ -36,11 +39,11 @@ from landline.claude.predicates import (  # noqa: F401
 
 
 class ClaudeDispatcher:
-    """Manages the Claude call lifecycle: rate limiting, backoff gating,
-    invocation with stale-session retry, and response finalization.
+    """Manages the Claude call lifecycle: rate limiting, backoff, invocation
+    with stale/pruned-resume retry, and response finalization.
 
-    The orchestrator owns a single ClaudeDispatcher instance and calls
-    send_to_claude() for each coalesced message batch.
+    The orchestrator owns a single instance and calls ``send_to_claude`` per
+    coalesced message batch.
     """
 
     def __init__(
@@ -62,32 +65,24 @@ class ClaudeDispatcher:
         self._run_claude = run_claude_fn
         self._send_response = send_response_fn
         self._send_typing = send_typing_fn
-        # PauseFlag is the sole interrupt mechanism. The orchestrator always
-        # wires one; tests that construct the dispatcher directly must pass
-        # one too.
+        # Sole interrupt mechanism. Orchestrator always wires one; direct-
+        # constructing tests must pass one too.
         self._pause_flag = pause_flag
-        # Callback to clear the pause flag (= orchestrator._pause_requested.clear).
-        # Passed at construction by the orchestrator; None default keeps unit
-        # tests that don't exercise the interrupted-clear path simple.
+        # Orchestrator's _pause_requested.clear. None default for tests that
+        # don't exercise the interrupted-clear path.
         self._clear_pause_fn: Optional[Callable[[], None]] = clear_pause_fn
         self._backoff_queue: collections.deque = collections.deque(maxlen=20)
         self.last_process_time: float = 0.0
         self.running: bool = True
-        # Flips True after the first send_to_claude call seeds
-        # PersistentClaude from the persisted state dict. Guarantees the
-        # seed is idempotent and does not bypass a sid that pc may already
-        # have learned from a stream event under a competing call.
+        # Flips True after first send_to_claude seeds pc from the state dict.
+        # Idempotent — never clobbers a sid pc already learned from a stream event.
         self._pc_seeded: bool = False
-        # Cluster 3: one-shot latch for the "Claude auth expired" iMessage.
-        # Flips True on the first stderr-matched failure; cleared on the
-        # next successful stream. Only read/written from _record_outcome
-        # (single dispatch thread) so no lock is required.
+        # One-shot latch for the "Claude auth expired" iMessage; cleared on
+        # the next successful stream. Single-writer (_record_outcome) — no lock.
         self._auth_alert_sent: bool = False
         self._last_auth_alert_at: float = 0.0
-        # Cluster 3 (reactions): per-call scratch for the message_ids that
-        # earned a 👀 during classification. ``send_to_claude`` stashes them
-        # at entry and ``_finalize_response`` fires 👌 on the same ids on a
-        # successful (non-interrupted, non-error) turn.
+        # Per-call scratch for the message_ids that earned 👀 at classify time;
+        # _finalize_response fires 👌 on the same ids on a successful turn.
         self._pending_ack_message_ids: List[int] = []
         self._pending_ack_chat_id: str = ""
 
@@ -100,35 +95,23 @@ class ClaudeDispatcher:
     ) -> bool:
         """Top-level dispatch — rate limit, backoff gate, invoke, finalize.
 
-        ``consumed_paths`` are inject-queue files that produced the prepended
-        context in ``text``. They are committed (unlinked) only AFTER the text
-        actually reaches a real Claude call — never on the gated/queued path,
-        so a daemon death mid-backoff doesn't drop reports on the floor.
-
-        Cluster 3: ``ack_message_ids`` is the list of Telegram message_ids
-        that were 👀-acked during classification for this dispatch. Stashed
-        on the instance so ``_finalize_response`` can fire 👌 on the same
-        ids on a successful (non-interrupted) turn. Cleared at entry so a
-        gated/backoff-queued call doesn't carry stale ids into the next
-        real call.
+        Args:
+            consumed_paths: inject-queue files that produced the prepended
+                context. Committed (unlinked) only AFTER a real Claude call —
+                never on the gated/queued path, so a daemon death mid-backoff
+                doesn't drop reports on the floor.
+            ack_message_ids: Telegram message_ids 👀'd at classify time.
+                Stashed for ``_finalize_response`` to fire 👌 on a successful
+                turn. Reset at entry; on backoff-queue path they ride the
+                queue tuple so a later drain still fires 👌.
 
         Returns:
-            True if the message actually reached ``_invoke_claude_call``
-            (i.e. a real Claude call happened, so the pause flag was
-            given a chance to be consumed by the watchdog +
-            ``_finalize_response``). False if the send was gated by
-            failure backoff and the text was stashed on the backoff
-            queue — no Claude call happened, and pause-flag consumption
-            did NOT run. Callers use this to decide whether the batch's
-            deferred /pause is still stranded (see
-            ``orchestrator._inject_and_dispatch`` /
-            ``_consume_stranded_pause_flag``).
+            True if the call reached ``_invoke_claude_call`` (watchdog +
+            _finalize_response had a chance to consume the pause flag).
+            False if backoff-gated (text stashed on queue, no Claude call).
+            Caller uses this to decide whether a deferred /pause is stranded
+            — see ``orchestrator._inject_and_dispatch``.
         """
-        # Cluster 3: reset pending-ack state at entry so each call starts
-        # fresh. The state is only consumed inside _finalize_response of
-        # this same call. On the gated/backoff-queued path we carry these
-        # ids INTO the queue tuple so a later drain fires 👌 on every
-        # message that earned 👀 during the outage.
         self._pending_ack_message_ids = list(ack_message_ids or [])
         self._pending_ack_chat_id = chat_id
         self._seed_pc_session_from_state_once()
@@ -137,11 +120,8 @@ class ClaudeDispatcher:
             self._apply_rate_limit_and_drain_backoff(text, chat_id)
         )
         accumulated_paths.extend(drained_paths)
-        # Cluster 3 hardening: the drained queue entries were 👀-acked
-        # when they were originally queued; the 👌 for them fires on
-        # THIS finalize (the successful call that finally delivers their
-        # merged text). Prepend so ordering matches [queued 1..N,
-        # current].
+        # Drained-queue entries were 👀'd when originally queued; their 👌
+        # fires on THIS finalize. Prepend so ordering matches [queued 1..N, current].
         if drained_ack_ids:
             self._pending_ack_message_ids = (
                 list(drained_ack_ids) + self._pending_ack_message_ids
@@ -153,12 +133,10 @@ class ClaudeDispatcher:
             return False
         result = self._invoke_with_stale_retry(text, chat_id)
         self._finalize_response(result, chat_id)
-        # Commit AFTER finalize so the message has truly been handed off to a
-        # real Claude call. Even on error/interrupt the stdin write happened,
-        # so we don't want to re-inject the same reports next turn.
-        # Guard against disk errors here: if commit fails, log it but DO NOT
-        # re-raise — otherwise a transient failure would leave the just-injected
-        # reports in the queue and re-prepend them on every subsequent turn.
+        # Commit AFTER finalize: the stdin write happened even on error/
+        # interrupt, so we don't want to re-inject next turn. Don't re-raise
+        # commit failures — a transient failure would re-prepend reports
+        # on every subsequent turn.
         if accumulated_paths:
             try:
                 commit_inject_queue(accumulated_paths)
@@ -172,17 +150,17 @@ class ClaudeDispatcher:
     def _apply_rate_limit_and_drain_backoff(
         self, text: str, chat_id: str,
     ) -> Tuple[str, List[Path], List[int]]:
-        """Enforce minimum spacing between calls and drain any queued messages
-        from a prior backoff period into the current text.
+        """Enforce min spacing between calls; drain queued messages from a prior
+        backoff period into the current text.
 
-        Only entries matching ``chat_id`` are drained — leaving cross-chat
-        entries queued (today only one chat is allowlisted, so in practice
-        nothing remains, but the guard is cheap insurance). Returns the
-        merged text, the list of inject-queue paths inherited from the
-        drained entries, and the list of Telegram message_ids that were
-        👀-acked when the drained entries were originally queued (Cluster 3:
-        the caller extends _pending_ack_message_ids with these so 👌 fires
-        on all of them at the successful finalize).
+        Only entries matching ``chat_id`` are drained — cross-chat entries
+        stay queued (only one chat is allowlisted today, but the guard is
+        cheap insurance).
+
+        Returns:
+            (merged_text, inherited_inject_paths, inherited_ack_ids).
+            Caller extends ``_pending_ack_message_ids`` with the ack ids so
+            👌 fires on all drained messages at the successful finalize.
         """
         elapsed_since_last_process = time.time() - self.last_process_time
         if elapsed_since_last_process < RATE_LIMIT_SECONDS:
@@ -231,17 +209,13 @@ class ClaudeDispatcher:
         consumed_paths: List[Path],
         ack_message_ids: Optional[List[int]] = None,
     ) -> bool:
-        """If Claude is in failure backoff, queue the message and notify the
-        user.  Returns True if gated (caller should return early).
+        """Queue + notify if Claude is in failure backoff; return True if gated.
 
-        ``consumed_paths`` ride along on the queue tuple — committed only when
-        the message is eventually drained and actually dispatched.
-
-        Cluster 3 hardening: ``ack_message_ids`` are the Telegram message_ids
-        that received 👀 during classification for this dispatch. They ride
-        along on the queue tuple so a later drain fires 👌 on every message
-        that earned 👀 during the outage — preserves the "every 👀 gets a
-        matching 👌 on success" invariant.
+        - ``consumed_paths`` ride the queue tuple → committed only when the
+          message is finally dispatched.
+        - ``ack_message_ids`` also ride the queue so a later drain fires 👌
+          on every message that earned 👀 during the outage (preserves the
+          "every 👀 gets a matching 👌 on success" invariant).
         """
         if not self._failure_tracker.is_in_backoff():
             return False
@@ -276,10 +250,11 @@ class ClaudeDispatcher:
     def _unpack_entry(
         entry: Tuple,
     ) -> Tuple[str, str, List[Path], List[int]]:
-        """Backoff entries are stored as
-        ``(text, chat_id, paths, ack_message_ids)`` (Cluster 3), but older
-        2- and 3-tuple shapes may still appear in tests / hand-populated
-        state. Normalise here so callers don't branch."""
+        """Normalise a backoff-queue entry to (text, chat_id, paths, ack_ids).
+
+        Canonical shape is the 4-tuple; older 2/3-tuple shapes may appear in
+        tests / hand-populated state. Normalising here keeps callers branch-free.
+        """
         if len(entry) == 2:
             text, chat_id = entry
             return text, chat_id, [], []
@@ -292,8 +267,11 @@ class ClaudeDispatcher:
     def _invoke_with_stale_retry(
         self, text: str, chat_id: str,
     ) -> ClaudeStreamResult:
-        """Invoke Claude with history injection. If --resume produces no output
-        (stale session), fall back to a fresh session with history context."""
+        """Invoke Claude with history injection; retry on stale/pruned-resume.
+
+        Falls back to a fresh session with history context if --resume
+        produces no output or the pruned-resume shape.
+        """
         self._send_typing(self._token, chat_id)
 
         from landline.claude import _get_persistent_claude
@@ -302,10 +280,9 @@ class ClaudeDispatcher:
         is_new_session = current_session_id is None
         watchdog = self._start_response_watchdog(chat_id)
 
-        # try/finally ensures the watchdog Timer is ALWAYS cancelled — without
-        # this, an exception below would leak the Timer and the user would get
-        # a spurious "(Still working...)" message after they already received
-        # (or failed to receive) the real response.
+        # try/finally: watchdog Timer is ALWAYS cancelled — else a raised
+        # exception leaks the Timer → spurious "(Still working...)" message
+        # after the real response.
         try:
             effective_text = self._inject_history(text, is_new_session)
             result = self._invoke_claude_call(
@@ -331,7 +308,10 @@ class ClaudeDispatcher:
     def _retry_with_fresh_session(
         self, text: str, chat_id: str,
     ) -> ClaudeStreamResult:
-        """Reset session state and retry Claude with a fresh session."""
+        """Reset session state and retry with a fresh session.
+
+        Ordering: pc (source of truth) FIRST, then mirror into the state dict.
+        """
         from landline.claude import _get_persistent_claude
         pc = _get_persistent_claude()
         stale_display = (pc.get_session_id() or "")[:12]
@@ -339,7 +319,6 @@ class ClaudeDispatcher:
         self._send_response(
             self._token, chat_id, "(Previous session expired, starting fresh.)",
         )
-        # Source-of-truth write FIRST, then mirror into the persisted dict.
         pc.set_session_id(None)
         self._state["session_id"] = None
         self._state["turn_count"] = 0
@@ -364,12 +343,10 @@ class ClaudeDispatcher:
     def _finalize_response(
         self, result: ClaudeStreamResult, chat_id: str,
     ) -> None:
-        """Record outcome, persist session state, log conversation, suggest /new.
+        """Record outcome, persist session, log conversation, notify context.
 
-        Extract-method decomposition: each sub-method's body is the moved
-        code verbatim. The call order below IS the finalize contract — do
-        not reorder. Session-id ordering (pc updated before state, state
-        mirrored before save) lives inside ``_reconcile_session_id``.
+        - Call order below IS the finalize contract — do NOT reorder.
+        - Session-id ordering (pc → state → save) lives in ``_reconcile_session_id``.
         """
         self._record_outcome(result, chat_id)
         self._route_paused_notice(result, chat_id)
@@ -384,11 +361,9 @@ class ClaudeDispatcher:
     ) -> None:
         """Enqueue "(Paused.)" behind the interrupted turn's draining bubbles."""
         if result.interrupted:
-            # Route through the chat's ordered queue so "(Paused.)" lands AFTER
-            # any bubbles still draining from the interrupted turn — not ahead
-            # of them. Fall back to a direct send if there's no live sender.
-            # Lazy import avoids a circular import with landline.claude;
-            # the facade is the patch surface for tests.
+            # Route via the chat's ordered queue so "(Paused.)" lands AFTER
+            # draining bubbles. Direct-send fallback if there's no live sender.
+            # Lazy facade import (test patch surface + breaks circular).
             from landline.claude import try_enqueue_or_send
             token = self._token
             try_enqueue_or_send(
@@ -402,10 +377,9 @@ class ClaudeDispatcher:
     def _reconcile_session_id(self, result: ClaudeStreamResult) -> None:
         """Update pc's session id from the result, mirror into state, save.
 
-        Ordering invariant (load-bearing): pc.set_session_id runs BEFORE the
-        state-dict mirror, and the mirror runs BEFORE save_state. An
-        interrupted / exit-143 turn must still land the persisted snapshot
-        matching pc's source-of-truth session id.
+        Load-bearing ordering: pc → state dict → save_state. An interrupted /
+        exit-143 turn must still land a persisted snapshot matching pc (the
+        source of truth), else stale-by-default clobbers a valid session.
         """
         from landline.claude import _get_persistent_claude
         pc = _get_persistent_claude()
@@ -418,11 +392,8 @@ class ClaudeDispatcher:
             pc.set_session_id(result.session_id)
             log(f"Session: {result.session_id[:12]}...")
 
-        # Always mirror pc's current sid into the dict before save_state, so
-        # the persisted snapshot matches the source of truth even when the
-        # result did not carry a new sid (e.g. an interrupted turn that ran
-        # on an existing session — the dict must still reflect pc, not
-        # stale-by-default).
+        # Mirror pc → dict even when result carries no new sid (interrupted
+        # turn on an existing session must still reflect pc, not stale-by-default).
         self._state["session_id"] = pc.get_session_id()
 
         if not result.interrupted:
@@ -430,15 +401,13 @@ class ClaudeDispatcher:
         save_state(self._state)
 
     def _record_usage_stats_from(self, result: ClaudeStreamResult) -> None:
-        """Record daily usage/cost from a successful turn and log the reply snippet."""
-        # Cluster 4: record usage/cost into the daily aggregate on a
-        # genuinely successful turn (never on interrupt / failure — those
-        # do not carry a valid `result` event's accounting fields, and
-        # counting them would double-count on the fresh-session retry
-        # that follows). Fire-and-forget: usage_stats.record_turn already
-        # swallows all its own exceptions, but wrap defensively so a
-        # future refactor that lets it raise can never corrupt finalize
-        # (save_state + log_conversation have already run above).
+        """Record daily usage/cost from a successful turn; log a reply snippet.
+
+        Only on successful (non-interrupted, non-error) turns — interrupts/
+        failures don't carry valid accounting, and counting them would double-
+        count on the fresh-session retry. Defensively wrapped so a future
+        raising refactor of usage_stats can't corrupt finalize.
+        """
         if not result.interrupted and is_result_successful(result):
             try:
                 from landline.runtime import usage_stats
@@ -459,16 +428,13 @@ class ClaudeDispatcher:
             log_conversation(AGENT_NAME, snippet)
 
     def _fire_completion_reactions(self, result: ClaudeStreamResult) -> None:
-        """Send the completion 👌 batch for the ids that were 👀'd at classify time."""
-        # Cluster 3: fire completion 👌 on the ids we 👀'd at classify
-        # time, but ONLY on a genuinely successful turn — not on
-        # interrupted (leave 👀 as a persistent "you paused this"
-        # visual), and not on failure (leave 👀 for the user to know
-        # nothing landed). The reactions call is fire-and-forget and
-        # already swallows all its own exceptions; the outer try/except
-        # here is defense-in-depth against a future refactor that lets
-        # it raise — a broken reaction path must NEVER corrupt finalize
-        # (save_state/log_conversation have already run above).
+        """Fire completion 👌 batch on the ids 👀'd at classify time.
+
+        Successful turns only. Interrupted → leave 👀 as a persistent "you
+        paused this" visual. Failed → leave 👀 so the user knows nothing
+        landed. Fire-and-forget with an outer try/except so a future
+        raising refactor of reactions can never corrupt finalize.
+        """
         if (
             not result.interrupted
             and is_result_successful(result)
@@ -490,7 +456,7 @@ class ClaudeDispatcher:
                 )
 
     def _warn_context_threshold(self, chat_id: str) -> None:
-        """Send the one-shot context-usage heads-up when crossing a threshold."""
+        """Send the one-shot context-usage heads-up on threshold crossing."""
         last_warned = self._state.get("_context_warned_at", 0)
         next_thresholds = [t for t in CONTEXT_WARN_THRESHOLDS if t > last_warned]
         if next_thresholds:
@@ -500,8 +466,8 @@ class ClaudeDispatcher:
                 if crossed:
                     self._state["_context_warned_at"] = crossed[-1]
                     save_state(self._state)
-                    # Ordered behind the turn's bubbles (see "(Paused.)" above);
-                    # direct send_response fallback when there's no live sender.
+                    # Ordered behind the turn's bubbles; direct fallback when
+                    # no live sender exists.
                     from landline.claude import try_enqueue_or_send
                     warning = (
                         f"*Heads up: context is at {pct:.0f}% of 1M window. "
@@ -515,20 +481,13 @@ class ClaudeDispatcher:
                         direct_fn=lambda body: send_response(token, chat_id, body),
                     )
 
-    # -- internal helpers (not part of the 4-method decomposition) --
-
     def _seed_pc_session_from_state_once(self) -> None:
-        """Lazy one-time seed of PersistentClaude from the persisted state dict.
+        """Lazy one-time seed of PersistentClaude from the state dict.
 
-        Runs at the top of send_to_claude. After this returns the dispatcher
-        treats pc as the source of truth and only writes the state dict at
-        save time. State-dict reads after this point are forbidden for
-        session-id decisions.
-
-        Imported lazily (and exceptions swallowed) for the same reasons as
-        the removed _sync_persistent_claude_session_id: avoid a circular
-        import with landline.claude and never let a singleton hiccup crash
-        the dispatch.
+        Runs at the top of send_to_claude. After this, pc is the source of
+        truth; state-dict reads are forbidden for session-id decisions.
+        Lazy import + swallow — avoids circular import with landline.claude
+        and never lets a singleton hiccup crash the dispatch.
         """
         if self._pc_seeded:
             return
@@ -537,8 +496,7 @@ class ClaudeDispatcher:
             from landline.claude import _get_persistent_claude
             pc = _get_persistent_claude()
             if pc.get_session_id() is not None:
-                # pc already knows (e.g. a stream event landed before we
-                # ran). Don't clobber.
+                # pc already knows — don't clobber.
                 return
             seed = self._state.get("session_id")
             if seed:
@@ -556,32 +514,23 @@ class ClaudeDispatcher:
     ) -> ClaudeStreamResult:
         """Wrap run_claude_fn with exception handling.
 
-        Bumps the PauseFlag generation and passes the watchdog a closure that
-        only honors a pause at this generation. The orchestrator always wires
-        a PauseFlag; constructing a dispatcher without one is a programmer
-        error.
+        Bumps the PauseFlag generation and gives the watchdog a closure that
+        only honors a pause at this generation. Orchestrator always wires a
+        PauseFlag; constructing without one is a programmer error.
         """
         assert self._pause_flag is not None, (
             "ClaudeDispatcher requires a pause_flag — pass one at construction"
         )
         my_generation = self._pause_flag.new_call()
         pf = self._pause_flag
-        # If a pause was requested BEFORE this call started (e.g. queued by
-        # the poller's /pause callback in the same batch that produced this
-        # dispatch, or held across ``voice_handler``'s ``already_paused_at_
-        # start`` branch), re-anchor the request to the new generation. Two
-        # bugs collapse into one if we don't:
-        #   1. ``interrupt_check()`` uses ``is_requested(my_generation)``,
-        #      which returns False for a request stranded at the previous
-        #      generation — so the watchdog never fires and the /pause is
-        #      silently dropped (the operator never sees "(Paused.)").
-        #   2. The level-triggered ``PauseFlag._event`` is still set, so
-        #      ``_wait_for_done_or_pause`` returns True on every 0.5s tick
-        #      and the watchdog spins in a 100% CPU busy-loop for the full
-        #      duration of the Claude call.
-        # ``request_pause()`` re-records ``_requested_gen`` at the current
-        # generation, closing both holes. Safe if the flag is already
-        # cleared (no-op path in that branch below).
+        # Re-anchor a pre-existing pause request to the new generation.
+        # Otherwise two bugs collapse: (1) interrupt_check() checks
+        # is_requested(my_generation), returns False for a request stranded
+        # at the previous generation → watchdog never fires, /pause silently
+        # dropped. (2) The level-triggered _event is still set →
+        # _wait_for_done_or_pause returns True every 0.5s tick → 100% CPU
+        # busy-loop for the whole call. request_pause() re-records
+        # _requested_gen at the current generation; safe on a cleared flag.
         if pf.is_set():
             pf.request_pause()
 
@@ -612,17 +561,14 @@ class ClaudeDispatcher:
             return
         if is_result_successful(result):
             self._failure_tracker.record_success()
-            # Cluster 3: a single successful stream proves auth is back.
-            # Reset the auth-alert latch so a fresh incident (e.g. a
-            # separate later expiry) triggers a new alert.
+            # Successful stream proves auth is back; reset the alert latch
+            # so a fresh incident triggers a new alert.
             self._auth_alert_sent = False
             return
 
-        # An external SIGTERM/SIGINT (daemon restart / launchctl bootout) kills
-        # Claude with a signal exit code: 143/130 (shell 128+sig convention) or
-        # -15/-2 (negative = killed-by-signal in subprocess.returncode). That's a
-        # shutdown, not a Claude failure — recording it would trigger false
-        # exponential backoff after a few restarts.
+        # SIGTERM/SIGINT (daemon restart / launchctl bootout) exit codes:
+        # 143/130 (shell 128+sig) or -15/-2 (subprocess "killed-by-signal").
+        # Shutdown, not failure — recording would trigger false backoff.
         if result.exit_code in (143, 130, -15, -2):
             log(
                 "Claude exited via signal (exit %s) — treating as shutdown, "
@@ -647,37 +593,26 @@ class ClaudeDispatcher:
             except Exception as alert_error:
                 log(f"Failed to send Claude-unavailable alert: {alert_error}")
 
-        # Cluster 3: auth-expiry detection runs AFTER record_failure so the
-        # streak count reflects this turn. Intentionally decoupled from the
-        # "Claude unavailable" alert above — that fires on the 10th
-        # consecutive failure (Telegram, in-band), this fires on the FIRST
-        # match of the OAuth-expiry stderr shape (iMessage, out-of-band) so
-        # the operator learns about a multi-day outage on turn 1, not turn 10.
+        # Auth-expiry alert runs AFTER record_failure so the streak reflects
+        # this turn. Decoupled from the in-band "Claude unavailable" (10th
+        # failure) — this fires out-of-band on the FIRST OAuth-stderr match
+        # so the operator learns about a multi-day outage on turn 1, not 10.
+        # See docs/ARCHITECTURE.md "June 2026 auth-expiry outage".
         if _stderr_looks_like_auth_failure(result.stderr_tail):
             self._maybe_send_auth_expiry_alert()
 
     def _maybe_send_auth_expiry_alert(self) -> None:
-        """Fire the one-shot iMessage auth-expiry alert (Cluster 3).
+        """Fire the one-shot iMessage auth-expiry alert.
 
-        Latched: `_auth_alert_sent` gates re-fires until the next successful
-        stream clears it. The `CLAUDE_AUTH_ALERT_MIN_INTERVAL_SECONDS` floor
-        is a defensive belt-and-suspenders — if the latch reset path breaks
-        elsewhere (bug in _record_outcome's success branch, say), the
-        operator still won't get spammed within a 6h window.
-
-        Fire-and-forget: `notifications.send_health_alert` spawns a daemon
-        thread and returns immediately, so this never blocks the dispatch
-        thread. Imported lazily inside the method to mirror the existing
-        `landline.claude._get_persistent_claude` pattern and avoid the import
-        cycle with landline.claude.
+        - Latched via ``_auth_alert_sent``; cleared on next successful stream.
+        - 6h ``CLAUDE_AUTH_ALERT_MIN_INTERVAL_SECONDS`` floor as defense-in-
+          depth; MUST run unconditionally — a fail→success→fail cycle resets
+          the latch on success, so gating the floor behind the latch would
+          skip it on the second failure and spam a second alert milliseconds
+          after the first.
+        - Fire-and-forget: send_health_alert spawns a daemon thread. Lazy
+          import avoids the landline.claude cycle.
         """
-        # The time-floor MUST run unconditionally — a fail→success→fail
-        # cycle resets ``_auth_alert_sent`` to False on the success (see
-        # _record_outcome), so gating the floor inside ``if
-        # _auth_alert_sent`` skips the floor on the second failure and
-        # lets a second alert fire milliseconds after the first (spam).
-        # The floor is defense-in-depth against exactly that latch-reset
-        # race — apply it whether the latch is set or not.
         now = time.time()
         if (
             self._last_auth_alert_at > 0.0
@@ -707,9 +642,8 @@ class ClaudeDispatcher:
         """Fire a 'still working' message after 60s of no response."""
         def _send_still_working() -> None:
             try:
-                # This fires DURING a live (slow) turn, when bubbles may already
-                # be queued — so route it through the ordered queue too, or it
-                # races ahead of them. Direct send_html fallback if no sender.
+                # Fires mid-turn when bubbles may already be queued — route
+                # via ordered queue so it doesn't race ahead. Direct fallback.
                 from landline.claude import try_enqueue_or_send
                 token = self._token
                 try_enqueue_or_send(

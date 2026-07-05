@@ -1,22 +1,12 @@
 """Per-batch update processing for the ``TelegramDaemon`` main loop.
 
-Extracted from ``daemon.py`` in Wave 2 of the restructure. Every helper here is
-a module-level function that takes the daemon coordinator as its first argument
-(same first-arg pattern as ``landline.media.photo.process_photo_batch``). All
-state stays on the daemon object — these functions read/write daemon attributes
-directly and never own state of their own.
-
-Patch-seam reach-back
----------------------
-Test suites patch module-scope names on ``landline.orchestrator`` (e.g.
-``patch("landline.orchestrator.save_state")``). The facade in
-``landline/orchestrator/__init__.py`` delegates those writes to the
-``daemon`` module's namespace. So this module resolves patchable names —
-``save_state``, ``log_conversation``, ``drain_inject_queue``,
-``classify_updates``, ``time``, ``INJECT_QUEUE_DIR`` — through the daemon
-module at call time via the ``_d`` alias below. Importing them directly
-(``from landline.runtime.state import save_state``) would bypass the seam
-and silently break mocks.
+- Each helper takes the daemon coordinator as its first arg; all state stays
+  on the daemon object (helpers read/write daemon attributes directly).
+- Patchable module-scope names (``save_state``, ``log_conversation``,
+  ``drain_inject_queue``, ``classify_updates``, ``time``, ``INJECT_QUEUE_DIR``)
+  resolve through the ``_d`` alias so ``patch("landline.orchestrator.<name>")``
+  lands as an attribute write on ``daemon`` and the mock is seen at call time.
+  Importing them directly would bypass the seam.
 """
 
 from datetime import datetime
@@ -30,20 +20,17 @@ from landline.config import (
 from landline.runtime.logging import log
 from landline.telegram import reactions
 
-# Late binding to daemon.py's namespace: patches like
-# ``patch("landline.orchestrator.save_state")`` land as attribute writes on
-# ``_d``, so ``_d.save_state(...)`` picks up the mock at call time.
+# Late binding to daemon.py's namespace — see module docstring.
 from landline.orchestrator import daemon as _d
 
 
 def process_update_batch(daemon, updates: List[Dict]) -> None:
-    """Classify updates into commands, text, photos, voice notes,
-    documents, and /pause, then process each group."""
-    # Cluster 3: initialize the per-batch ack tracker. Classifier
-    # populates chat_id → [message_id, ...] for every accepted
-    # content message so dispatch can pass the ids to the dispatcher
-    # for a completion 👌 on successful finalize. Cleared in the
-    # finally so mid-batch exceptions can't leak state.
+    """Classify + process one drained batch (commands/text/photo/voice/doc/pause).
+
+    Initializes per-batch trackers (👀→👌 ids, LOCKED_HELP coalescing set,
+    /pause deferral state) and clears them in ``finally`` so a mid-batch
+    exception can't leak state into the next batch.
+    """
     daemon._batch_ack_message_ids = {}
     daemon._batch_locked_help_chats = set()
     daemon._batch_pause_was_deferred = False
@@ -62,12 +49,13 @@ def process_update_batch(daemon, updates: List[Dict]) -> None:
 def run_batch_classification_and_dispatch(
     daemon, updates: List[Dict],
 ) -> None:
-    """Inner body of ``process_update_batch`` — classification and
-    the pass-2 dispatch. Extracted to keep the batch-tracker
-    try/finally in ``process_update_batch`` tight and to preserve
-    the original sequencing verbatim."""
-    # Pass 1: classify all updates (trivial-skip side effects handled
-    # inline by the classifier — cursor advance, reject, too-long notice).
+    """Inner body of ``process_update_batch`` — pass 1 classify, pass 2 dispatch.
+
+    Sequencing is verbatim from the pre-decomposition daemon; the split exists
+    to keep the batch-tracker try/finally in ``process_update_batch`` tight.
+    """
+    # Pass 1: trivial-skip side effects (cursor advance, reject, too-long
+    # notice) are handled inline by the classifier.
     (
         command_updates,
         text_updates,
@@ -77,10 +65,9 @@ def run_batch_classification_and_dispatch(
         voice_updates,
     ) = _d.classify_updates(daemon, updates)
 
-    # Pass 2: handle /pause with full knowledge of whether dispatch will
-    # occur in this batch. When dispatch is pending we MUST NOT clear the
-    # flag here — the watchdog needs to see it during the upcoming Claude
-    # call so it can interrupt mid-stream.
+    # Pass 2: /pause first, so we know whether dispatch will run this batch.
+    # Dispatch-pending MUST leave the flag set — the watchdog consumes it
+    # mid-stream during the upcoming Claude call.
     handle_pause_updates(
         daemon,
         pause_updates,
@@ -108,33 +95,25 @@ def run_batch_classification_and_dispatch(
 
 
 def consume_stranded_pause_flag(daemon) -> None:
-    """Findings #1 / #2: if /pause was deferred in this batch (i.e.
-    ``handle_pause_updates`` saw ``dispatch_pending=True`` and left
-    ``_pause_requested`` set for the upcoming Claude call to consume)
-    but NO Claude call actually ran this batch — locked-session
-    gate, silent unlock, all-fail download, whisper timeout,
-    unsupported doc, backoff-gated dispatch (queued for later
-    drain), or an exception raised before ``_invoke_claude_call``
-    — the flag would strand and the round-8 re-anchor logic in
-    ``ClaudeDispatcher._invoke_claude_call`` (``if pf.is_set():
-    pf.request_pause()``) would fire "(Paused.)" on the NEXT
-    unrelated turn.
+    """Clear a /pause flag deferred this batch when no Claude call ever ran.
 
-    Clear the flag here and, if the session isn't locked, notify the
-    user their /pause didn't land on a running turn. When the session
-    IS locked, ``check_lock_gate`` already sent a batch-coalesced
-    LOCKED_HELP — sending "(Nothing to pause.)" on top of that would
-    be double-noise, so stay silent in that path.
+    Called from ``run_batch_classification_and_dispatch``'s finally. Silent
+    no-op unless the batch both deferred a /pause AND never invoked Claude.
 
-    Load-bearing invariant preserved: when a real Claude call
-    actually ran (``send_to_claude`` returned True → set
-    ``_batch_dispatch_attempted`` True), the dispatcher/watchdog/
-    ``_finalize_response`` own the flag's lifecycle. This helper is
-    a no-op in that path so the mocked "dispatched but not
-    interrupted" test scenarios (e.g.
-    ``test_pause_with_text_before_in_same_batch_does_NOT_send_
-    nothing_to_pause``) continue to observe the flag still set on
-    their MockClaude callback.
+    - Deferral leaves ``_pause_requested`` set for the upcoming Claude call
+      to consume (watchdog interrupt → cleared in ``_finalize_response``).
+    - If no Claude call ran (locked gate, silent unlock, all-fail download,
+      whisper timeout, unsupported doc, backoff-gated dispatch, or an
+      exception before ``_invoke_claude_call``), the flag would strand and
+      the re-anchor in ``ClaudeDispatcher._invoke_claude_call`` would fire
+      "(Paused.)" on the NEXT unrelated turn.
+    - Locked-session path stays silent — ``check_lock_gate`` already sent a
+      batch-coalesced LOCKED_HELP; a "(Nothing to pause.)" on top is noise.
+    - Load-bearing no-op when a real Claude call ran (``send_to_claude``
+      returned True → ``_batch_dispatch_attempted`` True): dispatcher /
+      watchdog / ``_finalize_response`` own the flag's lifecycle there.
+
+    See docs/ARCHITECTURE.md "Deferred /pause — stranded flag".
     """
     if not daemon._batch_pause_was_deferred:
         return
@@ -162,26 +141,25 @@ def handle_pause_updates(
     pause_updates: List[Tuple[Dict, int, str]],
     dispatch_pending: bool,
 ) -> None:
-    """Log /pause, advance cursors, and (only when no dispatch is pending
-    in this batch) notify + clear the flag.
+    """Log /pause, advance cursors, and (only when no dispatch is pending)
+    notify + clear the flag.
 
-    When dispatch IS pending, leave the flag set so the watchdog can
-    consume it during the upcoming Claude call.
+    Args:
+        pause_updates: /pause messages this batch.
+        dispatch_pending: True if the batch will invoke Claude — leaves the
+            flag set so the watchdog can consume it mid-stream.
 
-    Uses a `notified` guard to prevent N copies of LOCKED_HELP or "Nothing
-    to pause" when multiple /pause updates arrive in the same batch.
+    - ``notified`` guard: at most one LOCKED_HELP or "Nothing to pause" per
+      batch even when multiple /pause updates arrive together.
+    - Deferred path records ``_batch_pause_was_deferred`` + a notify chat so
+      the batch's finally can clean up a stranded flag; see
+      ``consume_stranded_pause_flag``.
     """
     notified = False
     for message, update_id, chat_id in pause_updates:
         _d.log_conversation(USER_NAME, "/pause")
         if dispatch_pending:
             daemon._deferred_pause_ids.append(update_id)
-            # Record that /pause was deferred THIS batch so the
-            # finally in ``run_batch_classification_and_dispatch``
-            # can consume a stranded flag when dispatch never
-            # actually reached Claude (Findings #1 / #2). Also
-            # remember a chat_id so the cleanup notice targets the
-            # same chat that typed /pause.
             daemon._batch_pause_was_deferred = True
             if daemon._batch_pause_notify_chat is None:
                 daemon._batch_pause_notify_chat = chat_id
@@ -206,8 +184,8 @@ def process_commands(
     daemon, command_updates: List[Tuple[Dict, int, str]],
 ) -> None:
     """Process slash commands in order."""
-    # Local import avoids leaking a module-level dependency on batch_classifier
-    # for the many callers that never see command_updates.
+    # Local import — avoids a module-level dep on batch_classifier for callers
+    # that never see command_updates.
     from landline.runtime.batch_classifier import extract_chat_id
 
     for message, update_id, text in command_updates:
@@ -222,18 +200,18 @@ def process_commands(
 
 
 def check_lock_gate(daemon, chat_id: str, update_ids: List[int]) -> bool:
-    """Check lock expiry and send LOCKED_HELP if locked.
+    """Check lock expiry, send LOCKED_HELP if locked, advance cursors.
 
-    Advances cursors and returns True if the session is locked (caller
-    should return early).  Returns False if unlocked (caller proceeds).
+    Returns:
+        True if locked (caller should return early), False if unlocked.
 
-    Cross-type coalescing: if a LOCKED_HELP has already been sent to
-    this ``chat_id`` earlier in the current batch (tracked on
-    ``daemon._batch_locked_help_chats``), the send is suppressed but the
-    cursor still advances — so a mixed batch (photo + voice + document
-    + text) delivers exactly one LOCKED_HELP per chat instead of one
-    per media bucket. Outside a batch (e.g. defensive callers that
-    skip the tracker), the tracker is ``None`` and every call sends.
+    - Cross-type coalescing via ``daemon._batch_locked_help_chats``: a mixed
+      (photo+voice+doc+text) batch delivers one LOCKED_HELP per chat, not
+      one per media bucket. Outside a batch the tracker is None and every
+      call sends.
+    - Send BEFORE advancing cursors so a raised send leaves updates
+      un-advanced for Telegram re-delivery (user must not silently lose
+      visibility that the session is locked).
     """
     daemon._lock_manager.check_expiry()
     if not daemon._lock_manager.is_locked:
@@ -242,9 +220,6 @@ def check_lock_gate(daemon, chat_id: str, update_ids: List[int]) -> bool:
         isinstance(daemon._batch_locked_help_chats, set)
         and chat_id in daemon._batch_locked_help_chats
     )
-    # Send LOCKED_HELP BEFORE advancing cursors. If the send raises, leave
-    # the updates un-advanced so Telegram re-delivers them — the user must
-    # not silently lose visibility that the session is locked.
     if not already_sent:
         try:
             daemon._send_response(daemon.token, chat_id, LOCKED_HELP)
@@ -271,37 +246,32 @@ def inject_and_dispatch(
 ) -> None:
     """Drain inject queue, prepend context, dispatch to Claude, advance cursors.
 
-    Inject files travel WITH the text through ``send_to_claude`` and are
-    committed only after the message reaches a real Claude call. If
-    ``send_to_claude`` stashes the text on the backoff queue (gated by
-    failure backoff), the paths ride along on the queue tuple — so a
-    daemon death mid-backoff doesn't drop morning briefs on the floor.
+    Args:
+        ack_message_ids: ONLY the message_ids being dispatched in THIS turn
+            (caller's dispatch, not the per-batch tracker). ``ClaudeDispatcher``
+            fires 👌 on exactly these on successful finalize. Callers with
+            nothing to ack (e.g. restart continuation) pass None/[].
 
-    Cluster 3: ``ack_message_ids`` names ONLY the Telegram message_ids
-    actually being dispatched in this turn — passed by each media
-    handler from the messages it's dispatching right now. On a
-    successful finalize, ``ClaudeDispatcher`` fires 👌 on exactly
-    those ids. This partitioning is load-bearing: mixed batches
-    (voice+text, photo+text, multi-doc) each get their own dispatch,
-    and a failed dispatch (e.g., whisper failure) never lets a later
-    successful dispatch cross-pollinate 👌 onto messages that were
-    never processed. The per-batch tracker
-    (``_batch_ack_message_ids``) is populated by the classifier for
-    observability/tests but is NOT read here; the caller owns which
-    ids to ack for its own dispatch. Callers with no ids to ack
-    (e.g. restart continuation) pass ``None`` / an empty list.
-
-    Additionally, the given ids are popped from the per-batch tracker
-    so any observability read reflects the remaining un-dispatched
-    ids for the chat.
+    - Inject files travel WITH the text through ``send_to_claude`` and are
+      committed only after the message reaches a real Claude call; on the
+      backoff-queue path the paths ride the queue tuple (crash mid-backoff
+      doesn't drop morning briefs).
+    - Ack partitioning is load-bearing: mixed batches (voice+text, photo+text,
+      multi-doc) each get their own dispatch — a failed dispatch never
+      cross-pollinates 👌 onto messages that were never processed. See
+      docs/ARCHITECTURE.md "Reactions — 👀 → 👌 invariant".
+    - ``_batch_dispatch_attempted`` flips True ONLY when ``send_to_claude``
+      confirms it reached ``_invoke_claude_call``. Backoff-gated / pre-Claude
+      exception paths return False so ``consume_stranded_pause_flag`` can
+      clean up a stranded /pause (setting True too early stranded the flag
+      across turns — the bug this ordering exists to prevent).
     """
     inject_prefix, consumed_paths = _d.drain_inject_queue(_d.INJECT_QUEUE_DIR)
     if inject_prefix:
         text = inject_prefix + "\n\n" + text
     ack_ids: List[int] = list(ack_message_ids or [])
-    # Pop the dispatched ids off the per-batch tracker so a subsequent
-    # dispatch in the same batch (e.g. text after voice) cannot see
-    # them and re-👌 messages that don't belong to it.
+    # Pop dispatched ids off the per-batch tracker so a subsequent dispatch
+    # in the same batch (text after voice) can't re-👌 them.
     if isinstance(daemon._batch_ack_message_ids, dict) and ack_ids:
         remaining = [
             m for m in daemon._batch_ack_message_ids.get(chat_id, [])
@@ -311,24 +281,6 @@ def inject_and_dispatch(
             daemon._batch_ack_message_ids[chat_id] = remaining
         else:
             daemon._batch_ack_message_ids.pop(chat_id, None)
-    # Ownership of ``_batch_dispatch_attempted``: flip True ONLY
-    # when ``send_to_claude`` confirms it actually reached
-    # ``_invoke_claude_call`` (return True). The watchdog +
-    # ``_finalize_response`` are the ONLY consumers of the pause
-    # flag downstream, and both only run inside that path. On the
-    # backoff-gated path the dispatcher stashes the text on the
-    # backoff queue and returns False WITHOUT invoking Claude — so
-    # the pause flag would strand, and the round-8 re-anchor logic
-    # in ``ClaudeDispatcher._invoke_claude_call`` (``if pf.is_set():
-    # pf.request_pause()``) would fire "(Paused.)" on a FUTURE
-    # unrelated turn (e.g. after backoff clears and the queued text
-    # is drained into a fresh dispatch). Same story if
-    # ``send_to_claude`` raises before Claude runs: the exception
-    # propagates without setting the flag True, so
-    # ``consume_stranded_pause_flag`` in
-    # ``run_batch_classification_and_dispatch``'s finally can
-    # clean up. The pre-fix design (set True before the call)
-    # blocked both cleanup paths and stranded /pause across turns.
     claude_invoked = daemon._dispatcher.send_to_claude(
         text, chat_id,
         consumed_paths=consumed_paths,
@@ -348,9 +300,8 @@ def process_text_batch(
     representative_chat_id = extract_chat_id(text_updates[0][0])
     update_ids = [uid for _, uid, _ in text_updates]
 
-    # message_ids that the classifier fired 👀 on. Used to clear the
-    # ack on rejection paths (lock gate, silent unlock) so 👀 never
-    # lingers without a matching 👌.
+    # message_ids the classifier 👀'd. Cleared on rejection (lock gate, silent
+    # unlock) so 👀 never lingers without a matching 👌.
     text_mids: List[int] = [
         msg.get("message_id")
         for msg, _, _ in text_updates
@@ -364,9 +315,7 @@ def process_text_batch(
                 daemon.token, representative_chat_id,
                 "Unlocked. Send a message to begin.",
             )
-            # The passphrase-typed-directly message is not dispatched
-            # to Claude — clear its 👀 so it doesn't sit as an
-            # unmatched ack.
+            # Passphrase-typed-directly isn't dispatched — clear its 👀.
             if text_mids:
                 reactions.set_reactions_batch_async(
                     daemon.token, representative_chat_id, text_mids, None,
@@ -378,8 +327,7 @@ def process_text_batch(
 
     if check_lock_gate(daemon, representative_chat_id, update_ids):
         log(f"Sending LOCKED_HELP for batch of {len(text_updates)} text message(s)")
-        # Clear 👀 acks on all text messages so they don't linger as
-        # false "accepted" signals under the locked-session rejection.
+        # Clear 👀 so it doesn't linger as a false "accepted" signal.
         if text_mids:
             reactions.set_reactions_batch_async(
                 daemon.token, representative_chat_id, text_mids, None,
@@ -391,10 +339,8 @@ def process_text_batch(
     for _, _, individual_text in text_updates:
         _d.log_conversation(USER_NAME, individual_text)
 
-    # Cluster 3: ack only the message_ids being dispatched now — one
-    # per accepted text message in this batch. Prevents 👌 leaking
-    # onto messages that were dispatched in a different pass
-    # (photo/voice/doc) whose success/failure semantics differ.
+    # Ack only the ids being dispatched now — prevents 👌 leaking onto
+    # messages dispatched in a different pass (photo/voice/doc).
     text_ack_ids: List[int] = [
         msg.get("message_id")
         for msg, _, _ in text_updates
