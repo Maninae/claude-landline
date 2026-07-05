@@ -1,10 +1,8 @@
-"""Telegram file downloads — `getFile` + bounded-stream binary fetch.
+"""Telegram file downloads — ``getFile`` + bounded-stream binary fetch.
 
-Splits the photo/document download path out of the transport so that the
-request/retry policy and the chunker don't have to live next to byte-cap
-streaming and filesystem cleanup. Callers reach this through
-`landline.telegram.download_file` (a re-export) so the existing import paths
-keep working.
+Separates photo/document download (byte-cap streaming, FS cleanup) from the
+transport's request/retry policy and the chunker. Callers reach this through
+``landline.telegram.download_file`` (re-export) so import paths keep working.
 """
 
 import os
@@ -22,34 +20,28 @@ from landline.runtime.logging import log
 from landline.telegram.transport import telegram_api
 
 
-# Path traversal / control-char sanitizer used by document handling. Kept at
-# module level so the tests can call it directly.
+# Path-traversal / control-char sanitizer. Module-level for direct test use.
 _MAX_BASENAME_LEN = 255
 
 
 def _safe_basename(raw: str, allowed_exts: FrozenSet[str]) -> Optional[str]:
-    """Sanitize an attacker-supplied filename to a safe basename or None.
+    """Sanitize an attacker-supplied filename → ``<safe_stem><ext>`` or None.
 
-    Rules (any failure returns None):
-      1. Strip via ``os.path.basename`` (removes any leading path segments).
-      2. Reject empty, ``.``, ``..``, or anything containing NUL / ``/``.
-      3. Reject names longer than 255 chars.
-      4. Split into ``stem + ext``; require ``ext.lower() in allowed_exts``.
-      5. Strip non-printable / control-class characters from the stem.
-         The prior ``ord(ch) >= 0x20`` gate preserved DEL (0x7F), C1
-         controls (0x80–0x9F), Unicode BOM/ZWSP, RTL-override U+202E,
-         and U+2028/2029 line separators — an attacker-controlled
-         document filename with U+202E could visually disguise the
-         extension in the daemon's log tail and in the ``[document:
-         <name>, ...]`` fragment of the Claude prompt, and U+2028 could
-         inject an apparent new line into that fragment. The tighter
-         gate here rejects any character whose Unicode general category
-         starts with ``C`` (Cc, Cf, Cs, Co, Cn — controls, formatting,
-         surrogates, private-use, unassigned) or that Python's own
-         ``str.isprintable()`` considers non-printable. If the stem
-         becomes empty, substitute ``'file'``.
+    Args:
+        raw: attacker-supplied filename.
+        allowed_exts: lowercased extensions to accept (with dot).
 
-    Returns ``<safe_stem><lowercased_ext>`` on success.
+    Returns:
+        Sanitized basename, or None on any rule failure.
+
+    - Reject empty, ``.``, ``..``, NUL, or ``/`` in the name.
+    - Reject names longer than 255 chars.
+    - Require ``ext.lower() in allowed_exts``.
+    - Strip anything Python considers non-printable OR in Unicode category
+      ``C*`` (controls, format, surrogates, private-use, unassigned) —
+      catches BOM, ZWSP, RTL-override U+202E, U+2028/2029, DEL, C1 controls
+      that an ``ord >= 0x20`` gate would let through.
+    - Empty stem after strip → substitute ``'file'``.
     """
     if raw is None:
         return None
@@ -66,10 +58,9 @@ def _safe_basename(raw: str, allowed_exts: FrozenSet[str]) -> Optional[str]:
         return None
 
     def _stem_safe(ch: str) -> bool:
-        # str.isprintable() catches ASCII controls, DEL, and Unicode
-        # separators/line breaks. The category guard closes the residual
-        # gap for format-class chars (BOM, ZWSP, RTL-override) that some
-        # Python builds treat as printable.
+        # ``isprintable`` catches controls/DEL/separators; the C-category
+        # guard closes the gap for format-class chars (BOM, ZWSP, U+202E)
+        # that some Python builds treat as printable.
         if not ch.isprintable():
             return False
         cat0 = unicodedata.category(ch)[:1]
@@ -104,9 +95,8 @@ def download_file(
         Absolute path to the saved file, or None if download failed.
     """
     dest_dir = target_dir if target_dir is not None else TELEGRAM_IMAGE_DIR
-    # Ensure the destination directory exists with a 0700 mode. mkdir's own
-    # ``mode=`` is masked by umask; a follow-up chmod is the load-bearing
-    # step (workspace invariant: never call os.umask; see CLAUDE.md).
+    # mkdir's ``mode=`` is umask-masked; the follow-up chmod is load-bearing
+    # (workspace invariant: never call os.umask; see CLAUDE.md).
     try:
         dest_dir.mkdir(parents=True, exist_ok=True, mode=MEDIA_CACHE_DIR_MODE)
         try:
@@ -120,7 +110,7 @@ def download_file(
         )
         return None
 
-    # Step 1: Call getFile to get the file_path on Telegram's servers
+    # Step 1: getFile → file_path on Telegram's servers.
     try:
         resp = telegram_api(token, "getFile", {"file_id": file_id}, timeout=15)
     except Exception as e:
@@ -140,16 +130,13 @@ def download_file(
         log(f"getFile returned no file_path: {file_info}")
         return None
 
-    # Check file size if available
     file_size = file_info.get("file_size", 0)
     if file_size and file_size > size_cap:
         log(f"File too large ({file_size} bytes > {size_cap}), skipping")
         return None
 
-    # Step 2: Download the binary content — stream in chunks and enforce a
-    # hard byte cap. Reading the whole body into memory at once would let a
-    # malformed/oversized response balloon the daemon's RSS; streaming with a
-    # ceiling makes the worst case bounded.
+    # Step 2: stream download with hard byte cap so a malformed/oversized
+    # response can't balloon daemon RSS.
     download_url = f"https://api.telegram.org/file/bot{token}/{file_path_remote}"
     local_path = dest_dir / filename
     chunk_size = 64 * 1024  # 64 KB per read
@@ -170,10 +157,8 @@ def download_file(
                         % size_cap
                     )
                 f.write(buf)
-        # PRIVACY: the file basename can be a user-supplied document
-        # name (documents pass through _safe_basename but the caller may
-        # still hand us a sensitive stem, e.g. "private_medical_records
-        # _<ts>.pdf"). Metadata-only log line — dir + byte count.
+        # PRIVACY: basename may be a user-supplied doc name; log dir + byte
+        # count only, never the filename.
         log(
             "Downloaded file to %s (%d bytes)"
             % (str(dest_dir), bytes_written)
@@ -184,7 +169,7 @@ def download_file(
             f"File download failed for {file_path_remote} "
             f"(exc={type(e).__name__}): {e}"
         )
-        # Clean up partial file if it exists
+        # Clean up any partial file.
         if local_path.exists():
             try:
                 os.remove(str(local_path))

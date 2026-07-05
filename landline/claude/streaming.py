@@ -1,17 +1,22 @@
 """Claude streaming engine — drives one assistant turn end-to-end.
 
-Sends a message to the persistent Claude process, waits while the process's
-long-lived StreamPump (see `landline.stream_pump`) routes tool-status and text
-deltas into the per-chat StreamSender, and finalises the turn with a
-`flush()` boundary.
+Sends a message to the persistent Claude process, waits while the
+long-lived ``StreamPump`` (see ``landline.claude.pump``) routes tool-status
+and text deltas into the per-chat ``StreamSender``, finalizes the turn with
+a ``flush()`` boundary.
 
-The pump — not this module — reads stdout. This module registers a
-`TurnHandle` before the stdin write, blocks on `handle.done`, and turns the
-handle's bookkeeping into a `ClaudeStreamResult`. Reading is continuous for
-the process's life, so harness-initiated turns (background subagents /
-`run_in_background` Bash completing while no turn is in flight) are
-delivered immediately instead of silently shifting every later turn's
-response by one (the 2026-06/07 "desync" bug — see stream_pump's docstring).
+- The PUMP reads stdout; this module registers a ``TurnHandle`` before the
+  stdin write, blocks on ``handle.done``, and lifts the handle's bookkeeping
+  into a ``ClaudeStreamResult``. Continuous reading means unsolicited turns
+  (background subagents / ``run_in_background`` completing between dispatched
+  turns) deliver immediately instead of shifting later turns by one (the
+  2026-06/07 desync — see pump docstring).
+- Sole-producer contract to the sender: after ``handle.done.wait()`` returns,
+  NOTHING in this module may touch the sender. The pump already appended
+  the final-result tail and marked the turn boundary with ``sender.flush()``,
+  both on the pump thread, before completing the handle. A late
+  ``text()``/``flush()`` here would interleave into an unsolicited block
+  that may already be streaming through the sender.
 """
 
 import subprocess
@@ -29,8 +34,8 @@ from landline.claude.pump import TurnHandle, get_or_create_pump
 class ClaudeStreamShutdownHook:
     """Exposes the active subprocess to the SIGTERM handler for clean shutdown.
 
-    Senders are no longer tracked per turn: they're long-lived and owned by the
-    module-level registry, so shutdown drains them all via _close_all_senders().
+    Senders are long-lived (owned by the module-level registry) — shutdown
+    drains them ALL via ``_close_all_senders()``, never per turn.
     """
 
     def __init__(self) -> None:
@@ -49,8 +54,8 @@ class ClaudeStreamShutdownHook:
                 active_proc.terminate()
             except Exception:
                 pass
-        # Drain every long-lived sender's queued tail (best-effort, bounded so
-        # shutdown stays within launchd's grace window).
+        # Drain every long-lived sender's tail (bounded → stays inside
+        # launchd's grace window).
         _close_all_senders(timeout=sender_close_timeout)
 
 
@@ -60,13 +65,12 @@ def _wait_for_done_or_pause(
     pause_waker: Optional[threading.Event],
     timeout: float,
 ) -> bool:
-    """Return True if either ``done`` was set or a pause was requested before timeout.
+    """True iff ``done`` was set or a pause was requested before ``timeout``.
 
-    Both ``done.set()`` and ``pause_flag.request_pause()`` cause ``pause_waker``
-    to be set (the latter via the persistent waiter spawned in
-    ``run_claude_streaming``). We block on ``pause_waker`` exactly once per
-    tick — no per-tick helper threads, no leaked waiters. Caller re-checks
-    ``done`` / ``interrupt_check`` at the top of the loop.
+    Both signals set ``pause_waker`` (pause via a persistent waiter spawned
+    in ``run_claude_streaming``). We block on ``pause_waker`` once per tick
+    — no per-tick threads. Caller re-checks ``done``/``interrupt_check`` at
+    the top of the loop.
     """
     if pause_flag is None or pause_waker is None:
         return done.wait(timeout)
@@ -94,8 +98,8 @@ def run_claude_streaming(
     """Send a message to the persistent Claude process and stream the response."""
     from landline.telegram import send_response as default_send_response, send_typing as default_send_typing
     # Late binding via the facade so tests patching
-    # `landline.claude._get_persistent_claude` / `_get_or_create_sender` /
-    # `try_enqueue_chat_notice` intercept these calls.
+    # ``landline.claude._get_persistent_claude`` / ``_get_or_create_sender`` /
+    # ``try_enqueue_chat_notice`` intercept these calls.
     from landline import claude as _claude_facade
 
     send_response = send_response_fn or default_send_response
@@ -111,10 +115,8 @@ def run_claude_streaming(
         )
         pump = get_or_create_pump(proc)
         if not pump.alive:
-            # The process's only reader died while the process lived (read
-            # error mid-stream). The pipe's read position is unknowable, so
-            # the process itself is unusable — kill and respawn (the session
-            # id survives on pc, so the fresh process resumes it).
+            # Reader died mid-stream — pipe's read position is unknowable,
+            # process is unusable. Kill and respawn (session id survives on pc).
             log("Stream pump dead for live Claude process — respawning")
             pc.kill()
             proc = pc.ensure_alive(
@@ -134,16 +136,14 @@ def run_claude_streaming(
         result.session_id = pc.session_id
 
     from landline.telegram import send_html
-    # Long-lived, one per chat — NOT created per turn. See the registry
-    # block in sender_registry for why this is what guarantees cross-turn
-    # ordering. Shutdown drains it via _close_all_senders().
+    # Long-lived, one per chat — see registry for cross-turn ordering.
     sender = _claude_facade._get_or_create_sender(chat_id, token, send_response, send_html)
 
-    # Keep the pump's idle route fresh so unsolicited (background-task) turns
-    # that complete BETWEEN dispatched turns are delivered to this chat.
+    # Keep the pump's idle route fresh so unsolicited turns between
+    # dispatched turns reach this chat.
     pump.set_idle_route(chat_id, token, send_response, send_html)
 
-    # Register BEFORE the stdin write: the turn's `system/init` must never
+    # Register BEFORE stdin write: the turn's ``system/init`` must never
     # find an empty slot and be mistaken for an unsolicited turn.
     handle = TurnHandle()
     pump.register_turn(handle, sender)
@@ -163,10 +163,9 @@ def run_claude_streaming(
     interrupt_sent = threading.Event()
 
     def _unblock_reader() -> None:
-        # Close stdout (read end) to unblock the pump thread's
-        # `for raw in proc.stdout:` even if a grandchild still holds the
-        # write end, then close the remaining pipes. Idempotent. The pump
-        # completes `handle` on its way out, which unblocks this thread.
+        # Close stdout (read end) to unblock the pump's ``for raw in
+        # proc.stdout:`` even if a grandchild still holds the write end.
+        # Idempotent; pump completes ``handle`` on its way out.
         try:
             if proc.stdout:
                 proc.stdout.close()
@@ -183,10 +182,9 @@ def run_claude_streaming(
         pause_waker = threading.Event()
 
         def _pause_to_waker() -> None:
-            # ONE persistent thread, lifetime = the Claude turn. It polls the
-            # PauseFlag's Event on a short timeout so it can also observe
-            # ``done`` flipping; on either trigger it sets ``pause_waker`` and
-            # exits. No per-tick spawn → no thread leak.
+            # One persistent thread for the turn's lifetime. Polls the
+            # PauseFlag on a short timeout so it also observes ``done``.
+            # Either trigger sets ``pause_waker`` and exits.
             while not done.is_set():
                 if pause_flag.wait(0.5):
                     pause_waker.set()
@@ -226,10 +224,9 @@ def run_claude_streaming(
                         log(f"SIGTERM failed: {term_err}")
                 _unblock_reader()
                 break
-            # Wake on EITHER done (shutdown / turn-end) OR pause (the
-            # PauseFlag's Event, surfaced via pause_waker) within ms. The
-            # generation re-check inside interrupt_check at the top of the
-            # next iteration guarantees stale-generation wakes are no-ops.
+            # Wake on EITHER done (shutdown/turn-end) OR pause. The
+            # generation re-check inside interrupt_check at the top of
+            # next iteration makes stale-generation wakes no-ops.
             if _wait_for_done_or_pause(done, pause_flag, pause_waker, 0.5):
                 if done.is_set():
                     break
@@ -250,10 +247,9 @@ def run_claude_streaming(
     typing_thread.start()
 
     try:
-        # The pump routes this turn's events to the sender as they arrive
-        # and completes the handle on its `result` event, on EOF, or on a
-        # read error — it never abandons a registered handle, so this wait
-        # always terminates (the watchdog's kill paths all end in EOF).
+        # Pump routes events to the sender and completes ``handle`` on
+        # result / EOF / read error — never abandoned. Watchdog kill
+        # paths all end in EOF, so this wait always terminates.
         handle.done.wait()
     finally:
         typing_done.set()
@@ -272,33 +268,21 @@ def run_claude_streaming(
         result.exit_code = proc.returncode
         pc._close_pipes()
 
-    # The pump already appended the final-result tail (if any) to this turn's
-    # bubble and marked the end-of-turn boundary with sender.flush() — BOTH
-    # on the pump thread, BEFORE completing the handle. Nothing after
-    # handle.done.wait() may touch the sender: a back-to-back unsolicited
-    # block may already be streaming through it, and a late text()/flush()
-    # from this thread would interleave into the wrong bubble (2026-07-02
-    # audit, finding H1). ``streamed_parts`` already includes the tail, so
-    # the join below matches what the old reader exposed as streamed_text.
-    # (flush() marks a boundary only — the long-lived sender is never closed
-    # per turn; close() happens only at shutdown via _close_all_senders.)
+    # Sole-producer contract — see module docstring. ``streamed_parts``
+    # already includes the pump-appended final-result tail.
     result.streamed_text = "".join(handle.streamed_parts)
     if handle.saw_result:
         result.final_result = handle.final_result
 
-    # Cluster 2 (stale-resume auto-recovery): mirror the pump's observation
-    # of the terminal result event / init presence onto the result surface
-    # so the dispatcher's looks_like_pruned_resume predicate can inspect
-    # them. Placed BEFORE the empty-response-notice block below so future
-    # logic there can also observe them without further plumbing.
+    # Mirror the pump's terminal-event observations for the dispatcher's
+    # ``looks_like_pruned_resume`` predicate (must be set BEFORE the
+    # empty-response-notice block below).
     result.result_is_error = handle.result_is_error
     result.result_subtype = handle.result_subtype
     result.saw_init = handle.saw_init
 
-    # Cluster 4 (usage/cost stats): mirror the pump's usage capture onto
-    # the result surface so the dispatcher's _finalize_response can persist
-    # a daily aggregate on successful turns. None-safe: absent fields stay
-    # None and downstream code treats that as "no data" (recorded as zero).
+    # Usage/cost — the dispatcher's ``_finalize_response`` persists a daily
+    # aggregate on success. None-safe (absent → recorded as zero).
     result.result_usage = handle.result_usage
     result.result_model_usage = handle.result_model_usage
     result.result_total_cost_usd = handle.result_total_cost_usd
@@ -313,9 +297,9 @@ def run_claude_streaming(
                 tail = result.stderr_tail[-500:] if result.stderr_tail else ""
                 log(f"Claude exit {result.exit_code}: {tail}")
                 if not suppress_empty_response_notice:
-                    # Route through the chat queue so the notice lands after any
-                    # bubbles still draining from a prior turn (ordered). Fall
-                    # back to a direct send when there's no live sender.
+                    # Route through the chat queue so the notice lands AFTER
+                    # any bubbles still draining. Direct-send fallback when
+                    # no live sender exists yet.
                     _claude_facade.try_enqueue_or_send(
                         chat_id,
                         text=f"(Claude returned no response — exit {result.exit_code}.)",

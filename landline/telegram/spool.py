@@ -1,36 +1,25 @@
-"""Disk-backed outbound spool for Telegram send chunks (Cluster 5).
+"""Disk-backed outbound spool for Telegram send chunks — at-least-once delivery.
 
-Provides at-least-once persistence for outbound sends. The transport layer
-persists a chunk to disk BEFORE calling ``_send_chunk``; on success the file
-is unlinked; on retry-exhaustion the file is renamed back to a ``pending``
-state so a periodic replay pass (and a synchronous startup pass) can retry it
-on the next daemon boot.
+Transport persist-first: chunk → disk BEFORE ``_send_chunk``; success unlinks;
+retry-exhaustion renames to ``pending`` for periodic + startup replay.
 
 File layout (under ``config.SPOOL_DIR``, mode 0o700):
 
     {created_epoch_ns}-{uid8}-{state}.json     mode 0o600
 
-where ``state`` is either ``pending`` (queue-visible) or ``inflight-<pid>``
-(a specific daemon process is retrying it right now — orphaned inflight
-files from a dead pid are reclaimed at startup).
+State is ``pending`` (queue-visible) or ``inflight-<pid>`` (a specific
+daemon process is retrying it; orphaned files from a dead pid are
+reclaimed at startup).
 
-Concurrency invariants:
-- The primary send-path (``_send_with_retry``) is the only writer for a
-  file in its ``inflight-<pid>`` state; ``os.rename`` on POSIX is atomic.
-- The background replay thread only touches files in ``pending`` state,
-  and renames them to ``inflight-<pid>`` for the duration of its own retry
-  — so send-path and replay-path cannot collide on the same file.
-- Startup reclaim is called BEFORE the poller starts and BEFORE any
-  StreamSender worker is constructed, so no live sends can interleave.
-
-Design notes:
-- Order is preserved per-daemon-boot via the ``created_epoch_ns`` prefix
-  (sorted ascending). Cross-boot order between spooled and freshly-enqueued
-  chunks is NOT preserved — at-least-once trumps ordering for this daemon's
-  use case (the operator wants no lost messages more than perfect ordering).
-- 400s from replay are unfixable (malformed payload) and get unlinked;
-  every other non-2xx is treated as retryable and returned to pending.
-- Corrupt spool files (unparseable JSON) are logged and unlinked.
+- Concurrency: send-path owns each ``inflight-<pid>`` file; replay thread
+  only touches ``pending``, renaming to its own ``inflight-<pid>`` for the
+  retry. ``os.rename`` on POSIX is atomic — the two paths cannot collide.
+- Startup reclaim runs BEFORE the poller and any StreamSender worker.
+- Per-boot ordering via ``created_epoch_ns`` prefix. Cross-boot ordering
+  between spooled and freshly-enqueued chunks is NOT preserved
+  (at-least-once trumps ordering here).
+- Replay 400 → unlink (unfixable); anything else non-2xx → return to pending.
+- Corrupt payload → log + unlink.
 """
 
 import json
@@ -53,27 +42,19 @@ from landline.config import (
 from landline.runtime.logging import log
 
 
-# The send_fn passed to ``replay_all`` accepts (chat_id, chunk, html_mode,
-# label) and returns (ok, http_code). Callers close over the token (either
-# self.token from TelegramDaemon or a keychain lookup in ``_send_chunk_raw``)
-# so the spool module never handles credentials directly.
+# send_fn signature: (chat_id, chunk, html_mode, label) → (ok, http_code).
+# Callers close over the token so this module stays credential-free.
 SendFn = Callable[[str, str, bool, str], Tuple[bool, Optional[int]]]
 
-
-# -----------------------------------------------------------------------------
-# Filename helpers
-# -----------------------------------------------------------------------------
 
 def _spool_filename(created_epoch_ns: int, uid: str, state: str) -> str:
     return "%d-%s-%s.json" % (created_epoch_ns, uid, state)
 
 
 def _parse_spool_filename(name: str) -> Optional[Tuple[int, str, str]]:
-    """Parse ``{created_ns}-{uid8}-{state}.json`` into its parts.
+    """Parse ``{created_ns}-{uid8}-{state}.json`` → parts, or None if foreign.
 
-    Returns None for names that don't match the spool shape (so foreign
-    files in the dir are safely ignored). ``state`` may be ``pending`` or
-    ``inflight-<pid>`` — callers inspect the prefix.
+    ``state`` is ``pending`` or ``inflight-<pid>``; callers inspect the prefix.
     """
     if not name.endswith(".json"):
         return None
@@ -88,15 +69,11 @@ def _parse_spool_filename(name: str) -> Optional[Tuple[int, str, str]]:
     return created_ns, parts[1], parts[2]
 
 
-# -----------------------------------------------------------------------------
-# Directory & write primitives
-# -----------------------------------------------------------------------------
-
 def ensure_spool_dir() -> Path:
-    """Create SPOOL_DIR at 0o700 idempotently.
+    """Create ``SPOOL_DIR`` at 0o700; idempotent.
 
-    Called at startup (from ``__main__.main``) and defensively before each
-    ``persist`` in case the dir was pruned by an external process.
+    Called at startup and defensively before each ``persist`` (in case an
+    external process pruned the dir).
     """
     SPOOL_DIR.mkdir(parents=True, exist_ok=True)
     try:
@@ -107,14 +84,11 @@ def ensure_spool_dir() -> Path:
 
 
 def persist(chat_id: str, chunk: str, html_mode: bool, label: str) -> str:
-    """Persist an outbound chunk. Returns the spool_id (absolute path).
+    """Persist an outbound chunk. Returns spool_id (absolute path).
 
-    Two-phase write: create the pending file at mode 0o600 + fsync, then
-    rename to the ``inflight-<pid>`` state so the background replayer will
-    NOT see it while the send-path is retrying. On any I/O failure the
-    caller (``_send_with_retry``) swallows the exception and proceeds
-    without persistence — at-least-once degrades to best-effort on
-    disk-full rather than fail-closed on the send.
+    Two-phase: pending 0o600 + fsync, then rename to ``inflight-<pid>`` so
+    the replayer won't see it while send-path is retrying. On I/O failure
+    the caller degrades to best-effort (un-persisted send).
     """
     ensure_spool_dir()
     now_ns = time.time_ns()
@@ -132,40 +106,32 @@ def persist(chat_id: str, chunk: str, html_mode: bool, label: str) -> str:
     pending_path = SPOOL_DIR / pending_name
     inflight_path = SPOOL_DIR / inflight_name
 
-    # 0o600 write + fsync; O_EXCL guards against a uuid collision.
+    # 0o600 write + fsync; O_EXCL guards against uuid collision.
     fd = os.open(
         str(pending_path),
         os.O_WRONLY | os.O_CREAT | os.O_EXCL,
         SPOOL_FILE_MODE,
     )
-    # Once the pending file exists on disk, any subsequent failure (fsync,
-    # chmod, rename) MUST unlink it before propagating — otherwise the
-    # caller (``_send_with_retry_tracked``) swallows the OSError, proceeds
-    # without a spool_id, delivers the chunk successfully over the network,
-    # and the leaked pending file is picked up by the next replay pass as a
-    # duplicate. Verified: fsync/chmod/rename can all raise on disk pressure
-    # (ENOSPC, EIO) after the O_EXCL open already committed the inode.
+    # Once the inode exists, ANY subsequent failure (fsync/chmod/rename can
+    # all raise under disk pressure) MUST unlink before propagating —
+    # otherwise a swallowed OSError + successful network send leaks a
+    # pending file that the replayer double-delivers.
     try:
         try:
             os.write(fd, json.dumps(payload).encode("utf-8"))
             os.fsync(fd)
         finally:
             os.close(fd)
-        # Belt-and-suspenders: on macOS a race can leave the file at
-        # umask-modified perms. Enforce 0o600 explicitly. chmod failure
-        # is non-fatal — the O_EXCL open above already applied
-        # SPOOL_FILE_MODE, so a chmod race is cosmetic; do NOT unlink on
-        # chmod failure or we would drop a persisted chunk on a benign perm
-        # jitter.
+        # Belt-and-suspenders 0o600 enforce (macOS umask race). chmod
+        # failure is cosmetic — DO NOT unlink on it (that would drop a
+        # persisted chunk on benign perm jitter).
         try:
             os.chmod(str(pending_path), SPOOL_FILE_MODE)
         except OSError:
             pass
         os.rename(str(pending_path), str(inflight_path))
     except BaseException:
-        # Unlink the leaked pending file BEFORE re-raising so replay can
-        # never see a half-persisted duplicate. Suppress the unlink's own
-        # errors — the original exception is what the caller needs.
+        # Unlink the leaked pending BEFORE re-raising.
         try:
             os.unlink(str(pending_path))
         except OSError:
@@ -188,17 +154,15 @@ def mark_success(spool_id: str) -> None:
 def discard(spool_id: str) -> None:
     """Unlink the spool file for ``spool_id`` regardless of its current state.
 
-    Used when the caller has decided the logical message this file represents
-    is being superseded by an alternate variant (e.g. ``send_response``'s
-    plain-text fallback for a chunk whose HTML variant just failed) and the
-    original must NOT be replayed. Without this, the failed HTML variant sits
-    in ``pending`` state alongside the freshly-persisted plain-text variant,
-    and both get delivered by the next replay pass → user sees the same
-    logical message twice.
+    Args:
+        spool_id: absolute path returned by ``persist``.
 
-    Matches by ``created_ns`` + ``uid`` prefix so it works whether the file
-    is currently ``inflight-<pid>`` or has already been renamed to
-    ``pending`` by ``mark_failed``. Idempotent for missing files.
+    - Used when a superseding variant is being delivered instead (e.g.
+      ``send_response`` switching to plain-text after HTML failed) —
+      without this, the replayer double-delivers.
+    - Matches by ``(created_ns, uid)`` prefix so it works whether the file
+      is currently ``inflight-<pid>`` or already renamed back to ``pending``.
+    - Idempotent for missing files.
     """
     try:
         path = Path(spool_id)
@@ -228,11 +192,10 @@ def discard(spool_id: str) -> None:
 
 
 def mark_failed(spool_id: str) -> None:
-    """Rename ``inflight-<pid>`` back to ``pending``.
+    """Rename ``inflight-<pid>`` → ``pending`` for the next replay pass.
 
-    Called by ``_send_with_retry`` after all in-call retries are exhausted;
-    the periodic replay thread will pick it up next pass. Idempotent for
-    the missing-file case.
+    Called by ``_send_with_retry`` after in-call retries are exhausted.
+    Idempotent when the file is already gone.
     """
     try:
         path = Path(spool_id)
@@ -250,17 +213,12 @@ def mark_failed(spool_id: str) -> None:
             (spool_id, e))
 
 
-# -----------------------------------------------------------------------------
-# Startup reclaim
-# -----------------------------------------------------------------------------
-
 def startup_reclaim_orphaned_inflight() -> int:
-    """Rename any ``inflight-<pid>`` files back to ``pending``.
+    """Rename orphaned ``inflight-<pid>`` files back to ``pending``.
 
-    The pid that owned each file died with the previous daemon process, so
-    no live retry is in progress. Called once at startup BEFORE
-    ``replay_all`` so the initial replay pass sees the reclaimed files.
-    Returns the count of renamed files (for the startup log line).
+    The owning pid died with the previous daemon, so no live retry is in
+    progress. Runs once at startup BEFORE ``replay_all``. Returns the count
+    of renamed files (for the startup log line).
     """
     ensure_spool_dir()
     count = 0
@@ -288,12 +246,8 @@ def startup_reclaim_orphaned_inflight() -> int:
     return count
 
 
-# -----------------------------------------------------------------------------
-# Replay pass
-# -----------------------------------------------------------------------------
-
 def _list_pending_sorted() -> List[Tuple[int, Path]]:
-    """Enumerate ``pending`` files, sorted by created_epoch_ns ascending."""
+    """Enumerate ``pending`` files, sorted by ``created_epoch_ns`` ascending."""
     try:
         entries = list(SPOOL_DIR.iterdir())
     except OSError as e:
@@ -313,7 +267,7 @@ def _list_pending_sorted() -> List[Tuple[int, Path]]:
 
 
 def _apply_soft_cap(pending: List[Tuple[int, Path]]) -> List[Tuple[int, Path]]:
-    """If pending exceeds SPOOL_MAX_FILES, drop the oldest excess (keep newest)."""
+    """If pending exceeds ``SPOOL_MAX_FILES``, drop the oldest excess."""
     if len(pending) <= SPOOL_MAX_FILES:
         return pending
     excess = len(pending) - SPOOL_MAX_FILES
@@ -381,7 +335,7 @@ def replay_all(send_fn: SendFn) -> None:
                 pass
             continue
         if age < SPOOL_REPLAY_MIN_AGE_SECONDS:
-            # Too young — may still be in-flight on the primary send-path.
+            # Too young — may still be inflight on the primary send-path.
             continue
 
         parsed = _parse_spool_filename(entry.name)
@@ -405,8 +359,7 @@ def replay_all(send_fn: SendFn) -> None:
         chunk = payload.get("chunk", "")
         html_mode = bool(payload.get("html_mode", False))
 
-        # Increment attempts counter and rewrite the payload so a future
-        # log line can name it; best-effort.
+        # Bump attempts counter for future log lines (best-effort).
         payload["attempts"] = int(payload.get("attempts", 0)) + 1
 
         try:
@@ -423,13 +376,9 @@ def replay_all(send_fn: SendFn) -> None:
                 pass
             continue
 
-        # Any 4xx that we cannot recover from by retrying belongs to the
-        # unlink branch, not the retry branch. Retrying a bad-token 401 or
-        # a bot-kicked-from-chat 403 or a chat-not-found 404 just burns
-        # ~1440 API calls per file per 24h (SPOOL_MAX_AGE_SECONDS) with
-        # zero chance of success. 429s (rate limit) and 5xx (transient
-        # server errors) are the only genuinely-retryable non-2xx codes,
-        # so we default to "drop" for the rest.
+        # Unfixable 4xx (bad token / bot kicked / chat gone) → drop.
+        # Retrying would burn ~1440 calls/file/day for no chance of success.
+        # Only 429 + 5xx round-trip to the retry branch below.
         if code in (400, 401, 403, 404):
             log(
                 "outbound_spool: dropping %d (unfixable) for %s"
@@ -441,7 +390,7 @@ def replay_all(send_fn: SendFn) -> None:
                 pass
             continue
 
-        # Retryable failure — rename back to pending for the next pass.
+        # Retryable → rename back to pending for the next pass.
         pending_name = _spool_filename(p_created_ns, uid, "pending")
         try:
             os.rename(str(inflight_path), str(SPOOL_DIR / pending_name))
@@ -450,17 +399,12 @@ def replay_all(send_fn: SendFn) -> None:
                 (inflight_path.name, e))
 
 
-# -----------------------------------------------------------------------------
-# Background replayer
-# -----------------------------------------------------------------------------
-
 class OutboundSpoolReplayer:
-    """Background thread that runs ``replay_all`` on a fixed interval.
+    """Background thread running ``replay_all`` on a fixed interval.
 
-    Started by ``TelegramDaemon.run()`` after ``_handle_restart_continuation``
-    and before ``_background_poller.start()``. Stopped by the daemon
-    shutdown handler via ``stop()`` (level-triggered Event; the current
-    replay pass finishes before the loop exits).
+    Started by ``TelegramDaemon.run()`` between ``_handle_restart_continuation``
+    and ``_background_poller.start()``. Stopped by the shutdown handler
+    (level-triggered Event; the current pass finishes before exit).
     """
 
     def __init__(self, send_fn: SendFn) -> None:
@@ -487,6 +431,5 @@ class OutboundSpoolReplayer:
                 replay_all(self._send_fn)
             except Exception as e:
                 log("outbound_spool: replay pass raised: %r" % e)
-            # Event.wait returns True on set — bounds shutdown latency to the
-            # remainder of the current sleep window.
+            # Event.wait returns True on set → shutdown latency ≤ this sleep.
             self._stop.wait(SPOOL_REPLAY_INTERVAL_SECONDS)

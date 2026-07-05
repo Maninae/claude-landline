@@ -1,8 +1,8 @@
-"""Persistent Claude subprocess — long-lived stream-json process management.
+"""Persistent Claude subprocess — long-lived stream-json process manager.
 
-Maintains a single Claude Code child process that accepts multiple turns via
-NDJSON on stdin. Spawns or respawns on demand, drains stderr in a background
-thread, and exposes SIGINT-based interrupt / clean kill.
+One Claude Code child accepting many turns via NDJSON on stdin. Spawns /
+respawns on demand, drains stderr in a background thread, exposes
+SIGINT-based interrupt and clean kill.
 """
 
 import collections
@@ -26,14 +26,12 @@ from landline.runtime.logging import log
 
 
 def _resolve_claude_binary() -> str:
-    """Return the concrete path to invoke as the Claude CLI.
+    """Concrete path to invoke as the Claude CLI.
 
-    Absolute paths are passed through unchanged (launchd's minimal PATH
-    means a deployer who wants a specific fork should just configure an
-    absolute path). Bare names are resolved via ``shutil.which`` at spawn
-    time so the failure is a clear one-line ``RuntimeError`` when the
-    binary isn't on PATH — better than an opaque ``FileNotFoundError``
-    from ``subprocess.Popen``.
+    - Absolute paths pass through (launchd's minimal PATH).
+    - Bare names resolve via ``shutil.which`` at spawn time so a missing
+      binary raises a clear ``RuntimeError`` instead of Popen's opaque
+      ``FileNotFoundError``.
     """
     if os.path.isabs(str(CLAUDE)):
         return str(CLAUDE)
@@ -64,18 +62,14 @@ class PersistentClaude:
 
     @property
     def session_id(self) -> Optional[str]:
-        # Back-compat shim. Existing callers (e.g. streaming.py) and any test
-        # that reads pc.session_id keep working. New code should call
-        # get_session_id().
+        # Back-compat shim; new code should call ``get_session_id()``.
         return self.get_session_id()
 
     def get_session_id(self) -> Optional[str]:
-        """Return the cached session id (None if no session yet).
+        """Cached session id (None if no session yet).
 
-        Lock-guarded against concurrent _spawn / set_session_id writers —
-        without the lock a reader could observe a torn value mid-rewrite.
-        _lock is the same lock ensure_alive/interrupt already hold; there
-        are no nested callers that would deadlock.
+        Lock-guarded against concurrent ``_spawn`` / ``set_session_id``
+        writers so a reader can't observe a torn value.
         """
         with self._lock:
             return self._session_id
@@ -127,9 +121,8 @@ class PersistentClaude:
                         dropped = self._stderr_buf.popleft()
                         self._stderr_total_len -= len(dropped)
         except Exception as e:
-            # Log the cause before exiting so a silently-broken drainer
-            # doesn't go unnoticed. Common benign causes: stderr was closed
-            # by the watchdog after the process died.
+            # Log before exiting so a silently-broken drainer isn't invisible.
+            # Common benign cause: watchdog closed stderr after process died.
             log(f"_drain_stderr exited: {e}")
 
     def clear_session(self) -> None:
@@ -139,9 +132,8 @@ class PersistentClaude:
     def set_session_id(self, sid: Optional[str]) -> None:
         """Single writer entry point for the session id.
 
-        Used by the dispatcher to publish a new id observed from the Claude
-        stream, to clear the id on stale-session retry, and to lazy-seed
-        from the persisted state dict on first dispatch.
+        Called by the dispatcher to publish a new id, clear on stale-resume,
+        and lazy-seed from persisted state on first dispatch.
         """
         with self._lock:
             self._session_id = sid
@@ -187,13 +179,9 @@ class PersistentClaude:
         self._proc.stdin.flush()
 
     def interrupt(self) -> None:
-        # Snapshot `self._proc` under the same lock that guards
-        # `_spawn`/`ensure_alive`, then release before signalling. Without
-        # the lock, a concurrent respawn could swap `self._proc` between
-        # our `is_alive` check and `os.kill`, and we'd SIGINT a brand-new
-        # process. Releasing before `os.kill` keeps the critical section
-        # tiny (no syscall while a respawner waits) and avoids any chance
-        # of nesting `self._lock` under a caller that already holds it.
+        # Snapshot ``self._proc`` under the lock, then release before
+        # signalling. Otherwise a concurrent respawn could swap the proc
+        # between ``is_alive`` and ``os.kill`` → SIGINT the fresh process.
         with self._lock:
             proc = self._proc
             if proc is None or proc.poll() is not None:

@@ -1,11 +1,11 @@
 """Tag-aware HTML chunker for Telegram messages.
 
-Splits HTML payloads into Telegram-safe chunks without cutting between `<` and
-`>`, prefers `\n` boundaries, closes + reopens simple formatting tags across
-chunk boundaries, and degrades to plain text for any piece that can't be split
-safely (e.g. an `<a href="...">` open at the only viable cut). Also exposes
-`send_html`, the transport-layer entry point that drives the chunker and
-forwards each piece through `_send_with_retry`.
+Splits HTML payloads into Telegram-safe chunks without cutting between ``<``
+and ``>``, prefers ``\\n`` boundaries, closes + reopens simple formatting
+tags across chunk boundaries, and degrades to plain text for any piece that
+can't be split safely (e.g. an ``<a href="...">`` open at the only viable
+cut). Also exposes ``send_html``, the transport-layer entry point that
+drives the chunker and forwards each piece through ``_send_with_retry``.
 """
 
 import html
@@ -13,23 +13,14 @@ import re
 from typing import List, Optional, Tuple
 
 
-# -----------------------------------------------------------------------------
-# UTF-16 sizing — Telegram's actual length unit
-# -----------------------------------------------------------------------------
-
 def _utf16_len(s: str) -> int:
-    """Length of `s` in UTF-16 code units — Telegram's actual size unit.
+    """Length of ``s`` in UTF-16 code units — Telegram's real cap unit.
 
-    A char above U+FFFF (e.g. emoji 🚀) counts as 2 UTF-16 units. Using
-    `len(s)` (Python code points) under-counts these and lets us blow past
-    Telegram's 4096 cap, producing a 400.
+    Chars above U+FFFF (emoji) count as 2 units. ``len(s)`` under-counts
+    them and blows past Telegram's 4096 cap → 400.
     """
     return len(s.encode("utf-16-le")) // 2
 
-
-# -----------------------------------------------------------------------------
-# Markdown chunking
-# -----------------------------------------------------------------------------
 
 def chunk_text(text: str, limit: int = 4096) -> List[str]:
     if _utf16_len(text) <= limit:
@@ -40,9 +31,7 @@ def chunk_text(text: str, limit: int = 4096) -> List[str]:
         if _utf16_len(remaining) <= limit:
             chunks.append(remaining)
             break
-        # Find the largest code-point prefix whose UTF-16 length fits `limit`.
-        # Binary-search the code-point index so we never start the search past
-        # the real budget (emoji-heavy strings have UTF-16 len > code-point len).
+        # Binary-search the largest code-point prefix whose UTF-16 len fits.
         lo, hi = 0, len(remaining)
         while lo < hi:
             mid = (lo + hi + 1) // 2
@@ -52,8 +41,7 @@ def chunk_text(text: str, limit: int = 4096) -> List[str]:
                 hi = mid - 1
         window_end = lo  # largest code-point count that fits
         window = remaining[:window_end]
-        # Quarter threshold expressed in UTF-16 units (matching the budget).
-        quarter = limit // 4
+        quarter = limit // 4  # threshold in UTF-16 units, matching the budget
         cut = window.rfind("\n\n")
         sep_len = 2
         if cut < 0 or _utf16_len(window[:cut]) <= quarter:
@@ -70,44 +58,32 @@ def chunk_text(text: str, limit: int = 4096) -> List[str]:
     return [c for c in chunks if c]
 
 
-# -----------------------------------------------------------------------------
-# Tag-aware HTML chunker
-# -----------------------------------------------------------------------------
-
-# Telegram-supported simple formatting tags that we re-balance across chunk
-# boundaries. We deliberately do NOT try to reopen tags that carry attributes
-# (e.g. `<a href="...">`, `<pre><code class="language-...">`) — that's the
-# "complex/risky" piece we keep out of this helper. If such a tag is open at
-# the cut, we degrade that chunk to plain text rather than emit broken HTML.
+# Simple reopenable formatting tags. Attribute-bearing tags (``<a href=…>``,
+# ``<code class=…>``) are treated as "complex" — degraded to plain text at
+# any cut where one is still open, rather than reopened.
 _REOPENABLE_SIMPLE_TAGS = ("pre", "code", "b", "i", "blockquote")
 
-# Match an HTML tag: opening (with optional attrs), closing, or self-closing.
 _TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)([^>]*)>")
 
 
 def _index_inside_tag(s: str, idx: int) -> bool:
-    """True if `idx` falls strictly between a `<` and its matching `>`.
+    """True iff ``idx`` falls strictly between ``<`` and its matching ``>``.
 
-    A cut at exactly `<` or exactly `>` is fine — it doesn't split a tag.
-    A cut between them does.
+    A cut AT ``<`` or ``>`` is fine — it doesn't split a tag.
     """
     if idx <= 0 or idx >= len(s):
         return False
-    # Look backwards: most recent `<` vs most recent `>` before idx.
+    # Most recent ``<`` vs most recent ``>`` before idx.
     last_lt = s.rfind("<", 0, idx)
     last_gt = s.rfind(">", 0, idx)
     return last_lt > last_gt
 
 
 def _scan_open_tags_at(s: str, idx: int) -> Tuple[List[str], List[str]]:
-    """Walk tags in `s[0:idx]` and return `(simple_stack, complex_stack)` —
-    the lists of currently-open simple reopenable tags and currently-open
-    complex (attribute-bearing / non-reopenable) tags at `idx`, both in
-    open order (outer→inner).
+    """Walk tags in ``s[0:idx]``; return ``(simple_stack, complex_stack)``.
 
-    A complex tag pushed and then closed before `idx` does NOT linger in
-    `complex_stack` — that's the Bug 1 fix. Only tags that are *actually
-    open* at `idx` count.
+    Both stacks list currently-open tags at ``idx`` in open order
+    (outer→inner). Complex tags that closed before ``idx`` don't linger.
     """
     simple_stack: List[str] = []
     complex_stack: List[str] = []
@@ -116,12 +92,8 @@ def _scan_open_tags_at(s: str, idx: int) -> Tuple[List[str], List[str]]:
         name = m.group(2).lower()
         attrs = m.group(3).strip()
         if is_close:
-            # A close tag carries no attrs, so its name alone can't tell us
-            # which stack its matching open lives on — e.g. `</code>` may
-            # match either a plain `<code>` (simple) or a
-            # `<code class="...">` (complex). Pop the innermost matching
-            # name from EITHER stack (complex first, then simple) so an
-            # attribute-bearing open balances correctly.
+            # Close tags carry no attrs — try complex stack first, then simple,
+            # so ``<code class="…">…</code>`` balances against the complex open.
             popped = False
             for i in range(len(complex_stack) - 1, -1, -1):
                 if complex_stack[i] == name:
@@ -143,14 +115,10 @@ def _scan_open_tags_at(s: str, idx: int) -> Tuple[List[str], List[str]]:
 
 
 def _open_simple_tags_at(s: str, idx: int) -> Optional[List[str]]:
-    """Return the stack of currently-open simple reopenable tags at byte
-    position `idx` in `s` (open order, outer→inner), or `None` if it is
-    unsafe to split at `idx` because a complex / attribute-bearing tag is
-    actually open at that position.
+    """Simple reopenable tags open at ``idx``, or ``None`` if unsafe to split.
 
-    A fully-balanced complex tag *before* `idx` (e.g. `<a href="x">x</a>`
-    that closes before the cut) is fine — it does not poison subsequent
-    cuts.
+    Unsafe = a complex/attribute-bearing tag is open at ``idx``. A complex
+    tag that closed BEFORE ``idx`` does not poison the cut.
     """
     simple_stack, complex_stack = _scan_open_tags_at(s, idx)
     if complex_stack:
@@ -159,22 +127,13 @@ def _open_simple_tags_at(s: str, idx: int) -> Optional[List[str]]:
 
 
 def _strip_tags(s: str) -> str:
-    """Strip all HTML tags from `s` and decode HTML entities (plain-text
-    degrade path).
+    """Strip HTML tags and decode entities — the plain-text degrade path.
 
-    The `_TAG_RE.sub("", s)` deletes the tags; `html.unescape(...)` then
-    decodes any HTML entities the payload carried (`&amp;`, `&lt;`,
-    `&gt;`, numeric refs, the full HTML5 named-entity set). Without the
-    unescape, a degrade of `<a>Tom &amp; Jerry</a>` would reach Telegram
-    as the literal string `Tom &amp; Jerry` in plain-text mode — Telegram
-    doesn't decode entities when `parse_mode` is unset, so the user sees
-    raw `&amp;`. `html.unescape` is a no-op on entity-free payloads.
-
-    Single-pass: `_strip_tags` is intentionally NOT idempotent on inputs
-    containing nested-looking entities (`&amp;amp;` decodes to `&amp;`
-    on first call, then to `&` on a second call). Single-pass matches
-    what a browser would render — `&amp;amp;` is the literal user-typed
-    text `&amp;` and must survive as `&amp;`, not collapse to `&`.
+    - Entity decode is required: Telegram does NOT decode entities in
+      plain-text mode, so ``Tom &amp; Jerry`` would render as literal ``&amp;``.
+      ``html.unescape`` is a no-op on entity-free payloads.
+    - Single-pass by design (NOT idempotent): ``&amp;amp;`` decodes once to
+      ``&amp;`` and must survive as such — matches browser rendering.
     """
     return html.unescape(_TAG_RE.sub("", s))
 
@@ -208,30 +167,19 @@ def _chunk_html(html: str, limit: int = 4096) -> List[Tuple[str, bool]]:
     chunks: List[Tuple[str, bool]] = []
     remaining = html
     reopen_prefix = ""  # tags to prepend to the next chunk
-    # Complex/non-reopenable tags that were OPEN at a prior degrade cut and
-    # whose matching closes have not yet been consumed. While this list is
-    # non-empty, we MUST keep emitting plain-text (tags stripped) chunks to
-    # avoid letting an orphan `</a>` (or similar) escape into a later HTML
-    # chunk. Each entry is a tag name; matching `</name>` in the order they
-    # appear in `remaining` pops the innermost matching entry. That's the
-    # Bug 2 fix.
+    # Complex tags open at a prior degrade cut, whose matching closes haven't
+    # been consumed — MUST keep degrading until empty, else an orphan
+    # ``</a>`` escapes into a later HTML chunk.
     pending_complex_closes: List[str] = []
-    # Simple reopenable tags (e.g. `<b>`, `<i>`) that were OPEN at a prior
-    # degrade cut. Their open was stripped from the plain-text degrade
-    # piece, so we must also keep degrading until their matching closes
-    # are consumed — otherwise the orphan `</b>` escapes into a later HTML
-    # chunk as unbalanced HTML. Parallel to `pending_complex_closes`.
+    # Simple reopenable opens (``<b>``, ``<i>``) stripped from a prior degrade —
+    # same rule: keep degrading until their matching closes are consumed.
     pending_simple_closes: List[str] = []
 
     while remaining:
-        # If any tag (simple or complex) is still "in flight" from a prior
-        # degraded chunk, stay in plain-text mode until we've consumed its
-        # matching close. Track BOTH stacks; only re-enter HTML mode once
-        # BOTH are empty.
+        # Any in-flight tag from a prior degrade → stay in plain-text mode
+        # until BOTH stacks empty.
         if pending_complex_closes or pending_simple_closes:
-            # Scan tags in `remaining` to find the position at which all
-            # currently-open tags (complex + simple) become balanced (or
-            # the end of `remaining` if they never do — defensive).
+            # Walk to the position where BOTH stacks empty (or end-of-remaining).
             complex_stack_scan = list(pending_complex_closes)
             simple_stack_scan = list(pending_simple_closes)
             consume_end = len(remaining)
@@ -243,13 +191,7 @@ def _chunk_html(html: str, limit: int = 4096) -> List[Tuple[str, bool]]:
                 name = m.group(2).lower()
                 attrs = m.group(3).strip()
                 if is_close:
-                    # A close tag carries no attrs, so its name alone can't
-                    # tell us which stack its matching open lives on. Mirror
-                    # `_scan_open_tags_at`: try the complex stack first, then
-                    # fall back to simple. Otherwise `<code class="x">` (on
-                    # complex) and a later `</code>` (which `bool(attrs)`
-                    # makes look simple) never balance, and the walker stays
-                    # stuck in plain-text degrade mode.
+                    # Close: complex-first, simple-second (mirror _scan_open_tags_at).
                     popped = False
                     for i in range(len(complex_stack_scan) - 1, -1, -1):
                         if complex_stack_scan[i] == name:
@@ -270,12 +212,9 @@ def _chunk_html(html: str, limit: int = 4096) -> List[Tuple[str, bool]]:
                         complex_stack_scan.append(name)
                     else:
                         simple_stack_scan.append(name)
-            # Cap each degraded plain-text piece by the size budget so we
-            # never emit a chunk above the Telegram cap.
+            # Cap the degraded piece by the size budget.
             cap = limit
             piece = remaining[:consume_end]
-            # Find the largest code-point prefix of piece that fits `cap`
-            # UTF-16 units.
             if _utf16_len(piece) > cap:
                 lo, hi = 0, len(piece)
                 while lo < hi:
@@ -286,9 +225,8 @@ def _chunk_html(html: str, limit: int = 4096) -> List[Tuple[str, bool]]:
                         hi = mid - 1
                 piece = piece[:lo]
                 consume_end = lo
-            # Rescan tags inside `piece` (the actually-consumed span) to
-            # update BOTH pending stacks accurately — the size cap may have
-            # truncated before all opens/closes were seen.
+            # Rescan the actually-consumed span so both pending stacks stay
+            # accurate when the size cap truncates before all opens/closes.
             new_pending_complex = list(pending_complex_closes)
             new_pending_simple = list(pending_simple_closes)
             for m in _TAG_RE.finditer(piece):
@@ -296,10 +234,7 @@ def _chunk_html(html: str, limit: int = 4096) -> List[Tuple[str, bool]]:
                 name = m.group(2).lower()
                 attrs = m.group(3).strip()
                 if is_close:
-                    # Same complex-first-then-simple rule as the
-                    # balance-point walker above: closes carry no attrs,
-                    # so try popping the innermost matching name from the
-                    # complex stack first, else from the simple stack.
+                    # Close: complex-first, simple-second (same rule as above).
                     popped = False
                     for i in range(len(new_pending_complex) - 1, -1, -1):
                         if new_pending_complex[i] == name:
@@ -334,17 +269,13 @@ def _chunk_html(html: str, limit: int = 4096) -> List[Tuple[str, bool]]:
                 chunks.append((body + closers, True))
             break
 
-        # Reserve a small headroom for closing tags we may need to append
-        # after the cut (so the final chunk stays under `limit`). The
-        # reopenable simple tags are short: `</blockquote>` is 13 chars, and
-        # in practice no more than a couple are nested at once. Reserve 64
-        # UTF-16 units — well under `limit` but enough for any realistic
-        # nested-tag close sequence.
+        # Reserve headroom for closing tags appended after the cut.
+        # 64 UTF-16 units covers any realistic nested-tag close sequence
+        # (``</blockquote>`` is 13 chars).
         closer_headroom = 64
         effective_limit = max(limit - closer_headroom, limit // 2)
 
-        # Find the largest code-point prefix of `body` whose UTF-16 length
-        # fits `effective_limit`.
+        # Binary-search the largest code-point prefix that fits.
         lo, hi = 0, len(body)
         while lo < hi:
             mid = (lo + hi + 1) // 2
@@ -354,9 +285,7 @@ def _chunk_html(html: str, limit: int = 4096) -> List[Tuple[str, bool]]:
                 hi = mid - 1
         window_end = lo
         if window_end <= len(reopen_prefix):
-            # Can't fit even the reopen prefix + 1 char — degrade this piece
-            # by stripping tags entirely from a fixed-size slice and moving on.
-            # This is a pathological case (huge reopen prefix vs tiny limit).
+            # Pathological: reopen prefix already fills the budget → degrade.
             slice_end = min(len(remaining), limit)
             simple_at_slice, complex_at_slice = _scan_open_tags_at(remaining, slice_end)
             if complex_at_slice:
@@ -368,10 +297,8 @@ def _chunk_html(html: str, limit: int = 4096) -> List[Tuple[str, bool]]:
             reopen_prefix = ""
             continue
 
-        # Walk back from window_end to find a cut that:
-        #  (a) is not inside a tag, and
-        #  (b) ideally lands on a `\n` boundary.
-        # Try `\n` first, then any non-tag-interior position, then degrade.
+        # Walk back for a cut: not inside a tag, ideally on ``\n``.
+        # Try ``\n`` first, then any non-tag-interior position, else degrade.
         def _safe_cut(end: int, prefer_char: str = "") -> int:
             i = end
             while i > 0:
@@ -389,13 +316,11 @@ def _chunk_html(html: str, limit: int = 4096) -> List[Tuple[str, bool]]:
             return -1
 
         cut = _safe_cut(window_end, prefer_char="\n")
-        sep_len = 0  # we keep the `\n` with the previous chunk; no separator to skip
+        sep_len = 0  # keep the ``\n`` with the previous chunk
         if cut < 0:
-            # No newline boundary worked — accept any non-tag-interior cut.
             cut = _safe_cut(window_end)
         if cut < 0 or cut <= len(reopen_prefix):
-            # Couldn't find any safe HTML cut. Degrade the body to plain text
-            # at the size boundary and move on.
+            # No safe HTML cut — degrade at the size boundary.
             simple_at_end, complex_at_end = _scan_open_tags_at(body, window_end)
             if complex_at_end:
                 pending_complex_closes = list(complex_at_end)
@@ -406,16 +331,11 @@ def _chunk_html(html: str, limit: int = 4096) -> List[Tuple[str, bool]]:
             reopen_prefix = ""
             continue
 
-        # Inspect open simple tags at the cut to decide
-        # close-here / reopen-next-chunk.
+        # Inspect opens at the cut → close-here / reopen-next-chunk.
         simple_stack, complex_stack = _scan_open_tags_at(body, cut)
         if complex_stack:
-            # An unsafe (attribute-bearing or unsupported) tag is open at
-            # the cut. Degrade this piece to plain text, and remember which
-            # complex AND simple tags are still in flight so subsequent
-            # iterations keep degrading until their matching closes are
-            # consumed (otherwise the orphan `</a>` or `</b>` etc. escapes
-            # as HTML).
+            # Complex open at cut → degrade; remember both stacks so the
+            # walker keeps degrading until orphan closes are consumed.
             pending_complex_closes = list(complex_stack)
             if simple_stack:
                 pending_simple_closes = list(simple_stack)
@@ -425,18 +345,15 @@ def _chunk_html(html: str, limit: int = 4096) -> List[Tuple[str, bool]]:
             continue
         open_stack = simple_stack
 
-        # Build chunk: body[:cut] + closing tags in reverse order.
+        # Emit body[:cut] + closers in reverse order; next chunk reopens.
         closers = "".join("</%s>" % name for name in reversed(open_stack))
         chunk = body[:cut] + closers
         chunks.append((chunk, True))
 
-        # Advance `remaining`: body = reopen_prefix + remaining, so the
-        # portion of `remaining` consumed by this chunk is
-        # `cut - len(reopen_prefix)`.
+        # body = reopen_prefix + remaining → consumed = cut - len(reopen_prefix).
         consumed_from_remaining = cut - len(reopen_prefix)
         remaining = remaining[consumed_from_remaining + sep_len:]
 
-        # Set up next chunk: reopen tags in original order.
         reopen_prefix = "".join("<%s>" % name for name in open_stack)
 
     # Final cleanup: drop empty pieces.
@@ -446,13 +363,11 @@ def _chunk_html(html: str, limit: int = 4096) -> List[Tuple[str, bool]]:
 def send_html(token: str, chat_id: str, html: str) -> None:
     """Send pre-formatted HTML to Telegram. No markdown conversion.
 
-    Chunking is tag-aware: we never cut between `<` and `>`, prefer `\n`
-    boundaries, close + reopen simple formatting tags across chunk
-    boundaries, and degrade to plain text for any piece we can't split
-    safely (e.g. an `<a href="...">` open at the only viable cut).
+    Tag-aware chunking (see ``_chunk_html``): never cuts between ``<`` and
+    ``>``, prefers ``\\n`` boundaries, close+reopen for simple tags, plain-text
+    degrade for a complex tag open at the only viable cut.
     """
-    # Import lazily to avoid a circular import with `telegram_transport`,
-    # which itself imports `_utf16_len` from this module.
+    # Lazy import — transport imports from this module (cycle break).
     from landline.telegram.transport import _send_with_retry
 
     if not html or not html.strip():

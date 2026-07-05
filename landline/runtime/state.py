@@ -33,19 +33,16 @@ from landline.runtime.logging import log
 def encode_cc_project_dir(workspace: Path) -> str:
     """Encode a workspace path the way Claude Code names its projects dir.
 
-    Claude Code stores per-project JSONL transcripts under
+    Claude Code stores per-project JSONL transcripts at
     ``~/.claude/projects/<encoded>/<session_id>.jsonl`` where ``<encoded>``
-    is the absolute workspace path with ``/`` and ``.`` both replaced by
-    ``-``. Verified empirically: a workspace like ``/Users/alice/.agent-ws``
-    encodes to ``-Users-alice--agent-ws`` (the double dash comes from the
-    ``.`` in ``.agent-ws``).
+    replaces both ``/`` and ``.`` with ``-``. E.g. ``/Users/alice/.ws`` →
+    ``-Users-alice--ws`` (the double dash comes from the leading ``.``).
     """
     return str(workspace).replace("/", "-").replace(".", "-")
 
 
-# C4 - override via LANDLINE_CC_PROJECT_DIR for tests / sandboxed runs; otherwise
-# derive from WORKSPACE so the daemon works on any host.
-# Read at import-time only (invariant: no per-call env reads for paths).
+# Override via LANDLINE_CC_PROJECT_DIR for tests / sandboxed runs.
+# Read at import time only (no per-call env reads for paths).
 _PROJECT_DIR_OVERRIDE = os.environ.get("LANDLINE_CC_PROJECT_DIR")
 PROJECT_DIR: Path = (
     Path(_PROJECT_DIR_OVERRIDE)
@@ -59,25 +56,19 @@ _save_state_lock = threading.Lock()
 def secure_workspace_paths() -> None:
     """One-shot startup backfill: chmod daemon-owned workspace dirs + PII files.
 
-    Two-layer tightening, both idempotent:
+    Two idempotent layers:
 
-    1. Daily-log PII: ``memory/daily/`` is chmodded to 0o700 and every
-       ``*_telegram.md`` file inside to 0o600. These logs contain the
-       unredacted user<->agent conversation.
-    2. Workspace-sensitive top-level dirs (config.WORKSPACE_SENSITIVE_DIRS):
-       ``memory/``, ``cache/``, ``inbox/``, ``outbox/``, ``logs/`` receive
-       ``WORKSPACE_SENSITIVE_DIR_MODE`` (0o700). We do NOT recurse — that
-       would touch files owned by other tools (search indexes, cron
-       artifacts) and is out of scope. The top-level chmod is what stops a
-       drive-by ``ls <workspace>/memory`` from another local user.
+    - Layer 2 (top-level sensitive dirs): ``memory/``, ``cache/``, ``inbox/``,
+      ``outbox/``, ``logs/`` → ``WORKSPACE_SENSITIVE_DIR_MODE`` (0o700).
+      No recursion (would touch files owned by other tools).
+    - Layer 1 (daily-log PII): ``memory/daily/`` → 0o700; every
+      ``*_telegram.md`` inside → 0o600. Load-bearing: these files carry the
+      unredacted user↔agent conversation.
 
-    Per-entry errors are logged and swallowed; a single stuck NFS/SMB mount
-    or missing dir must never block the daemon from starting.
+    Layer 2 runs FIRST so any future extension can observe the layer-1
+    dir's pre-tightening state. Per-entry errors are logged + swallowed —
+    a stuck mount must never block startup.
     """
-    # Layer 2 first (workspace-sensitive dirs). Runs before layer 1 so that
-    # the memory/ chmod happens before we touch memory/daily/, in case a
-    # future extension wants to observe the pre-tightening state on the
-    # inner dir.
     for dir_name in WORKSPACE_SENSITIVE_DIRS:
         target = WORKSPACE / dir_name
         if not target.exists():
@@ -91,8 +82,8 @@ def secure_workspace_paths() -> None:
                 f"{ws_error!r}"
             )
 
-    # Layer 1: daily-log PII (preserves the pre-cluster behaviour that
-    # `secure_daily_logs` covered).
+    # Layer 1: daily-log PII (preserves the pre-cluster ``secure_daily_logs``
+    # behaviour).
     daily_dir = WORKSPACE / "memory" / "daily"
     if not daily_dir.exists():
         return
@@ -111,12 +102,10 @@ def secure_workspace_paths() -> None:
 
 
 def secure_daily_logs() -> None:
-    """Back-compat wrapper — delegates to :func:`secure_workspace_paths`.
+    """Back-compat wrapper → :func:`secure_workspace_paths`.
 
-    ``daemon/__main__.py`` still imports this name. The rename is a
-    surface-only shuffle; behaviour is a strict superset of the pre-cluster
-    version (daily-log tightening is preserved; workspace-sensitive dir
-    chmodding is added).
+    Kept because ``daemon/__main__.py`` still imports this name. Behaviour
+    is a strict superset (daily-log tightening + workspace-sensitive dirs).
     """
     secure_workspace_paths()
 
@@ -133,13 +122,13 @@ def load_state() -> Dict[str, Any]:
     try:
         raw = STATE_FILE.read_text()
     except FileNotFoundError:
-        # First run / missing file is expected — silently return defaults.
+        # First run / missing file — silently return defaults.
         return dict(defaults)
     except Exception as read_error:
-        # Read failed on an existing file. Silently resetting would lose
-        # last_update_id (Telegram re-delivers a backlog), unlock_lockout_until
-        # (defeats brute-force lockout), and session_id (loses Claude
-        # continuity). Back up the file and log loudly instead.
+        # Existing-file read failure. Silent reset would lose
+        # last_update_id (Telegram backlog replays), unlock_lockout_until
+        # (defeats brute-force lockout), and session_id (Claude
+        # continuity). Back up and log loudly instead.
         _backup_corrupt_state(read_error)
         return dict(defaults)
     try:
@@ -153,14 +142,12 @@ def load_state() -> Dict[str, Any]:
 
 
 def _backup_corrupt_state(error: BaseException) -> None:
-    """Rename a corrupt STATE_FILE to a ``.corrupt`` sibling and log loudly.
+    """Rename a corrupt ``STATE_FILE`` to a ``.corrupt`` sibling; log loudly.
 
-    Uses ``os.replace`` so the original bytes are preserved at the backup path
-    and the original is removed (next ``load_state`` will hit the missing-file
-    path, not the same corruption again). If a prior ``.corrupt`` already
-    exists, it is overwritten — we keep this simple rather than versioning.
-    Any failure during the backup itself is logged but swallowed so the daemon
-    can still start.
+    - ``os.replace`` preserves original bytes and clears ``STATE_FILE`` so
+      the next ``load_state`` takes the missing-file path.
+    - Existing ``.corrupt`` is overwritten (simpler than versioning).
+    - Backup failure is logged + swallowed so the daemon can still start.
     """
     backup = STATE_FILE.with_suffix(STATE_FILE.suffix + ".corrupt")
     try:
@@ -186,8 +173,8 @@ def save_state(state: Dict[str, Any]) -> None:
         tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
         try:
             STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            # B4 - race-free 0o600 creation: the mode arg to os.open is umask-
-            # subject, so we MUST follow with fchmod to guarantee final mode.
+            # Race-free 0o600: os.open's mode is umask-subject; the fchmod
+            # after it is the load-bearing step.
             fd = os.open(
                 str(tmp),
                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
@@ -199,11 +186,9 @@ def save_state(state: Dict[str, Any]) -> None:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, STATE_FILE)
-            # C1 - durably persist the rename itself (POSIX: fsync the parent
-            # dir to flush directory-metadata so the new dirent survives crash/
-            # power-loss). Best-effort: some filesystems (BSD, some FUSE) don't
-            # support fsync on a directory fd and return OSError - don't crash
-            # the daemon over it.
+            # fsync the parent dir so the new dirent survives crash/power-loss.
+            # Best-effort — some FSes (BSD, some FUSE) reject dir fsync with
+            # OSError; don't crash over it.
             try:
                 dir_fd = os.open(str(STATE_FILE.parent), os.O_RDONLY)
                 try:
@@ -213,10 +198,8 @@ def save_state(state: Dict[str, Any]) -> None:
             except OSError as dir_fsync_error:
                 log(f"save_state: parent-dir fsync skipped ({dir_fsync_error!r})")
         except OSError as save_state_error:
-            # C2 - leave the tmp in place for forensics: disk-full self-limits
-            # (next save overwrites it via truncate), and the bytes that didn't
-            # make it onto STATE_FILE are the only evidence of the failure for
-            # an operator to inspect.
+            # Leave tmp for forensics — disk-full self-limits (next save
+            # truncates it) and its bytes are the only evidence of failure.
             log(
                 f"save_state OSError: {save_state_error}; "
                 f"tmp left at {tmp} for inspection"
@@ -224,15 +207,12 @@ def save_state(state: Dict[str, Any]) -> None:
 
 
 def log_conversation(role: str, text: str) -> None:
-    """Append a conversation turn to today's telegram log file.
+    """Append a turn to today's telegram log file.
 
-    B4 - creates the file (and parent dir) with restrictive permissions
-    (file 0o600, dir 0o700) via os.open + os.fchmod - process-wide umask
-    is intentionally NOT touched (would race with concurrent file creation
-    in poller/sender threads).
-
-    Uses advisory fcntl.flock on the open file descriptor so two writers
-    can't interleave bytes.
+    - File 0o600, parent dir 0o700 via ``os.open`` + ``os.fchmod``. Process-
+      wide umask is intentionally NOT touched (would race concurrent file
+      creation in poller/sender threads).
+    - Advisory ``fcntl.flock`` on the fd so two writers can't interleave.
     """
     today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
     log_path = WORKSPACE / "memory" / "daily" / f"{today}_telegram.md"
@@ -244,9 +224,7 @@ def log_conversation(role: str, text: str) -> None:
         except OSError as dir_chmod_error:
             log(f"log_conversation: dir chmod failed: {dir_chmod_error!r}")
         ts = datetime.now(TIMEZONE).strftime("%H:%M")
-        # Race-free 0o600 creation: the mode arg to os.open is umask-subject,
-        # so we MUST follow with fchmod to guarantee the final mode. Also
-        # tightens any pre-existing loose file mode (0644 backfill case).
+        # Race-free 0o600 + backfill any pre-existing loose 0644.
         fd = os.open(
             str(log_path),
             os.O_WRONLY | os.O_CREAT | os.O_APPEND,
@@ -266,11 +244,11 @@ def log_conversation(role: str, text: str) -> None:
 
 
 def _read_file_tail(log_path: Path, tail_bytes: int) -> str:
-    """Read up to the last ``tail_bytes`` of ``log_path`` as decoded text.
+    """Return up to the last ``tail_bytes`` of ``log_path`` as decoded text.
 
-    Seeks near the end of the file rather than loading the whole thing.
-    On a partial-line boundary (which is the common case), the first line
-    of the returned text may be a fragment — callers must drop it.
+    Seeks near end-of-file to avoid loading the whole thing. On a partial-
+    line boundary (common case), the first returned line may be a fragment
+    — callers must drop it.
     """
     with open(log_path, "rb") as f:
         size = os.fstat(f.fileno()).st_size
@@ -283,16 +261,14 @@ def _read_file_tail(log_path: Path, tail_bytes: int) -> str:
 
 
 def read_recent_conversation_history(max_turns: int = 20) -> str:
-    """Read recent conversation from today's telegram log for session continuity.
+    """Recent turns from today's telegram log as injectable context.
 
-    When a session resets mid-day (via /new or stale-session fallback), the
-    new Claude session has no context. This reads the last N turns from today's
-    telegram log and returns them as injectable context.
+    On session reset (``/new`` or stale-session fallback), the new Claude
+    session has no context; this fills that gap.
 
-    To stay fast on active days (the log can grow well past 500KB), only the
-    tail of the file is read.  When truncation occurs at the tail boundary,
-    the result is trimmed so the kept slice starts with a user turn — never
-    a dangling agent response without the prompt that produced it.
+    - Only the file tail is read (log can grow past 500KB on active days).
+    - Truncation trims so the kept slice starts with a USER turn — never a
+      dangling agent response without its prompt.
     """
     today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
     log_path = WORKSPACE / "memory" / "daily" / f"{today}_telegram.md"
@@ -316,13 +292,12 @@ def read_recent_conversation_history(max_turns: int = 20) -> str:
         if not content_lines:
             return ""
 
-        # Slice to at most max_turns*2 (one line per role).
+        # Cap at max_turns*2 (one line per role).
         max_lines = max_turns * 2
         recent = content_lines[-max_lines:] if len(content_lines) > max_lines else list(content_lines)
 
-        # Pair alignment: keep complete user+agent pairs.  If we truncated and
-        # the first kept line is an agent response, drop it so the slice starts
-        # with the user turn it answers.
+        # Pair alignment: if truncated and first kept line is an agent
+        # response, drop it so the slice starts with its user prompt.
         truncated_by_count = len(content_lines) > max_lines
         if (truncated_by_count or tail_was_truncated) and recent:
             if recent[0].startswith(f"**{AGENT_NAME}"):
@@ -346,12 +321,10 @@ def read_recent_conversation_history(max_turns: int = 20) -> str:
 
 
 def get_context_percent(session_id: Optional[str]) -> Optional[float]:
-    """Read the last assistant message's usage from the session JSONL tail.
+    """Percentage of ``CONTEXT_WINDOW_TOKENS`` used per the session JSONL tail.
 
-    Only reads the final 32KB of the file (not the whole thing), then scans
-    backwards for the last assistant message with usage data.
-    Returns context usage as a percentage of CONTEXT_WINDOW_TOKENS,
-    or None if the session file doesn't exist or has no usage data.
+    Reads only the final 32KB, scans backwards for the last assistant
+    message with usage data. Returns None if no file or no usage.
     """
     if not session_id:
         return None

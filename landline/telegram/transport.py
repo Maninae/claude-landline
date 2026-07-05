@@ -1,21 +1,17 @@
 """Telegram HTTP transport — API calls, send + retry, markdown chunking.
 
-This module owns the request/response path: building the JSON payload, the
-429/5xx retry policy (with `Retry-After` honoring), chunking markdown into
-size-safe pieces, and the `send_response` entry point that converts each
-chunk to HTML and falls back to plain text on a 400. The tag-aware HTML
-chunker lives separately in `landline.html_chunker`.
+Owns the request/response path: JSON payload build, 429/5xx retry with
+``Retry-After`` honoring, markdown chunking, and ``send_response`` (HTML with
+plain-text fallback on 400). Tag-aware HTML chunker lives in
+``landline.telegram.chunker``.
 
-Cluster 5:
-- ``_send_with_retry`` persists every chunk to the outbound spool at entry
-  and marks it success/failed on the terminal branch; a background thread
-  and a startup pass replay pending files (see ``landline.outbound_spool``).
-- ``send_typing`` uses a per-thread pooled HTTPS connection for
-  ``sendChatAction`` so the typing indicator doesn't pay a TLS handshake
-  every 4 seconds. The pool is deliberately NOT used for ``sendMessage`` —
-  Telegram has no idempotency keys, and a stale-keep-alive dupe on a real
-  message is worse than the saved handshake. Duplicate ``typing`` is
-  invisible to the user, so the pool is safe there.
+- ``_send_with_retry`` persist-first at entry, unlink on success, rename to
+  ``pending`` on terminal failure; a background thread + startup pass replay
+  pending files (see ``landline.telegram.spool``).
+- ``sendMessage`` opens a fresh connection each call — deliberately no
+  keep-alive pool. Telegram has no idempotency keys, so a stale-keep-alive
+  dupe on a real message would double-send. (Typing indicators are pooled
+  in ``landline.telegram.typing`` because a duplicate typing is invisible.)
 """
 
 import json
@@ -37,10 +33,6 @@ from landline.runtime.logging import log
 from landline.telegram.fmt import md_to_telegram_html
 
 
-# -----------------------------------------------------------------------------
-# Telegram API
-# -----------------------------------------------------------------------------
-
 def telegram_api(token: str, method: str, payload: Optional[Dict] = None,
                  timeout: Optional[int] = None) -> Dict:
     url = f"https://api.telegram.org/bot{token}/{method}"
@@ -52,33 +44,20 @@ def telegram_api(token: str, method: str, payload: Optional[Dict] = None,
         return json.loads(resp.read())
 
 
-# -----------------------------------------------------------------------------
-# Send
-# -----------------------------------------------------------------------------
-
-# HTTP statuses we treat as transient — retried with a short backoff. 429
-# (rate limit) is handled separately because we honor the server-advertised
-# Retry-After delay instead of our own backoff schedule.
+# Transient: short-backoff retry. 429 is separate — honors Retry-After.
 _TRANSIENT_HTTP_STATUSES = (500, 502, 503, 504)
 
 
 def _parse_retry_after(http_error: urllib.error.HTTPError) -> int:
-    """Best-effort extraction of the Retry-After delay from a 429 (or any)
-    HTTPError. Mirrors `poller._poll_loop`'s precedence:
+    """Extract Retry-After delay from an HTTPError; always a positive int.
 
-      1. `Retry-After` HTTP response header (Telegram and the HTTP spec both
-         allow this; the existing code only read the JSON body).
-      2. `parameters.retry_after` in the JSON error body (Telegram's primary
-         signal for rate limits — `{"parameters": {"retry_after": 35}}`).
-      3. `SEND_RETRY_AFTER_FALLBACK` (3s) as a sensible default when neither
-         is present or parseable.
-
-    Always returns a positive int — callers downstream still clamp by
-    `SEND_RETRY_AFTER_CAP` before sleeping.
+    Precedence (mirrors ``poller._poll_loop``):
+      1. ``Retry-After`` HTTP response header (seconds form only).
+      2. ``parameters.retry_after`` in the JSON error body.
+      3. ``SEND_RETRY_AFTER_FALLBACK`` (3s) default.
+    Caller clamps by ``SEND_RETRY_AFTER_CAP`` before sleeping.
     """
-    # 1. HTTP header (RFC 9110 — seconds form; date form is uncommon for
-    #    Telegram and we deliberately don't parse it here, matching
-    #    `poller._poll_loop`).
+    # 1. HTTP header (RFC 9110 seconds form; date form intentionally unparsed).
     try:
         headers = getattr(http_error, "headers", None)
         if headers is not None:
@@ -130,10 +109,8 @@ def _send_chunk(token: str, chat_id: str, chunk: str,
     )
     try:
         body = urllib.request.urlopen(req, timeout=10).read()
-        # Ledger line: the server-assigned message_id proves the message
-        # exists server-side, so a future "didn't render" report can be
-        # split into daemon-side loss vs client-side staleness from the log
-        # alone (see inbox/telegram-desync-rootcause-brief.md, H3).
+        # Ledger: server-assigned message_id in the log separates daemon-side
+        # loss from client-side staleness on any future "didn't render" report.
         try:
             message_id = json.loads(body).get("result", {}).get("message_id")
         except Exception:
@@ -172,57 +149,32 @@ def _send_with_retry_tracked(
     html_mode: bool, label: str,
     defer_failure_finalization: bool = False,
 ) -> Tuple[bool, Optional[int], Optional[str]]:
-    """Send a chunk with bounded retries for transient failures.
+    """Send a chunk with bounded retries. Returns (ok, code, spool_id).
 
-    Retries on:
-      - HTTP 429 (rate limited) — honor `Retry-After` (header → body →
-        SEND_RETRY_AFTER_FALLBACK), clamped to [1, SEND_RETRY_AFTER_CAP].
-      - HTTP 5xx (502/503/504/500) — short fixed backoff per retry index.
-      - Connection/timeout errors (`URLError`, socket timeout) surfaced
-        as `code == None` — same fixed backoff.
+    Args:
+        defer_failure_finalization: when True, terminal failure branches
+            leave the spool file in ``inflight-<pid>``; caller MUST later
+            call ``discard`` or ``mark_failed``. Used by ``send_response``
+            to close the race with the background replayer when it swaps
+            to a plain-text fallback.
 
-    Does NOT retry on:
-      - HTTP 400 — caller falls back to plain text.
-      - Other 4xx — caller decides; usually plain-text fallback.
+    Returns:
+        ``(success, last_http_code, spool_id)``. ``spool_id`` is None only
+        if the initial persist raised (disk-full → best-effort send).
 
-    Up to `SEND_MAX_ATTEMPTS` total attempts (initial + retries). Returns
-    ``(success, http_code_from_last_attempt, spool_id)`` — spool_id is the
-    identifier assigned by ``outbound_spool.persist`` at entry, or ``None``
-    if the initial persist raised (disk-full → degraded to best-effort).
-    Callers that need to cancel the persisted variant (e.g. ``send_response``
-    switching to the plain-text fallback) use the spool_id with
-    ``outbound_spool.discard``.
-
-    Cluster 5: every entry persists the chunk to the outbound spool at
-    ``inflight-<pid>`` state before the first attempt; a successful send
-    unlinks it; any terminal failure branch (retry-exhaustion, unfixable
-    4xx) renames it back to ``pending`` so the periodic replay pass — and
-    the sync replay at next daemon startup — picks it up. Disk-full or
-    other I/O errors on persist are swallowed and the send proceeds
-    without persistence (best-effort > fail-closed).
-
-    ``defer_failure_finalization`` (default False): when True, ANY terminal
-    failure branch leaves the spool file in its ``inflight-<pid>`` state
-    instead of renaming it to ``pending``. Caller assumes ownership of the
-    spool_id and MUST subsequently call either ``outbound_spool.discard``
-    (drop the chunk — used by ``send_response`` before persisting a
-    plain-text fallback) or ``outbound_spool.mark_failed`` (release to
-    ``pending`` for the replayer). Purpose: eliminate the race between
-    ``mark_failed`` (inflight→pending) and a caller's subsequent
-    ``discard`` — a background ``OutboundSpoolReplayer`` tick between
-    those two operations otherwise reads the pending payload and can
-    deliver the same chunk while ``discard`` unlinks it, causing
-    double-delivery (HTML variant AND plain-text fallback both reach the
-    user). Keeping the file in ``inflight-<pid>`` state until the caller
-    decides makes the file invisible to the replayer during the window.
+    - Retries HTTP 429 (honor ``Retry-After`` header→body→fallback, clamped
+      to ``[1, SEND_RETRY_AFTER_CAP]``), HTTP 5xx, and connection/timeout
+      errors (surfaced as ``code is None``) up to ``SEND_MAX_ATTEMPTS``.
+    - Does NOT retry HTTP 400/other 4xx — caller decides (plain-text fallback).
+    - Persist-first: chunk written to spool at ``inflight-<pid>`` before the
+      first attempt; success unlinks, terminal failure renames to ``pending``
+      for periodic + startup replay. Disk-full swallowed → un-persisted send.
     """
     spool_id: Optional[str] = None
     try:
         spool_id = outbound_spool.persist(chat_id, chunk, html_mode, label)
     except OSError as spool_err:
-        # Disk full, mode failure, dir gone — degrade to un-persisted send.
-        # A duplicate write of this same chunk after a crash is impossible
-        # anyway if we couldn't persist it, so at-least-once → best-effort.
+        # Disk full / dir gone — degrade to un-persisted send.
         log(
             "outbound_spool: persist failed for chat_id=%s label=%s: %r "
             "— proceeding without persistence"
@@ -265,10 +217,8 @@ def _send_with_retry_tracked(
             continue
 
         if code in _TRANSIENT_HTTP_STATUSES or code is None:
-            # `code is None` covers connection refused, DNS failure, socket
-            # timeout, and any non-HTTPError exception bubbled to `_send_chunk`.
-            # Use the positional backoff entry; fall back to the last value if
-            # SEND_MAX_ATTEMPTS exceeds the tuple length.
+            # ``code is None`` = connection refused / DNS / timeout / other
+            # non-HTTPError. Clamp backoff index to the tuple's tail.
             backoff_idx = min(attempt, len(SEND_RETRY_BACKOFF_SECONDS) - 1)
             delay = SEND_RETRY_BACKOFF_SECONDS[backoff_idx]
             code_label = "HTTP %d" % code if code is not None else "network"
@@ -280,10 +230,8 @@ def _send_with_retry_tracked(
             time.sleep(delay)
             continue
 
-        # Non-retryable status (400, 401, 403, etc.) — return immediately so
-        # caller can fall back to plain text. Leave the spool file in
-        # ``pending`` state; the replay pass will attempt it once more and
-        # discard on a repeated 400 (see outbound_spool.replay_all).
+        # Non-retryable (400/401/403/...) → return so caller can fall back to
+        # plain text. Left as ``pending`` for one more replay attempt.
         if spool_id is not None and not defer_failure_finalization:
             outbound_spool.mark_failed(spool_id)
         return False, code, spool_id
@@ -297,13 +245,10 @@ def _send_chunk_raw(chat_id: str, chunk: str, html_mode: bool,
                     label: str) -> Tuple[bool, Optional[int]]:
     """Bare single-attempt send for spool replay.
 
-    Does NOT re-persist to the spool (that would loop) and does NOT retry
-    (the replay loop is the retry vehicle). Fetches the bot token from
-    Keychain on each call — cheap given the 60s+ replay interval, and it
-    keeps the spool module credential-free.
-
-    Returns (False, None) if the token can't be fetched, so the caller
-    (``outbound_spool.replay_all``) rolls the file back to ``pending``.
+    - No re-persist (would loop) and no retry (replay loop IS the retry vehicle).
+    - Token fetched per-call from Keychain so the spool module stays credential-free.
+    - Returns ``(False, None)`` if the token is unavailable → caller rolls
+      the file back to ``pending``.
     """
     from landline.runtime.security import keychain_get  # lazy import — avoid cycle
     token = keychain_get("telegram-bot-token") or ""
@@ -315,38 +260,25 @@ def _send_chunk_raw(chat_id: str, chunk: str, html_mode: bool,
 
 
 def send_response(token: str, chat_id: str, text: str) -> None:
-    """Send text to Telegram with HTML formatting. Handles 429 and 400 fallback.
+    """Send markdown text to Telegram as HTML; fall back to plain text on 400.
 
-    Chunking happens on the raw markdown BEFORE HTML conversion. Each chunk is
-    then converted to HTML independently, guaranteeing well-formed standalone
-    HTML per chunk — `chunk_text` operating on already-rendered HTML would
-    happily split `<pre>...</pre>` blocks mid-tag and trigger Telegram 400s.
-
-    Multi-chunk observability: when a chunk fails after all retries AND the
-    plain-text fallback also fails, the remaining chunks would silently never
-    send — the user sees a half-message with no signal in the logs. We log a
-    clear truncation notice with `(index, total)` so this is greppable.
+    - Chunk on RAW markdown, then convert each chunk to HTML independently —
+      chunking already-rendered HTML would split ``<pre>...</pre>`` mid-tag.
+    - If a chunk and its plain-text fallback BOTH fail, remaining chunks are
+      abandoned; log ``(index, total)`` so the truncation is greppable.
     """
     if not text or not text.strip():
         return
 
-    # Use a slightly smaller markdown budget so HTML expansion (entity escapes,
-    # added tags) is very unlikely to push a chunk past Telegram's 4096 cap.
+    # Sub-4096 markdown budget so HTML expansion stays under Telegram's cap.
     plain_chunks = chunk_text(text, 4000)
     total = len(plain_chunks)
 
     for index, plain_chunk in enumerate(plain_chunks, start=1):
         html_chunk = md_to_telegram_html(plain_chunk)
-        # Pass ``defer_failure_finalization=True`` so a retry-exhausted or
-        # non-retryable HTML failure leaves the spool file in its
-        # ``inflight-<pid>`` state (invisible to the background replayer)
-        # instead of renaming it to ``pending`` right away. This closes
-        # the race window where a replayer tick between ``mark_failed``
-        # and ``discard`` below would read the pending payload and
-        # double-deliver the HTML variant alongside the plain-text
-        # fallback. ``send_response`` owns finalization for this file —
-        # every non-success branch below MUST call ``discard`` before
-        # falling through.
+        # ``defer_failure_finalization=True``: keep the spool file inflight
+        # so the background replayer can't see it before ``discard`` below.
+        # Every non-success branch MUST reach ``discard`` before falling through.
         ok, code, html_spool_id = _send_with_retry_tracked(
             token, chat_id, html_chunk, html_mode=True, label="HTML chunk",
             defer_failure_finalization=True,
@@ -371,28 +303,19 @@ def send_response(token: str, chat_id: str, text: str) -> None:
                 f"falling back to plain text"
             )
 
-        # Discard the HTML variant's spool file BEFORE persisting the
-        # plain-text fallback. The file is still in ``inflight-<pid>``
-        # state (see ``defer_failure_finalization=True`` above), so the
-        # background replayer can never see it — discard atomically
-        # removes it without any race. Same logical chunk, two variants:
-        # without this, the HTML variant would be retried by the replayer
-        # AND the plain-text fallback below would also deliver — the operator
-        # gets the same reply twice.
+        # Discard the HTML variant's inflight spool BEFORE persisting the
+        # plain-text fallback — otherwise the replayer double-delivers.
         if html_spool_id is not None:
             outbound_spool.discard(html_spool_id)
 
-        # Plain-text fallback uses the SAME markdown chunk — boundaries align
-        # exactly, so no duplication or loss.
+        # Plain-text fallback reuses the SAME markdown chunk (aligned boundaries).
         fallback_ok, fallback_code = _send_with_retry(
             token, chat_id, plain_chunk, html_mode=False, label="plain fallback",
         )
         if fallback_ok:
             continue
 
-        # Both HTML and plain fallback failed. If this is part of a multi-chunk
-        # message, the user is about to see a silently truncated reply — log
-        # loudly so the partial delivery is observable in the daemon log.
+        # Both HTML and plain failed — log truncation so partial delivery is observable.
         if total > 1:
             log(
                 f"Telegram send aborted mid-stream for chat_id={chat_id}: "

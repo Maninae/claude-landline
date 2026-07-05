@@ -1,27 +1,20 @@
 """Voice-note handling — download, local whisper transcribe, dispatch.
 
-Voice notes (voice / audio / video_note) are transcribed locally with
-whisper and then dispatched to Claude as if the operator had typed the transcript.
-Mirrors ``photo_handler.py`` and ``document_handler.py``:
+Voice / audio / video_note → local whisper → dispatched to Claude as if
+typed. Mirrors ``photo.py`` and ``document.py``:
 
-  - Lock gate BEFORE any download so a locked session cannot leave a
-    downloaded audio blob in ``cache/telegram_voice/`` forever.
-  - Duration guard (before download, to save bytes and CPU): a voice note
-    exceeding ``VOICE_MAX_DURATION_SECONDS`` is rejected with a compact
-    notice and its cursor advances.
-  - Whisper failure (timeout / non-zero exit / empty transcript): a
-    tasteful notice, no dispatch, cursor advances. The dispatch loop MUST
-    NOT be wedged; ``voice_transcribe.transcribe_file`` never raises.
+- Lock gate BEFORE any download (a locked session must not leave audio in cache).
+- Duration guard BEFORE download: exceeding ``VOICE_MAX_DURATION_SECONDS``
+  → compact notice, advance cursor.
+- Whisper failure (timeout / non-zero / empty) → notice, no dispatch,
+  advance cursor. ``transcribe_file`` never raises → dispatch loop can't wedge.
 
-Prompt-injection safety: the transcript is UNTRUSTED content. It is
-wrapped in ``<voice_note>`` XML tags (Anthropic's recommended
-delimiter framing) and any pre-existing ``</voice_note>`` inside the
-transcript is escaped so an attacker-recorded voice note cannot break
-out of the delimiter.
+Prompt-injection safety: transcript is UNTRUSTED. Wrap in ``<voice_note>``
+XML delimiters; escape any pre-existing ``</voice_note>`` inside so a
+hostile transcript can't break out of the frame.
 
-Downloads route through ``landline.orchestrator.download_file`` so existing
-tests that patch that symbol continue to apply (mirrors photo_handler and
-document_handler).
+Downloads route through ``landline.orchestrator.download_file`` so test
+patches apply (mirrors photo.py / document.py).
 """
 
 from datetime import datetime
@@ -50,12 +43,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only
 
 
 def _clear_ack(daemon: "TelegramDaemon", chat_id: str, message: Dict) -> None:
-    """Clear the classifier's 👀 ack on a message when the batch bails out
-    before dispatch (lock gate, duration cap, download/transcribe failure).
+    """Clear the 👀 ack when a message bails before dispatch.
 
-    Without this, the 👀 emoji lingers on the operator's message forever with no
-    matching 👌 — a lie by the docstring's definition
-    ("message accepted, queued for Claude").
+    Called on lock-gate / duration cap / download / transcribe failure so
+    the 👀 never lingers without a matching 👌.
     """
     mid = message.get("message_id")
     if isinstance(mid, int):
@@ -69,9 +60,7 @@ def process_voice_batch(
     """Transcribe each voice note in order and dispatch its transcript.
 
     Batch-level lock gate coalesces LOCKED_HELP to one notice per batch
-    (mirrors the text-batch behaviour) instead of one per voice note,
-    and clears the classifier's 👀 acks on all voice messages so they
-    don't linger as false "accepted" signals.
+    (mirrors text-batch), and clears 👀 on all voice messages when bailing.
     """
     if not voice_updates:
         return
@@ -105,11 +94,11 @@ def _format_duration(seconds: int) -> str:
 
 
 def _voice_filename(field: Dict, source_key: str) -> str:
-    """Pick a safe local filename for the downloaded audio.
+    """Safe local filename for downloaded audio.
 
-    Prefer Telegram's advertised ``file_name`` after sanitization. Voice
-    fields typically have no name; synthesize ``voice_<ts>.ogg`` (or
-    ``.m4a`` for audio, ``.mp4`` for video_note) as a fallback.
+    Prefer Telegram's advertised ``file_name`` (sanitized). Voice fields
+    typically have no name → synthesize ``voice_<ts>.ogg`` (``.m4a`` for
+    audio, ``.mp4`` for video_note).
     """
     raw_name = field.get("file_name")
     if isinstance(raw_name, str) and raw_name:
@@ -132,19 +121,15 @@ def dispatch_voice(
     chat_id: str,
 ) -> None:
     """Handle one voice/audio/video_note update end-to-end."""
-    # Lock gate first — a locked session must never leave an audio file in
-    # cache/telegram_voice/. process_voice_batch already clears acks on
-    # the batch-level lock gate, but a race can transition the session to
-    # locked between that check and this per-item re-check — clear the
-    # 👀 here too so it never lingers with no matching 👌.
+    # Per-item lock re-check: the batch-level check may have raced with a
+    # lock transition. Clear 👀 on rejection.
     if daemon._check_lock_gate(chat_id, [update_id]):
         _clear_ack(daemon, chat_id, message)
         return
 
     source_key, field = _get_voice_field(message)
     if not field:
-        # Should never happen — classifier put this in the bucket. Belt-
-        # and-suspenders: brush off, clear the 👀, and advance.
+        # Should never fire — classifier bucketed this. Belt-and-suspenders.
         log(
             f"Voice dispatch: message had no recognized voice field "
             f"(chat={chat_id})"
@@ -176,8 +161,7 @@ def dispatch_voice(
         daemon._advance_update_cursor(update_id)
         return
 
-    # Late import via the orchestrator module so test patches against
-    # ``landline.orchestrator.download_file`` continue to apply.
+    # Late import so ``landline.orchestrator.download_file`` test patches apply.
     from landline import orchestrator as _orch
 
     file_id = field.get("file_id", "")
@@ -202,25 +186,15 @@ def dispatch_voice(
         return
 
     from pathlib import Path as _P
-    # Pass the daemon's pause flag so a /pause queued during whisper
-    # can interrupt it — otherwise a 30-90s transcription would starve
-    # every other batch (text, photos, /pause itself) for the full
-    # whisper duration on a single-threaded dispatch loop. See
-    # voice_transcribe._run_whisper_interruptible for the polling loop.
+    # Give whisper an interruptible pause_flag so /pause during a 30-90s
+    # transcription doesn't starve the single-threaded dispatch loop.
+    # See ``transcribe._run_whisper_interruptible`` for the polling loop.
     pause_flag = getattr(daemon, "_pause_requested", None)
-    # BUT: if /pause arrived in the SAME batch as this voice note (flag
-    # already set BEFORE whisper starts), don't hand pause_flag to
-    # whisper — it would kill the process on the first ~200ms poll and
-    # drop the voice content on the floor (`(Paused.)` with no
-    # transcript). Instead, transcribe normally and let the /pause
-    # interrupt the downstream Claude dispatch (the transcript's own
-    # Claude turn, or a following text batch's turn). This preserves
-    # both the voice content AND the user's /pause intent.
-    #
-    # Edge-triggered semantics: only a /pause queued DURING whisper
-    # should abort transcription, so we gate the flag on its pre-whisper
-    # state. A defensive is_set() try/except keeps sentinels used in
-    # tests (a bare object() without .is_set) from tripping this.
+    # Edge-triggered: /pause queued in the SAME batch as this voice note
+    # (flag ALREADY set before whisper starts) MUST NOT abort whisper —
+    # that would drop the voice content on the floor. Only a pause DURING
+    # whisper aborts; a pre-existing pause routes through the downstream
+    # Claude dispatch (transcript's own turn) instead, preserving both.
     already_paused_at_start = False
     if pause_flag is not None:
         try:
@@ -239,13 +213,10 @@ def dispatch_voice(
 
     if not result.ok:
         if result.error == "paused":
-            # Whisper was killed by /pause. Mirror the Claude-turn
-            # interrupt semantics from ClaudeDispatcher._finalize_
-            # response: send "(Paused.)" and clear the pause flag so
-            # the queued /pause update — if it's still pending — sees
-            # the "already consumed" branch and stays silent instead
-            # of replying "(Nothing to pause.)". The voice note itself
-            # is NOT dispatched to Claude.
+            # Mirror ClaudeDispatcher._finalize_response: send "(Paused.)"
+            # and clear the pause flag so a still-pending /pause update
+            # takes the "already consumed" branch (not "(Nothing to
+            # pause.)"). Voice content is NOT dispatched.
             daemon._send_response(daemon.token, chat_id, "(Paused.)")
             if pause_flag is not None:
                 try:
@@ -269,8 +240,7 @@ def dispatch_voice(
         daemon._advance_update_cursor(update_id)
         return
 
-    # Escape any pre-existing close-tag so the XML delimiter frame stays
-    # intact against a hostile transcript.
+    # Escape any pre-existing close-tag so the XML frame stays intact.
     safe_text = result.text.replace(
         "</voice_note>", "</voice_note_escaped>",
     )
@@ -280,7 +250,7 @@ def dispatch_voice(
         "<voice_note>\n%s\n</voice_note>" % (duration_display, safe_text)
     )
 
-    # Metadata-only log line — NEVER include the transcript text.
+    # Metadata-only log — NEVER include transcript text.
     log(
         "Voice prompt: chat=%s duration=%ds chars=%d"
         % (chat_id, duration_s, len(result.text))
@@ -289,10 +259,8 @@ def dispatch_voice(
         USER_NAME, "[voice] (%ds, %d chars)" % (duration_s, len(result.text)),
     )
 
-    # Cluster 3: ack ONLY this voice note's message_id. A voice-note
-    # failure earlier in the batch left 👀 on its own message and never
-    # reached this dispatch, so partitioning here guarantees the failed
-    # voice note doesn't get a stray 👌 from a subsequent text dispatch.
+    # Ack ONLY this voice note's message_id — never the batch union.
+    # A voice failure earlier in the batch stays with its own message.
     mid = message.get("message_id")
     ack_ids: List[int] = [mid] if isinstance(mid, int) else []
     daemon._inject_and_dispatch(

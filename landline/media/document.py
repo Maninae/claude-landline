@@ -1,17 +1,26 @@
 """Document handling — download dispatch + Claude prompt assembly.
 
-Documents (PDFs, plain-text logs, JSON/YAML/CSV etc.) arrive as
-``message.document`` envelopes. Unlike photos, Telegram does NOT group
-documents by ``media_group_id`` — each document is a standalone update, so
-there is no album coalescing here.
+- Documents arrive as ``message.document`` envelopes; Telegram does NOT
+  group them by ``media_group_id``, so no album coalescing here.
+- State lives on the ``TelegramDaemon`` coordinator; helpers receive it as
+  the first arg and reuse its lock gate, dispatcher, send helpers, cursor.
+- Downloads route through ``landline.orchestrator.download_file`` so test
+  patches apply (mirrors ``photo.py``).
 
-State lives on the ``TelegramDaemon`` coordinator. These helpers receive the
-daemon as their first argument and reuse its lock gate, dispatcher, send
-helpers, and cursor tracker.
+Prompt-injection safety (load-bearing):
 
-Downloads route through ``landline.orchestrator.download_file`` so existing
-tests that patch ``landline.orchestrator.download_file`` continue to work
-without modification (mirrors the photo_handler pattern).
+- Filenames are UNTRUSTED, attacker-controlled. ``_safe_basename`` blocks
+  path traversal / NUL / control chars but still allows brackets, commas,
+  quotes, and angle brackets — enough to close a ``[document: …]`` fragment
+  and inject a fake instruction (``invoice], [SYSTEM OVERRIDE: ….pdf``).
+- On-disk paths derive from the sanitized name, so they carry the same
+  hostile chars. Both filename and path are wrapped in dedicated XML
+  delimiters (``<document_filename>``, ``<document_path>``), with any
+  pre-existing close-tag inside escaped. The outer ``[document: …]``
+  line is kept metadata-only (size).
+- ``_safe_basename`` today strips ``/`` via ``os.path.basename`` so
+  ``</document_...>`` is unreachable through ``file_name`` — the escape is
+  defense-in-depth against future sanitizer changes.
 """
 
 from datetime import datetime
@@ -34,8 +43,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only
 
 
 def _clear_ack(daemon: "TelegramDaemon", chat_id: str, message: Dict) -> None:
-    """Clear the classifier's 👀 ack on a message when a document bails
-    out before dispatch (lock gate, unsafe basename, download failure)."""
+    """Clear the 👀 ack when a document bails before dispatch."""
     mid = message.get("message_id")
     if isinstance(mid, int):
         reactions.set_reaction_async(daemon.token, chat_id, mid, None)
@@ -45,13 +53,10 @@ def process_document_batch(
     daemon: "TelegramDaemon",
     document_updates: List[Tuple[Dict, int, str]],
 ) -> None:
-    """Download each document (standalone, no album coalescing) and dispatch
-    to Claude with a ``[document: name, size, saved at: path]`` prompt.
+    """Download each document and dispatch to Claude with an XML-delimited prompt.
 
     Batch-level lock gate coalesces LOCKED_HELP to one notice per batch
-    (mirrors the text-batch behaviour) instead of one per document, and
-    clears the classifier's 👀 acks on all document messages so they
-    don't linger as false "accepted" signals.
+    (mirrors text-batch), and clears 👀 on all documents when bailing.
     """
     if not document_updates:
         return
@@ -66,8 +71,7 @@ def process_document_batch(
 
 
 def _format_size(num_bytes: int) -> str:
-    """Human-readable size string. Prefer MB for anything over 1MB, KB
-    otherwise. Small enough to stay inline in the prompt."""
+    """Human-readable size string; inline-safe for the prompt."""
     if num_bytes >= 1024 * 1024:
         return "%.1f MB" % (num_bytes / (1024.0 * 1024.0))
     if num_bytes >= 1024:
@@ -82,19 +86,13 @@ def dispatch_document(
     chat_id: str,
 ) -> None:
     """Download one document and hand it to Claude as a file path."""
-    # Gate lock BEFORE any download — a locked session must never leave a
-    # downloaded document sitting in cache/telegram_files/ forever.
-    # process_document_batch already clears acks on the batch-level lock
-    # gate, but a race can transition the session to locked between that
-    # check and this per-item re-check — clear the 👀 here too so it
-    # never lingers with no matching 👌.
+    # Per-item lock re-check: batch-level check may have raced with a
+    # lock transition. Clear 👀 on rejection.
     if daemon._check_lock_gate(chat_id, [update_id]):
         _clear_ack(daemon, chat_id, message)
         return
 
-    # Late-import via the orchestrator module so test patches against
-    # ``landline.orchestrator.download_file`` continue to apply. Mirrors the
-    # photo_handler pattern.
+    # Late import so ``landline.orchestrator.download_file`` test patches apply.
     from landline import orchestrator as _orch
 
     document = message.get("document") or {}
@@ -104,13 +102,8 @@ def dispatch_document(
 
     sanitized = _safe_basename(raw_name, DOCUMENT_ALLOWED_EXTENSIONS)
     if not sanitized:
-        # Should be filtered by the classifier's _is_acceptable_document
-        # gate; belt-and-suspenders in case somebody wires this in from a
-        # different code path in the future.
-        # PRIVACY: never log the raw filename — a rejected doc's name
-        # (e.g. "private_medical_records.pdf" or an attacker-crafted
-        # traversal string) still leaks through the classifier's reject
-        # branch here. Metadata-only: chat_id + size are safe.
+        # Belt-and-suspenders (classifier should filter first).
+        # PRIVACY: NEVER log the raw filename — chat_id + size only.
         log(
             "Document dispatch rejected — unsafe basename "
             "(chat=%s, size=%d bytes)" % (chat_id, file_size)
@@ -123,7 +116,7 @@ def dispatch_document(
         daemon._advance_update_cursor(update_id)
         return
 
-    # Filename on disk: `<timestamp>_<sanitized>` mirrors the photo pattern.
+    # On-disk filename ``<ts>_<sanitized>`` mirrors the photo pattern.
     ts = datetime.now(tz=TIMEZONE).strftime("%Y%m%d_%H%M%S")
     filename = f"{ts}_{sanitized}"
 
@@ -135,11 +128,8 @@ def dispatch_document(
         size_cap=DOCUMENT_MAX_SIZE_BYTES,
     )
     if not local_path:
-        # PRIVACY: never log the sanitized filename — sensitive doc
-        # names (e.g. "birth_certificate.pdf") would land in the
-        # rotating daemon log and outlive the 0700 cache dir. Log
-        # chat_id + size + mime metadata only, matching
-        # voice_transcribe's discipline.
+        # PRIVACY: chat_id + size + mime only — sanitized names outlive
+        # the 0700 cache in the rotating daemon log.
         mime_type = document.get("mime_type") or "unknown"
         log(
             "Document download failed (chat=%s, size=%d bytes, mime=%s)"
@@ -155,30 +145,7 @@ def dispatch_document(
 
     caption = message.get("caption")
     size_display = _format_size(file_size) if file_size else "unknown size"
-    # PROMPT-INJECTION SAFETY: the filename is UNTRUSTED, attacker-
-    # controlled content. ``_safe_basename`` blocks path traversal / NUL /
-    # control chars but still allows brackets, commas, quotes, and angle
-    # brackets in the stem — enough for an attacker to close the
-    # ``[document: ...]`` fragment and inject a fake instruction into
-    # Claude's context (e.g. ``invoice], [SYSTEM OVERRIDE: ....pdf``).
-    # The on-disk ``local_path`` is derived from the same sanitized name
-    # so it carries the same hostile characters.
-    #
-    # Mirror voice_handler.dispatch_voice: wrap the untrusted filename in
-    # ``<document_filename>`` XML delimiters (Anthropic's recommended
-    # framing) and escape any pre-existing close-tag inside so a hostile
-    # filename cannot break out of the delimiter frame. The on-disk path
-    # is DERIVED from the sanitized name (``<ts>_<sanitized>``) so it
-    # carries the same attacker-influenced characters — wrap the path in
-    # its own delimiter too and keep the outer ``[document: ...]`` line
-    # to trusted metadata only (size), so the attacker has no way to
-    # break out into Claude's instruction stream.
-    #
-    # ``_safe_basename`` currently strips any ``/`` from the raw name
-    # (``os.path.basename`` split point), which makes ``</document_...>``
-    # unreachable through the file_name field today. The escape is
-    # defense-in-depth against future sanitizer changes and a stricter
-    # mirror of voice_handler discipline.
+    # Prompt-injection framing — see module docstring for full rationale.
     safe_name = sanitized.replace(
         "</document_filename>", "</document_filename_escaped>",
     )
@@ -195,15 +162,10 @@ def dispatch_document(
     else:
         prompt_text = f"{USER_NAME} sent a document:\n\n{path_section}"
 
-    # PRIVACY: daemon log is metadata-only — chat_id + size. The
-    # sanitized filename (which can be a sensitive user-supplied name
-    # like "private_medical_records.pdf") stays out of the rotating
-    # daemon.log. log_conversation writes to memory/daily/, which is
-    # 0600 and inside the 0700 daily dir — a fundamentally different
-    # trust boundary than the daemon log — so the filename is fine
-    # there (it's part of the actual conversation transcript). Use the
-    # same delimited shape as the prompt so the recent-dialogue replay
-    # in a fresh session keeps the injection guard intact.
+    # PRIVACY: daemon.log stays metadata-only (chat_id + size). The
+    # sanitized filename is fine in memory/daily/ (0600 file, 0700 dir —
+    # a different trust boundary); use the same delimited shape as the
+    # prompt so a fresh-session dialogue replay keeps the injection guard.
     log(
         "Document prompt: chat=%s size=%s"
         % (chat_id, size_display)
@@ -213,10 +175,9 @@ def dispatch_document(
         f"[document] <document_filename>{safe_name}</document_filename>",
     )
 
-    # Cluster 3: ack ONLY this document's message_id — never the batch's
-    # union. In a multi-document batch each document dispatches
-    # separately, so partitioning here guarantees 👌 lands on the doc
-    # that actually finalized, not on later docs still queued.
+    # Ack ONLY this document's message_id — never the batch union.
+    # Each doc dispatches separately, so 👌 lands on the finalized doc,
+    # not on later docs still queued.
     mid = message.get("message_id")
     ack_ids: List[int] = [mid] if isinstance(mid, int) else []
     daemon._inject_and_dispatch(

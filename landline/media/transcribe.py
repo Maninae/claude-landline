@@ -1,25 +1,17 @@
 """Local voice-note transcription via the whisper CLI.
 
-Pure functional wrapper around the configured whisper binary — no daemon
-state, no side effects beyond the subprocess call and a scratch temp dir
-inside the voice cache.
+Pure functional wrapper: no daemon state; only side effects are the
+subprocess call and a scratch tempdir inside the voice cache.
 
-**Interruptibility (load-bearing):** the caller passes the daemon's
-``PauseFlag`` as ``pause_flag=``. When set, ``transcribe_file`` polls it
-between short ``proc.wait()`` slices and kills whisper on request,
-returning ``error="paused"``. Without this, a 30-90s whisper run would
-starve every other batch (text, photos, /pause) for the full duration
-because dispatch is single-threaded — the operator's "sent voice, sent
-/pause" sequence would sit locked out for a minute before the pause is
-even observed. When ``pause_flag`` is ``None``, we fall back to the
-historic ``subprocess.run`` path — used by existing tests and any
-non-daemon caller where interruption isn't required.
-
-Privacy discipline (load-bearing): this module MUST NOT log transcript
-text. Only metadata (char count, elapsed seconds, error class) may be
-logged. Log lines can be read by future agents and copied into daily
-memory; leaking the transcript defeats the point of doing transcription
-locally in the first place.
+- Interruptibility (load-bearing): callers pass the daemon's ``PauseFlag``
+  as ``pause_flag=``. Whisper runs under ``Popen`` with a polling loop
+  that kills the process on pause and returns ``error="paused"``. Without
+  this a 30-90s run would starve the single-threaded dispatch loop.
+  ``pause_flag=None`` falls back to ``subprocess.run`` (historic path,
+  used by tests and non-daemon callers).
+- Privacy (load-bearing): MUST NOT log transcript text. Only metadata
+  (char count, elapsed, error class) — log lines end up in daily memory
+  and leaking defeats the point of local transcription.
 """
 
 import os
@@ -60,26 +52,20 @@ class TranscribeResult(NamedTuple):
 
 
 class _PauseInterrupted(Exception):
-    """Raised by the interruptible whisper runner when the caller's
-    ``pause_flag`` becomes set. Caught in ``transcribe_file`` and
-    translated to ``TranscribeResult(error="paused")`` — the caller's
-    voice_handler drops the dispatch and lets the pause path route the
-    notice.
+    """Interruptible runner's signal that ``pause_flag`` became set.
+
+    Caught in ``transcribe_file`` → ``TranscribeResult(error="paused")``.
     """
 
 
-# Poll cadence for the interruptible runner. 200ms strikes the balance:
-# fast enough that /pause feels responsive (worst-case ~200ms observed
-# latency between set-flag and whisper-kill), slow enough that a
-# 60-90s transcription only wakes the dispatch thread 300-450 times
-# total. Not exposed via config — this is a pure implementation detail
-# of the polling loop.
+# 200ms poll: /pause latency ≤200ms, dispatch wakes 300-450x per 60-90s run.
 _WHISPER_POLL_INTERVAL_SECONDS = 0.2
 
 
 def _ensure_voice_dir() -> None:
-    """Create the voice cache dir if missing, at 0o700 mode. Mirrors
-    ``download_file``'s dir-prep pattern (no umask; explicit chmod).
+    """Create the voice cache dir at 0o700 if missing.
+
+    Mirrors ``download_file``'s dir-prep (no umask; explicit chmod).
     """
     try:
         TELEGRAM_VOICE_DIR.mkdir(
@@ -97,11 +83,9 @@ def _ensure_voice_dir() -> None:
 
 
 def _read_transcript_from(output_dir: str) -> str:
-    """Read whisper's ``<basename>.txt`` output from ``output_dir``.
+    """Read whisper's ``<audio_stem>.txt`` output; return "" on read error.
 
-    Whisper writes ``<audio_stem>.txt`` next to any other ``--output_format``
-    files. There's exactly one ``.txt`` per invocation, so scan-and-read
-    the first match. Returns "" on any read error.
+    Exactly one ``.txt`` per invocation, so the first match wins.
     """
     try:
         for entry in os.listdir(output_dir):
@@ -114,9 +98,9 @@ def _read_transcript_from(output_dir: str) -> str:
 
 
 def _pause_is_set(pause_flag: Optional[Any]) -> bool:
-    """Read ``pause_flag.is_set()`` defensively — a broken pause_flag
-    must NEVER kill transcription mid-flight (which would be misread as
-    a real user pause and drop the voice note)."""
+    """Defensive ``pause_flag.is_set()`` — a broken flag must NEVER kill
+    transcription (would be misread as a real user pause and drop voice).
+    """
     if pause_flag is None:
         return False
     try:
@@ -131,20 +115,20 @@ def _run_whisper_interruptible(
     pause_flag: Any,
     started_at: float,
 ):
-    """Run whisper via ``Popen`` with a polling wait loop.
+    """Run whisper via ``Popen`` with a polling wait; interruptible on /pause.
 
-    Returns a ``CompletedProcess``-shaped object on normal exit (with
-    ``returncode`` and ``stderr`` populated). Raises
-    ``subprocess.TimeoutExpired`` on wall-clock timeout,
-    ``_PauseInterrupted`` on pause request, ``FileNotFoundError`` if
-    the whisper binary is missing (mirrors ``subprocess.run``'s shape
-    so the outer handler can share one branch).
+    Returns:
+        A ``CompletedProcess``-shaped object on normal exit (matches
+        ``subprocess.run``'s shape so the outer handler shares one branch).
 
-    Kill semantics: on timeout OR pause we ``proc.kill()`` and
-    ``proc.communicate(timeout=2)`` to drain pipes. Whisper on
-    macOS uses ffmpeg internally; kill delivers SIGKILL to the
-    whisper process only, leaving ffmpeg to exit on broken pipe —
-    an accepted trade against the extra complexity of process groups.
+    Raises:
+        ``subprocess.TimeoutExpired`` on wall-clock timeout,
+        ``_PauseInterrupted`` on pause request,
+        ``FileNotFoundError`` when whisper is missing.
+
+    - On timeout or pause: ``proc.kill()`` + ``communicate(timeout=2)``.
+    - SIGKILL only to whisper; ffmpeg (on macOS) exits on broken pipe —
+      accepted trade against process-group complexity.
     """
     try:
         proc = subprocess.Popen(
@@ -165,10 +149,7 @@ def _run_whisper_interruptible(
                 timeout=_WHISPER_POLL_INTERVAL_SECONDS,
             )
             stderr_bytes = stderr or ""
-            # subprocess.CompletedProcess is a NamedTuple-like object
-            # exposing ``.returncode`` / ``.stderr`` — matches the
-            # subprocess.run return shape used by the non-interruptible
-            # path.
+            # Matches subprocess.run's return shape (see docstring).
             return subprocess.CompletedProcess(
                 args=cmd,
                 returncode=proc.returncode,
@@ -177,9 +158,8 @@ def _run_whisper_interruptible(
             )
         except subprocess.TimeoutExpired:
             elapsed = time.time() - started_at
-            # Wall-clock cap: enforce even if pause_flag never fires so
-            # a wedged whisper (torch import hang, corrupt model, ffmpeg
-            # lockup) can't hold the loop forever.
+            # Wall-clock cap: fires even if pause_flag never does, so a
+            # wedged whisper (torch/model/ffmpeg lockup) can't hold forever.
             if elapsed >= timeout_seconds:
                 _kill_and_drain(proc)
                 raise subprocess.TimeoutExpired(
@@ -188,14 +168,14 @@ def _run_whisper_interruptible(
             if _pause_is_set(pause_flag):
                 _kill_and_drain(proc)
                 raise _PauseInterrupted()
-            # Neither timeout nor pause → keep waiting.
             continue
 
 
 def _kill_and_drain(proc) -> None:
-    """Best-effort ``kill()`` + ``communicate(timeout=2)`` to drain
-    pipes so the temp dir cleanup doesn't race a still-writing whisper.
-    NEVER raises."""
+    """Best-effort ``kill()`` + drain pipes; NEVER raises.
+
+    Drain prevents the tempdir cleanup from racing a still-writing whisper.
+    """
     try:
         proc.kill()
     except Exception:
@@ -214,28 +194,26 @@ def transcribe_file(
     timeout_seconds: int,
     pause_flag: Optional[Any] = None,
 ) -> TranscribeResult:
-    """Transcribe ``audio_path`` with the whisper CLI. Never raises.
+    """Transcribe ``audio_path`` with whisper. NEVER raises.
 
-    Runs whisper synchronously; on ANY failure mode (timeout, non-zero
-    exit, missing binary, corrupt model, pause requested, etc.) returns
-    ``TranscribeResult(ok=False, ...)`` with a short ``error`` string.
-    The caller (voice_handler) uses that string to pick a user-facing
-    notice and MUST NOT re-raise.
+    Args:
+        pause_flag: object with ``.is_set() -> bool`` or None. When set,
+            whisper runs under ``Popen`` + 200ms polling and returns
+            ``error="paused"`` on interrupt. None → ``subprocess.run``
+            (historic path used by existing test patches).
 
-    ``pause_flag``: optional object with ``.is_set() -> bool``. When
-    provided, whisper runs under ``Popen`` with a 200ms polling loop
-    that kills the process on pause and returns ``error="paused"``.
-    When ``None`` (or missing), whisper runs via ``subprocess.run`` —
-    the historic path that existing tests patch.
+    Returns:
+        ``TranscribeResult(ok=False, error=<short str>)`` on ANY failure
+        (timeout / non-zero / missing binary / pause). Caller picks the
+        user-facing notice.
 
-    Cleans up its output tmpdir in ``finally``, so a mid-transcribe SIGTERM
-    within launchd's grace window still leaves the voice cache empty.
+    - Cleans up its tempdir in ``finally`` so a mid-transcribe SIGTERM
+      within launchd's grace window still leaves the voice cache empty.
     """
     _ensure_voice_dir()
     started_at = time.time()
-    # Fresh output dir per invocation. Dispatch is single-threaded, so
-    # collisions are impossible in practice; the tmpdir also makes cleanup
-    # a single rmtree.
+    # Fresh output dir per invocation (single-threaded dispatch; tmpdir
+    # makes cleanup a single ``rmtree``).
     try:
         output_dir = tempfile.mkdtemp(
             prefix="whisper_", dir=str(TELEGRAM_VOICE_DIR),
@@ -255,9 +233,8 @@ def transcribe_file(
             "--model_dir", model_dir,
             "--language", language,
             "--task", "transcribe",
-            # False (title-cased) is the correct disable form — whisper
-            # parses this as a Python bool via ast.literal_eval. Lowercase
-            # 'false' is silently ignored.
+            # Title-cased "False" — whisper parses via ast.literal_eval;
+            # lowercase "false" is silently ignored.
             "--fp16", "False",
             "--output_format", "txt",
             "--output_dir", output_dir,
@@ -266,11 +243,8 @@ def transcribe_file(
         ]
         try:
             if pause_flag is None:
-                # Non-interruptible fallback — historic path. Kept so
-                # existing test patches on ``landline.media.transcribe.
-                # subprocess.run`` continue to apply, and so any future
-                # caller without a pause_flag observes the simplest
-                # possible shape.
+                # Historic path: keeps existing subprocess.run test patches
+                # working and gives non-daemon callers the simplest shape.
                 proc = subprocess.run(
                     cmd,
                     capture_output=True,
@@ -303,9 +277,7 @@ def transcribe_file(
             )
         except _PauseInterrupted:
             elapsed = time.time() - started_at
-            # Metadata-only log line — never mention audio_path (a file
-            # name reveals nothing but is still user-adjacent metadata
-            # we don't need in the log).
+            # Metadata-only — never log audio_path.
             log(
                 f"voice_transcribe: interrupted by /pause after {elapsed:.1f}s"
             )
@@ -351,7 +323,7 @@ def transcribe_file(
 
         if len(text) > VOICE_TRANSCRIBE_MAX_TRANSCRIPT_CHARS:
             text = text[:VOICE_TRANSCRIBE_MAX_TRANSCRIPT_CHARS]
-        # Metadata-only log — NEVER include ``text``.
+        # Metadata-only — NEVER include ``text``.
         log(
             "voice_transcribe: whisper OK: %d chars in %.1fs"
             % (len(text), elapsed)
