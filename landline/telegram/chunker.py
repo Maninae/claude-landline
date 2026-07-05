@@ -28,6 +28,49 @@ def _utf16_len(s: str) -> int:
 
 
 # -----------------------------------------------------------------------------
+# Markdown chunking
+# -----------------------------------------------------------------------------
+
+def chunk_text(text: str, limit: int = 4096) -> List[str]:
+    if _utf16_len(text) <= limit:
+        return [text]
+    chunks: List[str] = []
+    remaining = text
+    while remaining:
+        if _utf16_len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        # Find the largest code-point prefix whose UTF-16 length fits `limit`.
+        # Binary-search the code-point index so we never start the search past
+        # the real budget (emoji-heavy strings have UTF-16 len > code-point len).
+        lo, hi = 0, len(remaining)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if _utf16_len(remaining[:mid]) <= limit:
+                lo = mid
+            else:
+                hi = mid - 1
+        window_end = lo  # largest code-point count that fits
+        window = remaining[:window_end]
+        # Quarter threshold expressed in UTF-16 units (matching the budget).
+        quarter = limit // 4
+        cut = window.rfind("\n\n")
+        sep_len = 2
+        if cut < 0 or _utf16_len(window[:cut]) <= quarter:
+            cut = window.rfind("\n")
+            sep_len = 1
+        if cut < 0 or _utf16_len(window[:cut]) <= quarter:
+            cut = window.rfind(" ")
+            sep_len = 1
+        if cut < 0 or _utf16_len(window[:cut]) <= quarter:
+            cut = window_end
+            sep_len = 0
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut + sep_len:]
+    return [c for c in chunks if c]
+
+
+# -----------------------------------------------------------------------------
 # Tag-aware HTML chunker
 # -----------------------------------------------------------------------------
 

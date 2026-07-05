@@ -1,16 +1,18 @@
 """Telegram transport facade — re-exports the public + private surface used by
 the rest of the daemon and the test suite.
 
-The actual implementation now lives in three focused sibling modules:
+The actual implementation now lives in four focused sibling modules:
 
-  - `landline.telegram_transport`  — `telegram_api`, `chunk_text`, `_send_chunk`,
-    `_send_with_retry`, `_parse_retry_after`, `send_response`, `send_typing`,
+  - `landline.telegram.transport`  — `telegram_api`, `_send_chunk`,
+    `_send_with_retry`, `_parse_retry_after`, `send_response`,
     `_TRANSIENT_HTTP_STATUSES` (the HTTP request/retry/429 path).
-  - `landline.html_chunker`        — `_chunk_html`, `_scan_open_tags_at`,
-    `_index_inside_tag`, `_strip_tags`, `_open_simple_tags_at`, `_utf16_len`,
-    `_TAG_RE`, `_REOPENABLE_SIMPLE_TAGS`, `send_html` (the tag-aware chunker
-    + its `send_html` driver).
-  - `landline.telegram_download`   — `download_file` (getFile + bounded streaming).
+  - `landline.telegram.typing`     — `send_typing` + per-thread pooled
+    HTTPSConnection for `sendChatAction` (typing indicator only).
+  - `landline.telegram.chunker`    — `chunk_text` (markdown chunker) plus
+    `_chunk_html`, `_scan_open_tags_at`, `_index_inside_tag`, `_strip_tags`,
+    `_open_simple_tags_at`, `_utf16_len`, `_TAG_RE`, `_REOPENABLE_SIMPLE_TAGS`,
+    `send_html` (the tag-aware HTML chunker + its `send_html` driver).
+  - `landline.telegram.download`   — `download_file` (getFile + bounded streaming).
 
 This file stays as a thin facade so the daemon-wide imports (`from landline.telegram
 import send_response, send_html, …`) and the test suite's patch targets
@@ -26,7 +28,7 @@ from landline.runtime.logging import log
 # tests that exercise the formatting layer directly through `landline.client`.
 from landline.telegram.fmt import md_to_telegram_html
 
-# Tag-aware HTML chunker internals + `send_html`.
+# Markdown + tag-aware HTML chunker internals + `send_html`.
 from landline.telegram.chunker import (
     _REOPENABLE_SIMPLE_TAGS,
     _TAG_RE,
@@ -36,21 +38,22 @@ from landline.telegram.chunker import (
     _scan_open_tags_at,
     _strip_tags,
     _utf16_len,
+    chunk_text,
     send_html,
 )
 
-# Telegram HTTP transport — API call, retry policy, send entry points,
-# markdown chunker.
+# Telegram HTTP transport — API call, retry policy, send entry points.
 from landline.telegram.transport import (
     _TRANSIENT_HTTP_STATUSES,
     _parse_retry_after,
     _send_chunk,
     _send_with_retry,
-    chunk_text,
     send_response,
-    send_typing,
     telegram_api,
 )
+
+# Scoped HTTPS keep-alive typing pool + `send_typing`.
+from landline.telegram.typing import send_typing
 
 # File download — getFile + byte-capped streaming.
 from landline.telegram.download import download_file

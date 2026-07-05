@@ -1120,9 +1120,9 @@ class TestSendTyping:
         """Cluster 5: send_typing uses a pooled http.client.HTTPSConnection
         (not urllib.request.urlopen) on the happy path. Assert the request
         line/body/URL still describe a sendChatAction: typing."""
-        import landline.telegram.transport as tt
+        import landline.telegram.typing as tt
         tt._reset_typing_conn()
-        with patch("landline.telegram.transport.http.client.HTTPSConnection") as mock_cls:
+        with patch("landline.telegram.typing.http.client.HTTPSConnection") as mock_cls:
             fake_conn = MagicMock()
             fake_resp = MagicMock(status=200)
             fake_resp.read.return_value = b'{"ok":true}'
@@ -1149,10 +1149,10 @@ class TestSendTyping:
         both. This is the semantics-preserving contract for the pool
         change (matches pre-cluster behaviour when the network is down).
         """
-        import landline.telegram.transport as tt
+        import landline.telegram.typing as tt
         tt._reset_typing_conn()
         with patch(
-            "landline.telegram.transport.http.client.HTTPSConnection",
+            "landline.telegram.typing.http.client.HTTPSConnection",
             side_effect=Exception("pool network"),
         ), patch(
             "urllib.request.urlopen", side_effect=Exception("fallback network"),
@@ -1273,10 +1273,10 @@ class TestSpoolAndSendTypingPool:
     def test_send_typing_uses_pooled_https_connection(self):
         """Call send_typing twice; assert conn.request called twice on the
         SAME connection instance (no fresh handshake)."""
-        import landline.telegram.transport as tt
+        import landline.telegram.typing as tt
         tt._reset_typing_conn()
         with patch(
-            "landline.telegram.transport.http.client.HTTPSConnection",
+            "landline.telegram.typing.http.client.HTTPSConnection",
         ) as mock_cls:
             fake_conn = MagicMock()
             fake_resp = MagicMock(status=200)
@@ -1294,15 +1294,15 @@ class TestSpoolAndSendTypingPool:
     def test_send_typing_falls_back_on_pool_error(self):
         """First pool call raises; assert one telegram_api fallback call
         and the local conn is reset to None."""
-        import landline.telegram.transport as tt
+        import landline.telegram.typing as tt
         tt._reset_typing_conn()
         # Build a real conn placeholder, then mock the pool to raise on
         # first request(); the fallback path goes through telegram_api →
         # urllib.request.urlopen.
         with patch(
-            "landline.telegram.transport.http.client.HTTPSConnection",
+            "landline.telegram.typing.http.client.HTTPSConnection",
         ) as mock_cls, patch(
-            "landline.telegram.transport.telegram_api",
+            "landline.telegram.typing.telegram_api",
         ) as mock_api:
             fake_conn = MagicMock()
             fake_conn.request.side_effect = OSError("stale keepalive")
@@ -1320,14 +1320,14 @@ class TestSpoolAndSendTypingPool:
         """Spawn two threads calling send_typing; each has its own
         _typing_conn_local.conn."""
         import threading
-        import landline.telegram.transport as tt
+        import landline.telegram.typing as tt
         tt._reset_typing_conn()
         seen_conns = []
         lock = threading.Lock()
 
         def worker():
             with patch(
-                "landline.telegram.transport.http.client.HTTPSConnection",
+                "landline.telegram.typing.http.client.HTTPSConnection",
             ) as mock_cls:
                 fake_conn = MagicMock()
                 fake_resp = MagicMock(status=200)
