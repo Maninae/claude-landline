@@ -1,8 +1,8 @@
 """Back-compat shim: external consumers still import ``landline.telegram_fmt``.
 
 The formatter now lives at ``landline.telegram.fmt``. This shim re-exports
-its public surface so ~/.mineru cron scripts (and any other external
-importer of the old path) keep working.
+its public surface so out-of-tree callers of the old import path (cron and
+delivery scripts living outside this repo) keep working.
 """
 
 from landline.telegram.fmt import *  # noqa: F401,F403

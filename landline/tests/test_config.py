@@ -274,9 +274,9 @@ def test_daily_log_dir_mode_is_owner_only():
 def test_daily_log_file_mode_is_owner_only():
     """Daily-log file mode (0o600, owner read/write only).
 
-    The daily logs contain unredacted PII (passphrase-typing context, family
-    details, medical/legal/work content). Fails on revert if the mode is
-    relaxed to anything world- or group-readable.
+    The daily logs contain unredacted sensitive operator content, so the
+    mode is a security invariant. Fails on revert if it is relaxed to
+    anything world- or group-readable.
     """
     from landline.config import DAILY_LOG_FILE_MODE
     assert DAILY_LOG_FILE_MODE == 0o600
