@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "claude-landline"
 version = "0.1.0"
-description = "Landline — a Telegram phone line to the Claude Code agent living on your machine."
+description = "A Telegram phone line to the Claude Code agent living on your machine."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
