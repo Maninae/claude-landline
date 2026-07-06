@@ -40,6 +40,8 @@ def allowed_chat_ids() -> Set[str]:
         if _cached_allowed is not None:
             # Distinguish locked (transient, actionable) from absent/error
             # (misconfiguration) so the log points at the right fix.
+            # stderr on purpose, not log(): launchd captures it via
+            # StandardErrorPath, and the guard tests assert on captured.err.
             if status == "locked":
                 print(
                     "telegram_guard: keychain locked — keeping cached allowlist "
