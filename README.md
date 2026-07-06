@@ -1,4 +1,4 @@
-<h1 align="center">Landline</h1>
+<h1 align="center">claude-landline</h1>
 
 <p align="center"><strong>A phone line to the Claude Code agent living on your machine.</strong></p>
 
