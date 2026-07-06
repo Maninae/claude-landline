@@ -72,12 +72,14 @@ class TestLoadOverridesApplies:
             "claude_model": None,
             "timezone": None,
             "morning_brief_glob": None,
+            "doctor_script": None,
         }))
         from landline.config import _load_overrides
         result = _load_overrides(tmp_path)
         assert result["claude_model"] is None
         assert result["timezone"] is None
         assert result["morning_brief_glob"] is None
+        assert result["doctor_script"] is None
 
 
 class TestLoadOverridesPathExpansion:
@@ -86,6 +88,7 @@ class TestLoadOverridesPathExpansion:
             "claude_binary": "~/tools/claude",
             "whisper_bin": "~/tools/whisper",
             "whisper_model_dir": "~/cache/whisper",
+            "doctor_script": "~/tools/doctor.sh",
         }))
         from landline.config import _load_overrides
         result = _load_overrides(tmp_path)
@@ -93,6 +96,7 @@ class TestLoadOverridesPathExpansion:
         assert result["claude_binary"] == home + "/tools/claude"
         assert result["whisper_bin"] == home + "/tools/whisper"
         assert result["whisper_model_dir"] == home + "/cache/whisper"
+        assert result["doctor_script"] == home + "/tools/doctor.sh"
 
 
 class TestLoadOverridesFailFast:
@@ -139,6 +143,14 @@ class TestLoadOverridesFailFast:
     def test_type_mismatch_nullable_key_raises_system_exit(self, tmp_path):
         (tmp_path / "landline.json").write_text(json.dumps({
             "claude_model": 3,
+        }))
+        from landline.config import _load_overrides
+        with pytest.raises(SystemExit):
+            _load_overrides(tmp_path)
+
+    def test_type_mismatch_doctor_script_raises_system_exit(self, tmp_path):
+        (tmp_path / "landline.json").write_text(json.dumps({
+            "doctor_script": ["not", "a", "path"],
         }))
         from landline.config import _load_overrides
         with pytest.raises(SystemExit):

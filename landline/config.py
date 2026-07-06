@@ -76,6 +76,7 @@ _ALLOWED_KEYS = {
     "timezone": _v_str_or_none,
     "launchd_label_prefix": _v_str,
     "morning_brief_glob": _v_str_or_none,
+    "doctor_script": _v_path_or_none,
     "whisper_bin": _v_path_str,
     "whisper_model": _v_str,
     "whisper_model_dir": _v_path_str,
@@ -201,6 +202,12 @@ LAUNCHD_LABEL_PREFIX = _cfg("launchd_label_prefix", "com.landline")
 # Glob (WORKSPACE-relative) for "morning brief" files surfaced by /status.
 # ``None`` skips the briefs line entirely.
 MORNING_BRIEF_GLOB = _cfg("morning_brief_glob", None)
+
+# Optional /doctor handler: an executable the router spawns DETACHED with the
+# operator's issue text as argv[1]. The doctor owns its own logging and report
+# delivery; the router only launches it. ``None`` disables /doctor (the
+# command replies with setup guidance instead).
+DOCTOR_SCRIPT = _cfg("doctor_script", None)
 
 # Whisper CLI defaults; bare name works when on PATH.
 WHISPER_BIN = _cfg("whisper_bin", "whisper")

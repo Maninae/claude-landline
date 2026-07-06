@@ -394,3 +394,97 @@ class TestStatusUsageStatsLine:
             text = _status_text(state, lm, tmp_workspace)
         assert "Today:" not in text
         assert "Session:" in text
+
+
+class TestDoctorCommand:
+    """/doctor — detached spawn of the configured doctor script."""
+
+    def _make_router(self, workspace=None, locked=False):
+        import time as _time
+        state = {"session_id": None, "turn_count": 0}
+        persist_fn = MagicMock()
+        lm = LockManager(persist_fn)
+        lm.restore_from_state({
+            "failed_unlock_attempts": 0,
+            "unlock_lockout_until": 0.0,
+            # A fresh (recent) unlock timestamp restores UNLOCKED; 0.0 → LOCKED.
+            "unlock_timestamp": 0.0 if locked else _time.time(),
+        })
+        return CommandRouter(
+            state, lm, persist_fn, workspace or Path("/tmp/test-workspace"),
+        )
+
+    def test_locked_session_refuses_doctor(self, monkeypatch, tmp_path):
+        script = tmp_path / "doctor.sh"
+        script.write_text("#!/bin/bash\n")
+        monkeypatch.setattr(
+            "landline.runtime.commands.DOCTOR_SCRIPT", str(script)
+        )
+        router = self._make_router(workspace=tmp_path, locked=True)
+        with patch("landline.runtime.commands.subprocess.Popen") as popen:
+            result = router.handle("/doctor anything")
+        assert "unlock" in result.lower()
+        popen.assert_not_called()
+
+    def test_unconfigured_returns_setup_guidance(self, monkeypatch):
+        monkeypatch.setattr("landline.runtime.commands.DOCTOR_SCRIPT", None)
+        router = self._make_router()
+        with patch("landline.runtime.commands.subprocess.Popen") as popen:
+            result = router.handle("/doctor something is broken")
+        assert "doctor_script" in result
+        popen.assert_not_called()
+
+    def test_missing_script_reports_not_found(self, monkeypatch, tmp_path):
+        missing = tmp_path / "nope.sh"
+        monkeypatch.setattr(
+            "landline.runtime.commands.DOCTOR_SCRIPT", str(missing)
+        )
+        router = self._make_router()
+        with patch("landline.runtime.commands.subprocess.Popen") as popen:
+            result = router.handle("/doctor")
+        assert "not found" in result
+        popen.assert_not_called()
+
+    def test_spawns_detached_with_issue_text_as_single_argv(
+        self, monkeypatch, tmp_path
+    ):
+        script = tmp_path / "doctor.sh"
+        script.write_text("#!/bin/bash\n")
+        monkeypatch.setattr(
+            "landline.runtime.commands.DOCTOR_SCRIPT", str(script)
+        )
+        router = self._make_router(workspace=tmp_path)
+        with patch("landline.runtime.commands.subprocess.Popen") as popen:
+            result = router.handle("/doctor morning brief came in empty")
+        assert "dispatched" in result.lower()
+        (argv,), kwargs = popen.call_args
+        assert argv == [str(script), "morning brief came in empty"]
+        assert kwargs["start_new_session"] is True
+        assert kwargs["cwd"] == str(tmp_path)
+
+    def test_no_issue_text_spawns_with_bare_argv(self, monkeypatch, tmp_path):
+        script = tmp_path / "doctor.sh"
+        script.write_text("#!/bin/bash\n")
+        monkeypatch.setattr(
+            "landline.runtime.commands.DOCTOR_SCRIPT", str(script)
+        )
+        router = self._make_router(workspace=tmp_path)
+        with patch("landline.runtime.commands.subprocess.Popen") as popen:
+            result = router.handle("/doctor")
+        assert "dispatched" in result.lower()
+        (argv,), _kwargs = popen.call_args
+        assert argv == [str(script)]
+
+    def test_spawn_failure_returns_error_not_raise(self, monkeypatch, tmp_path):
+        script = tmp_path / "doctor.sh"
+        script.write_text("#!/bin/bash\n")
+        monkeypatch.setattr(
+            "landline.runtime.commands.DOCTOR_SCRIPT", str(script)
+        )
+        router = self._make_router(workspace=tmp_path)
+        with patch(
+            "landline.runtime.commands.subprocess.Popen",
+            side_effect=OSError("no fds"),
+        ):
+            result = router.handle("/doctor anything")
+        assert "Failed to launch" in result

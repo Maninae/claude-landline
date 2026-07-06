@@ -1,4 +1,4 @@
-"""Command handlers for /new, /status, and unknown commands.
+"""Command handlers for /new, /status, /doctor, and unknown commands.
 
 Accepts its dependencies explicitly — no coupling to the orchestrator class.
 """
@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from landline.config import (
     AGENT_NAME,
+    DOCTOR_SCRIPT,
     LAUNCHD_LABEL_PREFIX,
     MORNING_BRIEF_GLOB,
     WORKSPACE,
@@ -125,7 +126,55 @@ class CommandRouter:
         if cmd == "/status":
             return _status_text(self._state, self._lock_manager, self._workspace)
 
+        if cmd == "/doctor":
+            return self._handle_doctor(arg)
+
         return f"Unknown command: {cmd}"
+
+    def _handle_doctor(self, issue_text: str) -> str:
+        """Launch the configured doctor script detached and ack immediately.
+
+        The doctor is a separate diagnostic session with its own logging and
+        report delivery — the router only spawns it. Detached via
+        ``start_new_session`` so a daemon restart can't kill a run in flight,
+        and streams go to DEVNULL so the child can never block on a dead pipe.
+        The operator's issue text rides as a single argv element (no shell).
+
+        Lock-gated: unlike /status, the doctor can CHANGE the system (it
+        applies safe fixes), so a locked session may not launch it.
+        """
+        if self._lock_manager.is_locked:
+            return "🩺 /doctor is available after unlock."
+        if not DOCTOR_SCRIPT:
+            return (
+                "🩺 /doctor isn't configured. Set \"doctor_script\" in "
+                "landline.json to an executable that runs the diagnostic "
+                "session (see docs/SETUP.md)."
+            )
+        script = Path(DOCTOR_SCRIPT)
+        if not script.exists():
+            return f"🩺 doctor_script not found: {script}"
+        argv = [str(script)]
+        if issue_text:
+            argv.append(issue_text)
+        try:
+            subprocess.Popen(
+                argv,
+                cwd=str(self._workspace),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as spawn_error:
+            log(f"/doctor: spawn failed: {spawn_error}")
+            return f"🩺 Failed to launch the doctor: {spawn_error}"
+        # PII rule: log the dispatch and the text's size, never the text.
+        log(f"/doctor dispatched ({len(issue_text)} chars of issue text)")
+        return (
+            "🩺 Doctor session dispatched. The report will arrive here when "
+            "it finishes (typically a few minutes)."
+        )
 
     def _handle_new(self) -> str:
         """Reset session state, re-lock, and reset the live Claude subprocess.
