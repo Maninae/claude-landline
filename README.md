@@ -55,13 +55,13 @@ Landline keeps that agent always-on. Send it a question from the train, or kick 
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TD
     TG[Telegram] -->|long poll| P[Background poller]
     P -->|update queue| M[Main loop]
     M -->|stdin, stream-json| C[Claude Code subprocess]
     C -->|stdout| SP[StreamPump]
     SP --> SS[Per-chat StreamSender]
-    SS -->|spool, then send| TG
+    SS -->|persist to spool, then send| TG
 ```
 
 A single-threaded main loop reads Telegram updates from a background poller, classifies them, and dispatches to one persistent Claude Code subprocess. `StreamPump` drains that subprocess's stdout and routes each turn's output to a per-chat sender, which delivers to Telegram through a persist-first spool.
