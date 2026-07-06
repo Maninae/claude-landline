@@ -1,7 +1,9 @@
 #!/bin/bash
 # Landline daemon watchdog — secondary safety net for when launchd fails.
 # Runs on an interval via its own launchd plist. If the daemon plist isn't
-# loaded, re-bootstraps it and fires an iMessage alert.
+# loaded, re-bootstraps it and alerts the operator: Telegram Bot API first
+# (Keychain services telegram-bot-token + telegram-chat-id), iMessage as the
+# fallback (osascript from launchd contexts times out ~half the time).
 #
 # Config via env:
 #   LANDLINE_WORKSPACE          agent workspace (default: $HOME/.landline)
@@ -45,6 +47,49 @@ if launchctl list "$LANDLINE_LABEL" &>/dev/null; then
     exit 0
 fi
 
+# send_alert <message>
+#
+# Telegram Bot API first (plain HTTPS; the daemon being down doesn't affect
+# the API, and it's the channel the operator actually reads). iMessage is the
+# fallback only: AppleEvents from a launchd context time out roughly half the
+# time (error -1712), which is why it can't be the primary channel.
+# Every outcome is logged truthfully — a failed send must never log as sent.
+send_alert() {
+    local msg="$1"
+    local delivered=0
+
+    local token chat_id
+    token=$(security find-generic-password \
+        -a "$LANDLINE_KEYCHAIN_ACCOUNT" -s telegram-bot-token -w 2>/dev/null)
+    chat_id=$(security find-generic-password \
+        -a "$LANDLINE_KEYCHAIN_ACCOUNT" -s telegram-chat-id -w 2>/dev/null)
+    if [[ -n "$token" && -n "$chat_id" ]]; then
+        # URL via `curl -K -` on stdin keeps the bot token out of argv (ps-visible).
+        local response
+        response=$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" | \
+            curl -sS -m 15 -K - \
+                --data-urlencode "chat_id=${chat_id}" \
+                --data-urlencode "text=${msg}" 2>>"$LANDLINE_WATCHDOG_LOG")
+        if [[ "$response" == *'"ok":true'* ]]; then
+            log "Sent Telegram alert"
+            delivered=1
+        else
+            log "Telegram alert send FAILED"
+        fi
+    else
+        log "Telegram alert skipped (telegram-bot-token / telegram-chat-id not in Keychain)"
+    fi
+
+    if [[ "$delivered" -eq 0 && -n "$OWNER_HANDLE" ]]; then
+        if osascript -e "tell application \"Messages\" to send \"$msg\" to participant \"$OWNER_HANDLE\"" \
+                2>>"$LANDLINE_WATCHDOG_LOG"; then
+            log "Sent iMessage alert (fallback)"
+        else
+            log "iMessage alert send FAILED"
+        fi
+    fi
+}
+
 # NOT loaded in launchd — the failure case this watchdog exists for.
 log "ALERT: $LANDLINE_LABEL not loaded in launchd. Re-bootstrapping..."
 
@@ -56,8 +101,4 @@ else
     MSG="[Landline watchdog] $LANDLINE_LABEL crashed and FAILED to relaunch at $(date '+%Y-%m-%d %H:%M:%S'). Manual intervention needed."
 fi
 
-# Notify via iMessage
-if [[ -n "$OWNER_HANDLE" ]]; then
-    osascript -e "tell application \"Messages\" to send \"$MSG\" to participant \"$OWNER_HANDLE\"" 2>>"$LANDLINE_WATCHDOG_LOG" || true
-    log "Sent iMessage alert"
-fi
+send_alert "$MSG"
