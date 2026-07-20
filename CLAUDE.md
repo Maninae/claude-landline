@@ -395,6 +395,20 @@ walkthrough (workspace `~/.landline`, plist
 `com.landline.telegram-daemon`), so a stock install runs
 `./deploy/restart.sh` with no env vars.
 
+**Restarting from within the daemon's own Claude session: detach or die.**
+`bootout` tears down the whole launchd job tree, and the daemon's SIGTERM
+handler `terminate()`s its active Claude subprocess (`streaming.py`). A plain
+foreground `restart.sh` launched *by that subprocess* is itself in the doomed
+tree, so it can be SIGKILLed mid-run (before `bootstrap`), leaving the daemon
+down until the watchdog recovers it. When the caller IS the daemon's own Claude
+session (e.g. an agent asked to deploy a change), spawn the restart **detached**
+so it outlives the bootout: `subprocess.Popen([...], start_new_session=True,
+stdin=DEVNULL, stdout=<log>, stderr=STDOUT)`, the exact pattern
+`runtime/commands.py` uses for `/doctor`. The continuation file
+(`cache/restart-continuation.txt`) then resumes the session after the bounce. An
+external caller (the operator's own terminal) is already outside the job tree
+and needs no special handling.
+
 ## Do NOT
 
 - Use `rm` — use `trash` for safe deletion.
