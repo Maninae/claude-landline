@@ -83,6 +83,7 @@ _ALLOWED_KEYS = {
     "whisper_language": _v_str,
     "reaction_acks_enabled": _v_bool,
     "rejection_mode": _v_str,
+    "archive_extractor": _v_path_or_none,
 }
 
 
@@ -225,6 +226,18 @@ REACTION_ACKS_ENABLED = _cfg("reaction_acks_enabled", True)
 REJECTION_MODE = _cfg("rejection_mode", "silent")
 REJECTION_TEXT = "This bot is private."
 
+# Optional archive-extractor executable. Feature is OFF unless the deployer
+# points this at a real binary in landline.json (e.g. a mineru-side
+# safe-unzip). Contract the wrapper depends on:
+#   <extractor> <archive.zip> --json [--dest DIR]
+#   stdout = JSON manifest {"verdict":..., "dest":..., "extracted":[{"name":..,"size":..,"type":..}], "skipped":[...], ...}
+#   exit 0 = extracted (extracted[] may be empty), 77 = archive rejected wholesale
+#   (with a reject_reason slug), 78 = tool error.
+# Left as an OPTIONAL path so the public daemon defaults to zip-off: a
+# deployer without a trusted extractor never accepts a .zip. See
+# landline/media/extract.py for the wrapper + failure branching.
+ARCHIVE_EXTRACTOR = _cfg("archive_extractor", None)
+
 # ---------------------------------------------------------------------------
 # Poll / Claude / typing timing
 # ---------------------------------------------------------------------------
@@ -300,10 +313,14 @@ SESSION_JSONL_TAIL_BYTES = 32768
 TELEGRAM_IMAGE_DIR = WORKSPACE / "cache" / "telegram_images"
 TELEGRAM_FILE_DIR = WORKSPACE / "cache" / "telegram_files"
 TELEGRAM_VOICE_DIR = WORKSPACE / "cache" / "telegram_voice"
+# Per-archive extraction lands under here in its own 0o700 subdir. Swept
+# alongside the other media caches at startup (same 24h window).
+TELEGRAM_ARCHIVE_DIR = WORKSPACE / "cache" / "telegram_archives"
 TELEGRAM_FILE_SIZE_LIMIT = 20 * 1024 * 1024  # 20MB - Telegram getFile limit
 TELEGRAM_IMAGE_RETENTION_HOURS = 24  # Sweep cached photos older than this at startup
 TELEGRAM_FILE_RETENTION_HOURS = 24  # Sweep cached documents older than this at startup
 TELEGRAM_VOICE_RETENTION_HOURS = 24  # Sweep cached voice notes older than this at startup
+TELEGRAM_ARCHIVE_RETENTION_HOURS = 24  # Sweep extracted zip contents older than this at startup
 MEDIA_GROUP_WAIT_SECONDS = 1.5  # Time to wait for album photos to arrive
 
 # ---------------------------------------------------------------------------
@@ -314,29 +331,53 @@ MEDIA_GROUP_WAIT_SECONDS = 1.5  # Time to wait for album photos to arrive
 DOCUMENT_MAX_SIZE_BYTES = 20 * 1024 * 1024
 
 # Case-insensitive extension check is the PRIMARY content-type gate.
-DOCUMENT_ALLOWED_EXTENSIONS = frozenset({
+# ``.zip`` is admitted ONLY when a deployer has wired ``archive_extractor`` in
+# landline.json — the public daemon must never accept an archive it can't
+# process. The extension gate is the primary hop; the mime tuple below is
+# adjusted in lockstep so Telegram's ``application/zip`` mime also passes.
+_BASE_DOCUMENT_EXTENSIONS = frozenset({
     ".pdf", ".txt", ".md", ".csv", ".json", ".log", ".tsv", ".yaml", ".yml",
 })
+DOCUMENT_ALLOWED_EXTENSIONS = (
+    _BASE_DOCUMENT_EXTENSIONS | frozenset({".zip"})
+    if ARCHIVE_EXTRACTOR
+    else _BASE_DOCUMENT_EXTENSIONS
+)
 
 # Belt-and-suspenders mime check when Telegram supplies mime_type; missing
 # mime does NOT block acceptance.
-DOCUMENT_ALLOWED_MIME_PREFIXES = (
+_BASE_DOCUMENT_MIME_PREFIXES = (
     "text/",
     "application/pdf",
     "application/json",
     "application/x-yaml",
     "application/x-ndjson",
 )
+DOCUMENT_ALLOWED_MIME_PREFIXES = (
+    _BASE_DOCUMENT_MIME_PREFIXES + (
+        "application/zip", "application/x-zip-compressed",
+    )
+    if ARCHIVE_EXTRACTOR
+    else _BASE_DOCUMENT_MIME_PREFIXES
+)
 
 # Cache dirs iterated by ``sweep_media_caches`` at startup.
-MEDIA_CACHE_DIRS = (TELEGRAM_IMAGE_DIR, TELEGRAM_FILE_DIR, TELEGRAM_VOICE_DIR)
+MEDIA_CACHE_DIRS = (
+    TELEGRAM_IMAGE_DIR,
+    TELEGRAM_FILE_DIR,
+    TELEGRAM_VOICE_DIR,
+    TELEGRAM_ARCHIVE_DIR,
+)
 
 # Per-cache retention — each dir gets its own window so voice-note privacy
 # (raw audio + transcript) tunes independently of PDF/image retention.
+# Archives get the same 24h window as the other file caches; each per-archive
+# subdir is 0o700 and swept as one unit (dir-mtime → rmtree).
 MEDIA_CACHE_RETENTION_HOURS = {
     TELEGRAM_IMAGE_DIR: TELEGRAM_IMAGE_RETENTION_HOURS,
     TELEGRAM_FILE_DIR: TELEGRAM_FILE_RETENTION_HOURS,
     TELEGRAM_VOICE_DIR: TELEGRAM_VOICE_RETENTION_HOURS,
+    TELEGRAM_ARCHIVE_DIR: TELEGRAM_ARCHIVE_RETENTION_HOURS,
 }
 
 # 0700 for media cache dirs (workspace-wide "no umask, chmod each dir" invariant).
@@ -469,6 +510,23 @@ VOICE_TRANSCRIBE_TIMEOUT_SECONDS = 90
 # that emit tens of thousands of repeated chars on silence/noise.
 VOICE_TRANSCRIBE_MAX_TRANSCRIPT_CHARS = 8000
 VOICE_ACCEPT_TYPES = frozenset({"voice", "audio", "video_note"})
+
+# ---------------------------------------------------------------------------
+# Archive extraction (zip)
+# ---------------------------------------------------------------------------
+# 60s hard wall-clock cap on the extractor subprocess. Not a landline.json
+# knob — a bigger cap would let a wedged extractor starve dispatch, and a
+# smaller one would false-timeout on a valid, close-to-cap archive. If a
+# deployer needs to tune this later, promote it to _cfg then. Mirrors the
+# whisper timeout constant's shape.
+ARCHIVE_EXTRACT_TIMEOUT_SECONDS = 60
+# Cap on <document_path> lines surfaced in one archive prompt. safe-unzip
+# admits up to 1024 entries; a 1024-path frame is ~150 KB into one turn.
+# 200 covers any real archive we'd actually process while bounding the
+# prompt so a hostile "many small files" zip can't blow up dispatch cost.
+# Overflow renders a compact "N more files omitted" tail — the caller
+# still gets the shape of the archive.
+ARCHIVE_PROMPT_MAX_PATHS = 200
 
 # ---------------------------------------------------------------------------
 # Reaction ACKs (Telegram Bot API 7.0+ setMessageReaction)

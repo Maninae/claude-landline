@@ -306,3 +306,107 @@ class TestConstantsDerivedFromOverrides:
                 tmp_path,
                 "from landline import config",  # importing raises SystemExit
             )
+
+
+class TestArchiveExtractorGates:
+    """The public daemon must NEVER accept a ``.zip`` unless the deployer
+    wired ``archive_extractor``. Extension gate AND mime tuple both flip
+    on ARCHIVE_EXTRACTOR so a real Telegram document envelope
+    (``application/zip``) also passes the belt-and-suspenders mime check.
+    """
+
+    def test_absent_extractor_omits_zip_from_extensions(self, tmp_path):
+        """No landline.json → ARCHIVE_EXTRACTOR is None → .zip is NOT in
+        the allowlist. The public daemon rejects zips it can't process."""
+        probe = (
+            "from landline import config; "
+            "import json, sys; "
+            "sys.stdout.write(json.dumps({"
+            "'ext': sorted(config.DOCUMENT_ALLOWED_EXTENSIONS), "
+            "'mimes': list(config.DOCUMENT_ALLOWED_MIME_PREFIXES), "
+            "'ax': config.ARCHIVE_EXTRACTOR, "
+            "}))"
+        )
+        out = _run_config_probe(tmp_path, probe)
+        data = json.loads(out)
+        assert data["ax"] is None
+        assert ".zip" not in data["ext"]
+        assert "application/zip" not in data["mimes"]
+        assert "application/x-zip-compressed" not in data["mimes"]
+
+    def test_present_extractor_admits_zip(self, tmp_path):
+        """Deployer wires archive_extractor → .zip AND both zip mime
+        prefixes join the allowlist."""
+        fake_extractor = tmp_path / "fake-safe-unzip"
+        fake_extractor.write_text("#!/bin/sh\n", encoding="utf-8")
+        (tmp_path / "landline.json").write_text(json.dumps({
+            "archive_extractor": str(fake_extractor),
+        }))
+        probe = (
+            "from landline import config; "
+            "import json, sys; "
+            "sys.stdout.write(json.dumps({"
+            "'ext': sorted(config.DOCUMENT_ALLOWED_EXTENSIONS), "
+            "'mimes': list(config.DOCUMENT_ALLOWED_MIME_PREFIXES), "
+            "'ax': config.ARCHIVE_EXTRACTOR, "
+            "}))"
+        )
+        out = _run_config_probe(tmp_path, probe)
+        data = json.loads(out)
+        assert data["ax"] == str(fake_extractor)
+        assert ".zip" in data["ext"]
+        assert "application/zip" in data["mimes"]
+        assert "application/x-zip-compressed" in data["mimes"]
+
+    def test_archive_extractor_expanduser(self, tmp_path):
+        """``archive_extractor`` uses ``_v_path_or_none`` so ``~`` expands."""
+        (tmp_path / "landline.json").write_text(json.dumps({
+            "archive_extractor": "~/tools/safe-unzip",
+        }))
+        from landline.config import _load_overrides
+        result = _load_overrides(tmp_path)
+        home = os.path.expanduser("~")
+        assert result["archive_extractor"] == home + "/tools/safe-unzip"
+
+    def test_null_archive_extractor_is_valid(self, tmp_path):
+        """Explicit ``null`` is the same as absent — feature off."""
+        (tmp_path / "landline.json").write_text(json.dumps({
+            "archive_extractor": None,
+        }))
+        from landline.config import _load_overrides
+        assert _load_overrides(tmp_path)["archive_extractor"] is None
+
+    def test_type_mismatch_archive_extractor_raises_system_exit(self, tmp_path):
+        (tmp_path / "landline.json").write_text(json.dumps({
+            "archive_extractor": ["not", "a", "path"],
+        }))
+        from landline.config import _load_overrides
+        with pytest.raises(SystemExit):
+            _load_overrides(tmp_path)
+
+    def test_archive_cache_dir_present_in_media_cache_dirs(self, tmp_path):
+        """``TELEGRAM_ARCHIVE_DIR`` is registered for the startup sweep
+        regardless of whether the extractor is wired — if the operator
+        later flips the extractor on, sweeps must already cover it, and
+        if they flip it back off, stale archives should still get swept.
+        """
+        probe = (
+            "from landline import config; "
+            "import json, sys; "
+            "sys.stdout.write(json.dumps({"
+            "'archive_dir_registered': "
+            "  config.TELEGRAM_ARCHIVE_DIR in config.MEDIA_CACHE_DIRS, "
+            "'archive_dir_has_retention': "
+            "  config.TELEGRAM_ARCHIVE_DIR in config.MEDIA_CACHE_RETENTION_HOURS, "
+            "'timeout_positive': config.ARCHIVE_EXTRACT_TIMEOUT_SECONDS > 0, "
+            "'archive_dir_str': str(config.TELEGRAM_ARCHIVE_DIR), "
+            "'workspace_str': str(config.WORKSPACE), "
+            "}))"
+        )
+        out = _run_config_probe(tmp_path, probe)
+        data = json.loads(out)
+        assert data["archive_dir_registered"] is True
+        assert data["archive_dir_has_retention"] is True
+        assert data["timeout_positive"] is True
+        assert data["archive_dir_str"].endswith("/cache/telegram_archives")
+        assert data["archive_dir_str"].startswith(data["workspace_str"])
