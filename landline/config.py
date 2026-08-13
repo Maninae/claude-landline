@@ -255,7 +255,7 @@ UNLOCK_LOCKOUT_SECONDS = 300
 # 1h hard cap on exponentially-escalated lockout (OWASP ASVS V3.3.5 — escalate
 # AND bound so legitimate users always recover). See docs/ARCHITECTURE.md.
 UNLOCK_LOCKOUT_MAX_SECONDS = 3600
-UNLOCK_DURATION_SECONDS = 345600
+UNLOCK_DURATION_SECONDS = 604800  # 7 days
 
 # ---------------------------------------------------------------------------
 # Context / window / streaming buffers
