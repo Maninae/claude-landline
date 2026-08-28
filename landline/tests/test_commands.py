@@ -1,11 +1,17 @@
-"""Tests for landline.runtime.commands — CommandRouter, _parse_command, _status_text."""
+"""Tests for landline.runtime.commands — CommandRouter, _parse_command, _status_text, _context_text."""
 
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 
-from landline.runtime.commands import _parse_command, _status_text, CommandRouter
+from landline.runtime.commands import (
+    _parse_command,
+    _status_text,
+    _context_text,
+    _fmt_tokens,
+    CommandRouter,
+)
 from landline.runtime.lock import LockManager
 
 
@@ -102,6 +108,89 @@ class TestStatusText:
         assert "morning-2026-05-10.md" in text
 
 
+class TestFmtTokens:
+    def test_millions(self):
+        assert _fmt_tokens(1_000_000) == "1.0M"
+        assert _fmt_tokens(1_500_000) == "1.5M"
+
+    def test_thousands(self):
+        assert _fmt_tokens(620_400) == "620.4k"
+        assert _fmt_tokens(1_000) == "1.0k"
+
+    def test_small(self):
+        assert _fmt_tokens(500) == "500"
+        assert _fmt_tokens(0) == "0"
+
+    def test_boundaries(self):
+        assert _fmt_tokens(999) == "999"
+        # 999_999 would render as "1000.0k"; must promote to "1.0M".
+        assert _fmt_tokens(999_999) == "1.0M"
+
+
+class TestContextText:
+    def test_no_session_shows_notice(self):
+        text = _context_text({"session_id": None, "turn_count": 0})
+        assert "No active session" in text
+
+    def test_session_without_usage_shows_notice(self):
+        with patch(
+            "landline.runtime.commands.get_context_percent", return_value=None,
+        ):
+            text = _context_text({"session_id": "abcdefghijklmnop", "turn_count": 3})
+        assert "No usage recorded yet" in text
+        assert "abcdefghijkl..." in text
+
+    def test_reports_tokens_percent_and_turns(self):
+        with patch(
+            "landline.runtime.commands.get_context_percent", return_value=62.04,
+        ):
+            text = _context_text({"session_id": "abcdefghijklmnop", "turn_count": 147})
+        assert "620.4k" in text
+        assert "1.0M" in text
+        assert "(62%)" in text
+        assert "147 turns" in text
+        assert "abcdefghijkl..." in text
+
+    def test_health_dot_thresholds(self):
+        def render(pct):
+            with patch(
+                "landline.runtime.commands.get_context_percent", return_value=pct,
+            ):
+                return _context_text({"session_id": "x" * 16, "turn_count": 1})
+        assert "🟢" in render(20.0)
+        assert "🟡" in render(55.0)
+        assert "🔴" in render(85.0)
+        # Boundaries: 50 -> yellow (getting full), 70 -> red (near limit).
+        assert "🟡" in render(50.0)
+        assert "🔴" in render(70.0)
+
+    def test_display_and_dot_agree_at_rounding_boundary(self):
+        # 49.6% rounds to 50 -> shown as "(50%)" AND bucketed yellow, no mismatch.
+        with patch(
+            "landline.runtime.commands.get_context_percent", return_value=49.6,
+        ):
+            text = _context_text({"session_id": "x" * 16, "turn_count": 2})
+        assert "(50%)" in text
+        assert "🟡" in text
+
+    def test_over_100_percent_stays_sane(self):
+        with patch(
+            "landline.runtime.commands.get_context_percent", return_value=105.7,
+        ):
+            text = _context_text({"session_id": "x" * 16, "turn_count": 2})
+        assert "1.1M" in text
+        assert "(106%)" in text
+        assert "🔴" in text
+
+    def test_singular_turn_grammar(self):
+        with patch(
+            "landline.runtime.commands.get_context_percent", return_value=40.0,
+        ):
+            text = _context_text({"session_id": "x" * 16, "turn_count": 1})
+        assert text.endswith("· 1 turn")
+        assert "1 turns" not in text
+
+
 class TestCommandRouter:
     def _make_router(
         self,
@@ -179,6 +268,22 @@ class TestCommandRouter:
         result = router.handle("/status")
         assert result is not None
         assert AGENT_NAME in result
+
+    def test_context_routes_to_context_text(self):
+        state = {"session_id": "abcdefghijklmnop", "turn_count": 9}
+        router = self._make_router(state=state)
+        with patch(
+            "landline.runtime.commands.get_context_percent", return_value=40.0,
+        ):
+            result = router.handle("/context")
+        assert result is not None
+        assert "Context:" in result
+        assert "9 turns" in result
+
+    def test_context_no_session_returns_notice(self):
+        router = self._make_router(state={"session_id": None, "turn_count": 0})
+        result = router.handle("/context")
+        assert "No active session" in result
 
     def test_unlock_is_unknown_command(self):
         """/unlock is removed — passphrase is typed directly after /new."""

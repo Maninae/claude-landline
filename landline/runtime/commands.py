@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from landline.config import (
     AGENT_NAME,
+    CONTEXT_WINDOW_TOKENS,
     DOCTOR_SCRIPT,
     LAUNCHD_LABEL_PREFIX,
     MORNING_BRIEF_GLOB,
@@ -16,6 +17,7 @@ from landline.config import (
 )
 from landline.runtime.lock import LockManager
 from landline.runtime.logging import log
+from landline.runtime.state import get_context_percent
 
 
 def _parse_command(text: str) -> Tuple[str, str]:
@@ -89,6 +91,54 @@ def _status_text(
     return "\n".join(lines)
 
 
+def _fmt_tokens(count: int) -> str:
+    """Human-readable token count: 1_000_000 -> '1.0M', 620_400 -> '620.4k'."""
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        rounded_k = round(count / 1_000, 1)
+        # e.g. 999_999 rounds to 1000.0k — promote to '1.0M' rather than show 'k'.
+        if rounded_k >= 1000.0:
+            return f"{count / 1_000_000:.1f}M"
+        return f"{rounded_k:.1f}k"
+    return str(count)
+
+
+def _context_text(state: Dict[str, Any]) -> str:
+    """Build the /context response: the live session's context-window usage.
+
+    Deterministic and agent-free — reuses ``get_context_percent`` (the same
+    number the heartbeat's context warnings read from the session JSONL tail),
+    so it matches the CC status bar without spending an agent turn. Degrades to
+    a friendly notice when there is no active session or no usage yet.
+    """
+    session_id = state.get("session_id")
+    if not session_id:
+        return "📊 No active session yet. Send a message to start one."
+    pct = get_context_percent(session_id)
+    if pct is None:
+        return f"📊 No usage recorded yet for session {session_id[:12]}..."
+    used_tokens = int(round(pct / 100.0 * CONTEXT_WINDOW_TOKENS))
+    # Round once so the displayed % and the health bucket can never disagree.
+    pct_display = int(round(pct))
+    turns = state.get("turn_count", 0)
+    turn_word = "turn" if turns == 1 else "turns"
+    # Coarse 3-color health view at 50 / 70%. (The heartbeat fires its own
+    # warnings at CONTEXT_WARN_THRESHOLDS = [30, 50, 70]; this dot is a rougher
+    # at-a-glance bucket, not a 1:1 mirror of those thresholds.)
+    if pct_display < 50:
+        health = "🟢 healthy"
+    elif pct_display < 70:
+        health = "🟡 getting full"
+    else:
+        health = "🔴 near limit"
+    return (
+        f"📊 Context: {_fmt_tokens(used_tokens)} / "
+        f"{_fmt_tokens(CONTEXT_WINDOW_TOKENS)} ({pct_display}%)  {health}\n"
+        f"Session {session_id[:12]}... · {turns} {turn_word}"
+    )
+
+
 class CommandRouter:
     """Routes slash commands to their handlers.
 
@@ -125,6 +175,9 @@ class CommandRouter:
 
         if cmd == "/status":
             return _status_text(self._state, self._lock_manager, self._workspace)
+
+        if cmd == "/context":
+            return _context_text(self._state)
 
         if cmd == "/doctor":
             return self._handle_doctor(arg)
