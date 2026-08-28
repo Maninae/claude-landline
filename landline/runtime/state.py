@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -357,4 +358,41 @@ def get_context_percent(session_id: Optional[str]) -> Optional[float]:
         return (context_used / CONTEXT_WINDOW_TOKENS) * 100
     except Exception as e:
         log(f"get_context_percent error: {e}")
+        return None
+
+
+def get_session_age_seconds(session_id: Optional[str]) -> Optional[float]:
+    """Seconds since this session started, derived from the session JSONL.
+
+    Primary source is the first log line's ISO timestamp — the true start of
+    the conversation, stable across daemon restarts and ``--resume``. Falls
+    back to the file's creation time (``st_birthtime`` on macOS; ``st_ctime``
+    is used as an approximation where ``st_birthtime`` is unavailable). Returns
+    None if there is no session file or it can't be read.
+    """
+    if not session_id:
+        return None
+    path = PROJECT_DIR / f"{session_id}.jsonl"
+    if not path.exists():
+        return None
+    now = time.time()
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            first_line = f.readline()
+        timestamp = json.loads(first_line).get("timestamp")
+        if timestamp:
+            # CC writes RFC3339 with a trailing 'Z'; 3.9's fromisoformat needs
+            # an explicit '+00:00' offset instead of the 'Z'.
+            started = datetime.fromisoformat(
+                timestamp.replace("Z", "+00:00")
+            ).timestamp()
+            return max(0.0, now - started)
+    except Exception as first_line_error:
+        log(f"get_session_age_seconds: first-line parse failed: {first_line_error}")
+    try:
+        stat_result = path.stat()
+        created = getattr(stat_result, "st_birthtime", stat_result.st_ctime)
+        return max(0.0, now - created)
+    except Exception as stat_error:
+        log(f"get_session_age_seconds: stat failed: {stat_error}")
         return None

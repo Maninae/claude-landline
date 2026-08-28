@@ -5,6 +5,7 @@ import os
 import stat
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -366,6 +367,54 @@ class TestGetContextPercent:
             result = get_context_percent("test-session")
         assert result is not None
         assert abs(result - 30.0) < 0.1
+
+
+class TestGetSessionAgeSeconds:
+    def test_returns_none_for_no_session(self):
+        from landline.runtime.state import get_session_age_seconds
+        assert get_session_age_seconds(None) is None
+        assert get_session_age_seconds("") is None
+
+    def test_returns_none_when_file_missing(self, tmp_workspace):
+        with patch("landline.runtime.state.PROJECT_DIR", tmp_workspace / "nonexistent"):
+            from landline.runtime.state import get_session_age_seconds
+            assert get_session_age_seconds("some-session") is None
+
+    def test_uses_first_line_timestamp(self, tmp_workspace):
+        project_dir = tmp_workspace / "project"
+        project_dir.mkdir()
+        session_file = project_dir / "test-session.jsonl"
+        # First line ~2h ago, in CC's RFC3339 'Z' form (must survive 3.9 parsing).
+        start = datetime.now(timezone.utc) - timedelta(hours=2)
+        ts = start.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        session_file.write_text(json.dumps({"type": "user", "timestamp": ts}) + "\n")
+        with patch("landline.runtime.state.PROJECT_DIR", project_dir):
+            from landline.runtime.state import get_session_age_seconds
+            age = get_session_age_seconds("test-session")
+        assert age is not None
+        assert abs(age - 7200) < 60  # ~2 hours, within a minute of slack
+
+    def test_falls_back_to_ctime_when_timestamp_absent(self, tmp_workspace):
+        project_dir = tmp_workspace / "project"
+        project_dir.mkdir()
+        session_file = project_dir / "test-session.jsonl"
+        session_file.write_text(json.dumps({"type": "user"}) + "\n")  # no timestamp
+        with patch("landline.runtime.state.PROJECT_DIR", project_dir):
+            from landline.runtime.state import get_session_age_seconds
+            age = get_session_age_seconds("test-session")
+        assert age is not None
+        assert age >= 0  # freshly created file -> small, non-negative
+
+    def test_malformed_first_line_falls_back_to_ctime(self, tmp_workspace):
+        project_dir = tmp_workspace / "project"
+        project_dir.mkdir()
+        session_file = project_dir / "test-session.jsonl"
+        session_file.write_text("this is not json\n")  # first-line parse raises
+        with patch("landline.runtime.state.PROJECT_DIR", project_dir):
+            from landline.runtime.state import get_session_age_seconds
+            age = get_session_age_seconds("test-session")
+        assert age is not None  # silently degrades to the file's creation time
+        assert age >= 0
 
     def test_ignores_corrupt_jsonl_lines(self, tmp_workspace):
         """A malformed JSON line in the tail must not break the entire read.

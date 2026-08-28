@@ -10,6 +10,7 @@ from landline.runtime.commands import (
     _status_text,
     _context_text,
     _fmt_tokens,
+    _fmt_age,
     CommandRouter,
 )
 from landline.runtime.lock import LockManager
@@ -127,6 +128,24 @@ class TestFmtTokens:
         assert _fmt_tokens(999_999) == "1.0M"
 
 
+class TestFmtAge:
+    def test_seconds(self):
+        assert _fmt_age(0) == "0s"
+        assert _fmt_age(45) == "45s"
+
+    def test_minutes(self):
+        assert _fmt_age(320) == "5m"
+        assert _fmt_age(3599) == "59m"
+
+    def test_hours(self):
+        assert _fmt_age(3600) == "1h"
+        assert _fmt_age(3900) == "1h 5m"
+
+    def test_days(self):
+        assert _fmt_age(172800) == "2d"
+        assert _fmt_age(273600) == "3d 4h"
+
+
 class TestContextText:
     def test_no_session_shows_notice(self):
         text = _context_text({"session_id": None, "turn_count": 0})
@@ -138,18 +157,20 @@ class TestContextText:
         ):
             text = _context_text({"session_id": "abcdefghijklmnop", "turn_count": 3})
         assert "No usage recorded yet" in text
-        assert "abcdefghijkl..." in text
+        assert "abcdefghijkl" not in text  # no session hash exposed
 
     def test_reports_tokens_percent_and_turns(self):
         with patch(
             "landline.runtime.commands.get_context_percent", return_value=62.04,
+        ), patch(
+            "landline.runtime.commands.get_session_age_seconds", return_value=None,
         ):
             text = _context_text({"session_id": "abcdefghijklmnop", "turn_count": 147})
         assert "620.4k" in text
         assert "1.0M" in text
         assert "(62%)" in text
         assert "147 turns" in text
-        assert "abcdefghijkl..." in text
+        assert "abcdefghijkl" not in text  # session hash removed from output
 
     def test_health_dot_thresholds(self):
         def render(pct):
@@ -185,10 +206,21 @@ class TestContextText:
     def test_singular_turn_grammar(self):
         with patch(
             "landline.runtime.commands.get_context_percent", return_value=40.0,
+        ), patch(
+            "landline.runtime.commands.get_session_age_seconds", return_value=None,
         ):
             text = _context_text({"session_id": "x" * 16, "turn_count": 1})
-        assert text.endswith("· 1 turn")
+        assert text.endswith("1 turn")  # singular, and no age suffix when unavailable
         assert "1 turns" not in text
+
+    def test_includes_session_age_when_available(self):
+        with patch(
+            "landline.runtime.commands.get_context_percent", return_value=40.0,
+        ), patch(
+            "landline.runtime.commands.get_session_age_seconds", return_value=273600.0,
+        ):
+            text = _context_text({"session_id": "x" * 16, "turn_count": 12})
+        assert "12 turns · 3d 4h old" in text
 
 
 class TestCommandRouter:

@@ -17,7 +17,7 @@ from landline.config import (
 )
 from landline.runtime.lock import LockManager
 from landline.runtime.logging import log
-from landline.runtime.state import get_context_percent
+from landline.runtime.state import get_context_percent, get_session_age_seconds
 
 
 def _parse_command(text: str) -> Tuple[str, str]:
@@ -104,20 +104,36 @@ def _fmt_tokens(count: int) -> str:
     return str(count)
 
 
+def _fmt_age(seconds: float) -> str:
+    """Compact age: 45 -> '45s', 320 -> '5m', 3900 -> '1h 5m', 273600 -> '3d 4h'."""
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}s"
+    minutes = total // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, rem_min = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h {rem_min}m" if rem_min else f"{hours}h"
+    days, rem_hours = divmod(hours, 24)
+    return f"{days}d {rem_hours}h" if rem_hours else f"{days}d"
+
+
 def _context_text(state: Dict[str, Any]) -> str:
     """Build the /context response: the live session's context-window usage.
 
     Deterministic and agent-free — reuses ``get_context_percent`` (the same
     number the heartbeat's context warnings read from the session JSONL tail),
-    so it matches the CC status bar without spending an agent turn. Degrades to
-    a friendly notice when there is no active session or no usage yet.
+    so it matches the CC status bar without spending an agent turn. The second
+    line shows the turn count and how long the session has been alive. Degrades
+    to a friendly notice when there is no active session or no usage yet.
     """
     session_id = state.get("session_id")
     if not session_id:
         return "📊 No active session yet. Send a message to start one."
     pct = get_context_percent(session_id)
     if pct is None:
-        return f"📊 No usage recorded yet for session {session_id[:12]}..."
+        return "📊 No usage recorded yet (fresh session)."
     used_tokens = int(round(pct / 100.0 * CONTEXT_WINDOW_TOKENS))
     # Round once so the displayed % and the health bucket can never disagree.
     pct_display = int(round(pct))
@@ -132,10 +148,14 @@ def _context_text(state: Dict[str, Any]) -> str:
         health = "🟡 getting full"
     else:
         health = "🔴 near limit"
+    second_line = f"{turns} {turn_word}"
+    age = get_session_age_seconds(session_id)
+    if age is not None:
+        second_line += f" · {_fmt_age(age)} old"
     return (
         f"📊 Context: {_fmt_tokens(used_tokens)} / "
         f"{_fmt_tokens(CONTEXT_WINDOW_TOKENS)} ({pct_display}%)  {health}\n"
-        f"Session {session_id[:12]}... · {turns} {turn_word}"
+        f"{second_line}"
     )
 
 
