@@ -79,7 +79,7 @@ class TestExtractChatId:
                 "text": "hi",
             },
         }
-        _, text_updates, _, _, _, _ = classify_updates(daemon, [update])
+        _, text_updates, _, _, _, _, _ = classify_updates(daemon, [update])
         assert len(text_updates) == 1
         # Triple is (message, update_id, text) for text bucket; chat_id is
         # not stored here, but the missing-chat guard would have dropped
@@ -114,7 +114,7 @@ class TestCallbackQueryUnreachable:
             "update_id": 42,
             "callback_query": {"id": "cb-1", "data": "noop"},
         }
-        cmds, texts, photos, pauses, docs, voices = classify_updates(
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(
             daemon, [synthetic_callback]
         )
         # No bucket should receive a callback_query.
@@ -123,6 +123,8 @@ class TestCallbackQueryUnreachable:
         assert photos == []
         assert pauses == []
         assert docs == []
+        assert voices == []
+        assert videos == []
         # Cursor still advances exactly once (via the missing-message path,
         # not via a dedicated callback branch — see absence assertion below).
         daemon._advance_update_cursor.assert_called_once_with(42)
@@ -204,7 +206,7 @@ class TestClassifierStillWorksAfterPrune:
                 "text": "hello agent",
             },
         }
-        cmds, texts, photos, pauses, docs, voices = classify_updates(daemon, [update])
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(daemon, [update])
         assert len(texts) == 1
         assert texts[0][1] == 1
         assert texts[0][2] == "hello agent"
@@ -220,7 +222,7 @@ class TestClassifierStillWorksAfterPrune:
                 "text": "/pause",
             },
         }
-        cmds, texts, photos, pauses, docs, voices = classify_updates(daemon, [update])
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(daemon, [update])
         assert len(pauses) == 1
         assert pauses[0][1] == 2
         assert pauses[0][2] == "12345"
@@ -235,7 +237,7 @@ class TestClassifierStillWorksAfterPrune:
                 "text": "/status",
             },
         }
-        cmds, texts, photos, pauses, docs, voices = classify_updates(daemon, [update])
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(daemon, [update])
         assert len(cmds) == 1
         assert cmds[0][1] == 3
         assert cmds[0][2] == "/status"
@@ -250,7 +252,7 @@ class TestClassifierStillWorksAfterPrune:
                 "photo": [{"file_id": "f", "width": 1, "height": 1}],
             },
         }
-        cmds, texts, photos, pauses, docs, voices = classify_updates(daemon, [update])
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(daemon, [update])
         assert len(photos) == 1
         assert photos[0][1] == 4
         assert photos[0][2] == "12345"
@@ -347,7 +349,7 @@ class TestDocumentBucket:
         update = self._make_doc_update(
             file_name="report.pdf", file_size=1024,
         )
-        cmds, texts, photos, pauses, docs, voices = classify_updates(daemon, [update])
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(daemon, [update])
         assert len(docs) == 1
         assert docs[0][1] == update["update_id"]
         assert docs[0][2] == "12345"
@@ -357,7 +359,7 @@ class TestDocumentBucket:
     def test_disallowed_extension_falls_through_to_non_text(self):
         daemon = _make_daemon()
         update = self._make_doc_update(file_name="malware.exe")
-        cmds, texts, photos, pauses, docs, voices = classify_updates(daemon, [update])
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(daemon, [update])
         assert docs == []
         # Falls through to the brush-off notice path.
         daemon._handle_non_text_update.assert_called_once()
@@ -367,7 +369,7 @@ class TestDocumentBucket:
         update = self._make_doc_update(
             file_name="../../../../etc/passwd",
         )
-        cmds, texts, photos, pauses, docs, voices = classify_updates(daemon, [update])
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(daemon, [update])
         assert docs == []
         daemon._handle_non_text_update.assert_called_once()
 
@@ -378,7 +380,7 @@ class TestDocumentBucket:
             file_name="big.pdf",
             file_size=DOCUMENT_MAX_SIZE_BYTES + 1,
         )
-        cmds, texts, photos, pauses, docs, voices = classify_updates(daemon, [update])
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(daemon, [update])
         assert docs == []
         daemon._handle_non_text_update.assert_called_once()
 
@@ -387,7 +389,7 @@ class TestDocumentBucket:
         update = self._make_doc_update(
             file_name="notes.txt", mime_type="application/octet-stream",
         )
-        cmds, texts, photos, pauses, docs, voices = classify_updates(daemon, [update])
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(daemon, [update])
         # Extension is fine, but the mime confirmation blocks.
         assert docs == []
         daemon._handle_non_text_update.assert_called_once()
@@ -398,14 +400,14 @@ class TestDocumentBucket:
         update = self._make_doc_update(
             file_name="notes.txt", mime_type=None,
         )
-        cmds, texts, photos, pauses, docs, voices = classify_updates(daemon, [update])
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(daemon, [update])
         assert len(docs) == 1
 
     def test_extension_lowercased_on_sanitize(self):
         """`.PDF` normalizes to `.pdf` and is accepted."""
         daemon = _make_daemon()
         update = self._make_doc_update(file_name="REPORT.PDF")
-        cmds, texts, photos, pauses, docs, voices = classify_updates(daemon, [update])
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(daemon, [update])
         assert len(docs) == 1
 
 
@@ -429,25 +431,25 @@ class TestVoiceBucket:
     def test_voice_message_lands_in_voice_bucket(self):
         daemon = _make_daemon()
         update = self._make_voice_update(media_key="voice", duration=15)
-        cmds, texts, photos, pauses, docs, voices = classify_updates(
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(
             daemon, [update]
         )
         assert len(voices) == 1
         assert voices[0][1] == update["update_id"]
         assert voices[0][2] == "12345"
-        assert cmds == texts == photos == pauses == docs == []
+        assert cmds == texts == photos == pauses == docs == videos == []
 
     def test_audio_message_lands_in_voice_bucket(self):
         daemon = _make_daemon()
         update = self._make_voice_update(media_key="audio", duration=20)
-        _, _, _, _, docs, voices = classify_updates(daemon, [update])
+        _, _, _, _, docs, voices, _ = classify_updates(daemon, [update])
         assert len(voices) == 1
         assert docs == []
 
     def test_video_note_lands_in_voice_bucket(self):
         daemon = _make_daemon()
         update = self._make_voice_update(media_key="video_note", duration=5)
-        _, _, _, _, _, voices = classify_updates(daemon, [update])
+        _, _, _, _, _, voices, _ = classify_updates(daemon, [update])
         assert len(voices) == 1
 
     def test_photo_wins_over_voice_when_both_present(self):
@@ -462,7 +464,7 @@ class TestVoiceBucket:
                 "voice": {"file_id": "v", "duration": 5},
             },
         }
-        _, _, photos, _, _, voices = classify_updates(daemon, [update])
+        _, _, photos, _, _, voices, _ = classify_updates(daemon, [update])
         assert len(photos) == 1
         assert voices == []
 
@@ -472,8 +474,151 @@ class TestVoiceBucket:
         reject it with a clear notice."""
         daemon = _make_daemon()
         update = self._make_voice_update(media_key="voice", duration=999)
-        _, _, _, _, _, voices = classify_updates(daemon, [update])
+        _, _, _, _, _, voices, _ = classify_updates(daemon, [update])
         assert len(voices) == 1
+
+
+# ---------------------------------------------------------------------------
+# Video bucket
+# ---------------------------------------------------------------------------
+
+
+class TestVideoBucket:
+    """Video classification. Two shapes route here:
+      - Bare ``video`` message (camera roll upload).
+      - ``document`` with a ``video/*`` mime (desktop drag-and-drop).
+
+    ``video_note`` continues to bucket into voices — that's already-tested
+    behavior; we just guard against a regression that would re-route it.
+    """
+
+    def _bare_video_update(
+        self, uid=300, file_size=1024, mime_type="video/mp4",
+    ):
+        return {
+            "update_id": uid,
+            "message": {
+                "chat": {"id": 12345},
+                "video": {
+                    "file_id": "vidfile-1",
+                    "duration": 5,
+                    "width": 640,
+                    "height": 480,
+                    "mime_type": mime_type,
+                    "file_size": file_size,
+                },
+            },
+        }
+
+    def _video_document_update(
+        self, uid=301, file_name="clip.mp4", mime_type="video/mp4",
+        file_size=2048,
+    ):
+        return {
+            "update_id": uid,
+            "message": {
+                "chat": {"id": 12345},
+                "document": {
+                    "file_id": "docvid-1",
+                    "file_name": file_name,
+                    "file_size": file_size,
+                    "mime_type": mime_type,
+                },
+            },
+        }
+
+    def test_bare_video_lands_in_video_bucket(self):
+        daemon = _make_daemon()
+        update = self._bare_video_update()
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(
+            daemon, [update],
+        )
+        assert len(videos) == 1
+        assert videos[0][1] == update["update_id"]
+        assert videos[0][2] == "12345"
+        # Nothing else fires.
+        assert cmds == texts == photos == pauses == docs == voices == []
+        daemon._handle_non_text_update.assert_not_called()
+
+    def test_video_document_routes_to_video_bucket_not_document(self):
+        """A ``document`` with a ``video/mp4`` mime must land in the video
+        bucket, NOT the document bucket (which would reject it on the
+        extension gate). This is the load-bearing precedence contract:
+        video check runs before the document check."""
+        daemon = _make_daemon()
+        update = self._video_document_update()
+        _, _, _, _, docs, _, videos = classify_updates(daemon, [update])
+        assert len(videos) == 1
+        assert docs == []
+        daemon._handle_non_text_update.assert_not_called()
+
+    def test_over_cap_video_still_buckets_for_handler_notice(self):
+        """The classifier does NOT enforce ``TELEGRAM_VIDEO_SIZE_LIMIT`` —
+        an oversized video still lands in the bucket so the handler can
+        give a clear "too big" notice instead of the generic non-text
+        brush-off."""
+        from landline.config import TELEGRAM_VIDEO_SIZE_LIMIT
+        daemon = _make_daemon()
+        update = self._bare_video_update(
+            file_size=TELEGRAM_VIDEO_SIZE_LIMIT + 1,
+        )
+        _, _, _, _, _, _, videos = classify_updates(daemon, [update])
+        assert len(videos) == 1
+
+    def test_video_note_still_lands_in_voice_bucket(self):
+        """Regression guard: ``video_note`` (round camera-toggle videos)
+        MUST continue to route to the voice pipeline (whisper transcribe)
+        — the video bucket only handles the ``video`` field, not
+        ``video_note``."""
+        daemon = _make_daemon()
+        update = {
+            "update_id": 302,
+            "message": {
+                "chat": {"id": 12345},
+                "video_note": {"file_id": "vn-1", "duration": 5},
+            },
+        }
+        _, _, _, _, _, voices, videos = classify_updates(daemon, [update])
+        assert len(voices) == 1
+        assert videos == []
+
+    def test_non_video_document_mime_stays_in_document_bucket(self):
+        """Belt-and-suspenders: a ``document`` with a non-video mime
+        (e.g. ``application/pdf``) must NOT be dragged into the video
+        bucket by the precedence check."""
+        daemon = _make_daemon()
+        update = {
+            "update_id": 303,
+            "message": {
+                "chat": {"id": 12345},
+                "document": {
+                    "file_id": "d-1",
+                    "file_name": "report.pdf",
+                    "file_size": 4096,
+                    "mime_type": "application/pdf",
+                },
+            },
+        }
+        _, _, _, _, docs, _, videos = classify_updates(daemon, [update])
+        assert len(docs) == 1
+        assert videos == []
+
+    def test_photo_precedes_video_when_both_present(self):
+        """Telegram sends one media per message, but a pathological
+        message with both keys should keep the existing photo-wins
+        precedence — the video branch runs AFTER the photo branch."""
+        daemon = _make_daemon()
+        update = {
+            "update_id": 304,
+            "message": {
+                "chat": {"id": 12345},
+                "photo": [{"file_id": "p", "width": 1, "height": 1}],
+                "video": {"file_id": "v", "file_size": 1024},
+            },
+        }
+        _, _, photos, _, _, _, videos = classify_updates(daemon, [update])
+        assert len(photos) == 1
+        assert videos == []
 
 
 # ---------------------------------------------------------------------------

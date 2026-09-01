@@ -63,11 +63,18 @@ def run_batch_classification_and_dispatch(
         pause_updates,
         document_updates,
         voice_updates,
+        video_updates,
     ) = _d.classify_updates(daemon, updates)
 
     # Pass 2: /pause first, so we know whether dispatch will run this batch.
     # Dispatch-pending MUST leave the flag set — the watchdog consumes it
     # mid-stream during the upcoming Claude call.
+    #
+    # Videos DO NOT count as dispatch-pending: their handler is
+    # fire-and-forget (advance cursor + spawn background download), so a
+    # /pause alongside a video should NOT be deferred — nothing here for
+    # the watchdog to interrupt. See landline/media/video.py for the
+    # async architecture.
     handle_pause_updates(
         daemon,
         pause_updates,
@@ -87,6 +94,8 @@ def run_batch_classification_and_dispatch(
             daemon._process_voice_batch(voice_updates)
         if document_updates and daemon.running:
             daemon._process_document_batch(document_updates)
+        if video_updates and daemon.running:
+            daemon._process_video_batch(video_updates)
         if text_updates and daemon.running:
             process_text_batch(daemon, text_updates)
     finally:

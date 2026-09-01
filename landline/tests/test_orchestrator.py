@@ -237,12 +237,16 @@ class TestProcessUpdateBatch:
         assert "failed to download" in call_text.lower()
 
     def test_handles_non_photo_media_with_skip_message(self):
-        """Non-photo media (video, audio, etc.) still gets a skip message."""
+        """Truly-unsupported media (sticker, animation) still gets a skip
+        message from ``_handle_non_text_update``. ``video`` used to be in
+        this bucket but is now first-class (handled by the video pipeline
+        with its own async download); sticker/animation are the remaining
+        types that fall through to the fallback notice."""
         daemon, mocks = _make_daemon()
         update = {"update_id": 1, "message": {
             "chat": {"id": int(FAKE_CHAT_ID)},
             "date": int(time.time()),
-            "video": {"file_id": "fake_video", "duration": 10},
+            "sticker": {"file_id": "fake_sticker", "width": 1, "height": 1},
         }}
         with patch("landline.orchestrator.save_state"):
             daemon._process_update_batch([update])

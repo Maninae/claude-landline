@@ -313,6 +313,7 @@ SESSION_JSONL_TAIL_BYTES = 32768
 TELEGRAM_IMAGE_DIR = WORKSPACE / "cache" / "telegram_images"
 TELEGRAM_FILE_DIR = WORKSPACE / "cache" / "telegram_files"
 TELEGRAM_VOICE_DIR = WORKSPACE / "cache" / "telegram_voice"
+TELEGRAM_VIDEO_DIR = WORKSPACE / "cache" / "telegram_videos"
 # Per-archive extraction lands under here in its own 0o700 subdir. Swept
 # alongside the other media caches at startup (same 24h window).
 TELEGRAM_ARCHIVE_DIR = WORKSPACE / "cache" / "telegram_archives"
@@ -320,6 +321,7 @@ TELEGRAM_FILE_SIZE_LIMIT = 20 * 1024 * 1024  # 20MB - Telegram getFile limit
 TELEGRAM_IMAGE_RETENTION_HOURS = 24  # Sweep cached photos older than this at startup
 TELEGRAM_FILE_RETENTION_HOURS = 24  # Sweep cached documents older than this at startup
 TELEGRAM_VOICE_RETENTION_HOURS = 24  # Sweep cached voice notes older than this at startup
+TELEGRAM_VIDEO_RETENTION_HOURS = 24  # Sweep cached videos older than this at startup
 TELEGRAM_ARCHIVE_RETENTION_HOURS = 24  # Sweep extracted zip contents older than this at startup
 MEDIA_GROUP_WAIT_SECONDS = 1.5  # Time to wait for album photos to arrive
 
@@ -366,6 +368,7 @@ MEDIA_CACHE_DIRS = (
     TELEGRAM_IMAGE_DIR,
     TELEGRAM_FILE_DIR,
     TELEGRAM_VOICE_DIR,
+    TELEGRAM_VIDEO_DIR,
     TELEGRAM_ARCHIVE_DIR,
 )
 
@@ -377,6 +380,7 @@ MEDIA_CACHE_RETENTION_HOURS = {
     TELEGRAM_IMAGE_DIR: TELEGRAM_IMAGE_RETENTION_HOURS,
     TELEGRAM_FILE_DIR: TELEGRAM_FILE_RETENTION_HOURS,
     TELEGRAM_VOICE_DIR: TELEGRAM_VOICE_RETENTION_HOURS,
+    TELEGRAM_VIDEO_DIR: TELEGRAM_VIDEO_RETENTION_HOURS,
     TELEGRAM_ARCHIVE_DIR: TELEGRAM_ARCHIVE_RETENTION_HOURS,
 }
 
@@ -510,6 +514,26 @@ VOICE_TRANSCRIBE_TIMEOUT_SECONDS = 90
 # that emit tens of thousands of repeated chars on silence/noise.
 VOICE_TRANSCRIBE_MAX_TRANSCRIPT_CHARS = 8000
 VOICE_ACCEPT_TYPES = frozenset({"voice", "audio", "video_note"})
+
+# ---------------------------------------------------------------------------
+# Video ingestion
+# ---------------------------------------------------------------------------
+# Policy cap: reject videos over this size up front so the handler never even
+# attempts the getFile call for something huge. Deliberately ABOVE the
+# underlying Telegram bot download ceiling (TELEGRAM_FILE_SIZE_LIMIT, 20MB)
+# because the cloud Bot API refuses to serve files >20MB — a video in the
+# 20-100MB gap still fails the getFile step and the handler surfaces the
+# "over Telegram's 20MB bot-download limit" notice from that. Videos above
+# THIS cap get an "obviously too big" reject before we touch the network.
+TELEGRAM_VIDEO_SIZE_LIMIT = 100 * 1024 * 1024  # 100 MB policy cap
+
+# Whitelist of video extensions accepted from ``document`` messages whose
+# ``mime_type`` advertises ``video/*``. Bare ``video`` messages don't need
+# extension gating (Telegram already classified them as video and we
+# synthesize a filename). Case-insensitive.
+VIDEO_ALLOWED_EXTENSIONS = frozenset({
+    ".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".3gp",
+})
 
 # ---------------------------------------------------------------------------
 # Archive extraction (zip)

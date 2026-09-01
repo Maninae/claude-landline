@@ -34,6 +34,7 @@ from landline.config import (
 )
 from landline.media.document import process_document_batch
 from landline.media.cache import _sweep_telegram_image_cache, sweep_media_caches
+from landline.media.video import process_video_batch
 from landline.runtime.inject import drain_inject_queue
 from landline.runtime.lock import LockManager
 from landline.runtime.logging import log
@@ -226,23 +227,27 @@ class TelegramDaemon:
     def _handle_non_text_update(
         self, message: Dict, update_id: int, chat_id: str,
     ) -> None:
-        # Fallback for unsupported media (sticker/animation/video) or empty
-        # messages — photo/voice/document have their own batch methods.
+        # Fallback for unsupported media (sticker/animation) or empty
+        # messages — photo/voice/document/video have their own batch
+        # methods. ``video`` is intentionally NOT in this list anymore
+        # (the video handler owns it); a document-with-video-mime that
+        # somehow reaches here (should never — classifier routes it to
+        # the video bucket first) still trips the "other media" branch.
         has_media = any(
             key in message for key in
-            ("video", "audio", "voice", "document", "sticker", "animation",
+            ("audio", "voice", "document", "sticker", "animation",
              "video_note")
         )
         if has_media:
             notice = (
-                "(I can only process text, photos, voice notes, and "
-                "documents (pdf/txt/md/csv/json/log/yaml) for now — "
+                "(I can only process text, photos, voice notes, videos, "
+                "and documents (pdf/txt/md/csv/json/log/yaml) for now — "
                 "other media received, skipping.)"
             )
         else:
             notice = (
-                "(I can only process text, photos, voice notes, and "
-                "documents (pdf/txt/md/csv/json/log/yaml) for now.)"
+                "(I can only process text, photos, voice notes, videos, "
+                "and documents (pdf/txt/md/csv/json/log/yaml) for now.)"
             )
         # Send BEFORE advancing cursor — a raised send leaves the update
         # un-advanced so Telegram re-delivers rather than silently dropping.
@@ -317,6 +322,16 @@ class TelegramDaemon:
     ) -> None:
         """Delegate to voice_handler — see ``landline/media/voice.py``."""
         process_voice_batch(self, voice_updates)
+
+    def _process_video_batch(
+        self, video_updates: List[Tuple[Dict, int, str]],
+    ) -> None:
+        """Delegate to video_handler — see ``landline/media/video.py``.
+
+        The handler spawns a background daemon thread per video and returns
+        immediately; the main loop stays unblocked while videos download.
+        """
+        process_video_batch(self, video_updates)
 
     def _dispatch_photo_group(
         self,

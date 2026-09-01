@@ -1,5 +1,5 @@
 """Update-batch classification — split drained Telegram updates into
-command / text / photo / pause / document / voice buckets.
+command / text / photo / pause / document / voice / video buckets.
 
 - Stateless helper: `classify_updates(daemon, updates)` walks once, handles
   trivial-skip side effects inline (cursor advance for edits, missing chat.id,
@@ -10,6 +10,12 @@ command / text / photo / pause / document / voice buckets.
 - `BackgroundPoller` requests `allowed_updates=["message"]` so callback queries
   / edited_channel_post / inline_query never reach here. If that filter is
   loosened, update this module alongside it (test_poller fails first).
+- Video precedence: bare ``video`` and ``document`` messages with a
+  ``video/*`` mime bucket into videos BEFORE the document bucket check
+  (a video-mimed document must NOT trip the document handler's extension
+  gate, which would reject it and skip). ``video_note`` continues to route
+  through voice — that pipeline already handles Telegram's short round
+  video-note format.
 """
 
 from typing import Dict, List, TYPE_CHECKING, Tuple
@@ -73,6 +79,33 @@ def _is_acceptable_document(document_field: Dict) -> bool:
     return True
 
 
+def _is_video_message(message: Dict) -> bool:
+    """True iff ``message`` is a video the handler should ingest.
+
+    Two shapes route here:
+      - Bare ``video`` field (typical Telegram send from camera roll /
+        gallery).
+      - ``document`` field whose ``mime_type`` starts with ``video/`` — some
+        clients (e.g. desktop drag-and-drop) send videos as files.
+
+    ``video_note`` is NOT included here — those short round videos already
+    go through the voice pipeline (whisper transcribe) and would break
+    if we re-routed them.
+
+    Size cap is enforced by the handler, not the classifier — a huge
+    video still buckets so the user gets a clear "too big" notice
+    instead of the generic non-text brush-off.
+    """
+    if isinstance(message.get("video"), dict):
+        return True
+    document_field = message.get("document")
+    if isinstance(document_field, dict):
+        mime = document_field.get("mime_type")
+        if isinstance(mime, str) and mime.lower().startswith("video/"):
+            return True
+    return False
+
+
 def classify_updates(
     daemon: "TelegramDaemon",
     updates: List[Dict],
@@ -83,13 +116,14 @@ def classify_updates(
     List[Tuple[Dict, int, str]],  # pause_updates (message, update_id, chat_id)
     List[Tuple[Dict, int, str]],  # document_updates (message, update_id, chat_id)
     List[Tuple[Dict, int, str]],  # voice_updates (message, update_id, chat_id)
+    List[Tuple[Dict, int, str]],  # video_updates (message, update_id, chat_id)
 ]:
     """Pass 1 of `_process_update_batch`: classify each update; trivial-skip
     side effects (cursor advance, reject, too-long notice) run inline.
 
     - `/pause` is intercepted BEFORE the `/`-prefix branch so it never reaches
       `CommandRouter` (which would reply "Unknown command").
-    - Returns the six classified buckets in dispatch-pass order.
+    - Returns the seven classified buckets in dispatch-pass order.
     """
     command_updates: List[Tuple[Dict, int, str]] = []
     text_updates: List[Tuple[Dict, int, str]] = []
@@ -97,6 +131,7 @@ def classify_updates(
     pause_updates: List[Tuple[Dict, int, str]] = []
     document_updates: List[Tuple[Dict, int, str]] = []
     voice_updates: List[Tuple[Dict, int, str]] = []
+    video_updates: List[Tuple[Dict, int, str]] = []
 
     def _ack_and_record(msg: Dict, chat: str) -> None:
         """Fire 👀 for accepted content messages, record the message_id on the
@@ -156,6 +191,17 @@ def classify_updates(
         if voice_key is not None and voice_key in VOICE_ACCEPT_TYPES:
             _ack_and_record(message, chat_id)
             voice_updates.append((message, update_id, chat_id))
+            continue
+
+        # Video: bare `video` field OR `document` with a `video/*` mime.
+        # Checked BEFORE the document branch so a video-mimed document
+        # doesn't get rejected by the document handler's extension gate
+        # (which allow-lists pdf/txt/md/csv/json/log/tsv/yaml/yml only).
+        # Size cap is enforced by the handler for the "clear notice on
+        # too big" UX (see landline/media/video.py).
+        if _is_video_message(message):
+            _ack_and_record(message, chat_id)
+            video_updates.append((message, update_id, chat_id))
             continue
 
         # Document ingestion: extension-allow-listed, size-capped,
@@ -218,4 +264,5 @@ def classify_updates(
         pause_updates,
         document_updates,
         voice_updates,
+        video_updates,
     )
