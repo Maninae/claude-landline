@@ -2964,3 +2964,222 @@ class TestRejectionPathsClearAck:
         )
         # Tracker is cleared in the finally block, ready for the next batch.
         assert daemon._batch_locked_help_chats is None
+
+
+class TestUnauthorizedSenderInvisible:
+    """The whole-daemon invariant: an inbound message from an UNAUTHORIZED
+    sender (from.id not in the Keychain allowlist) must have ZERO observable
+    effect on the daemon AND elicit ZERO response.
+
+    Two pre-guard side-channels are covered here:
+      1. ``_on_update_queued`` /pause pre-check — must NOT honor /pause from
+         an unauthorized sender (would strand the pause flag and interrupt
+         the operator's next authorized call).
+      2. Overflow-drain notice — bursts of >MAX_QUEUED_UPDATES from an
+         unauthorized chat must NOT produce an outbound reply to that chat
+         (would confirm the bot exists + is busy, an enumeration oracle).
+    """
+
+    UNAUTHORIZED_USER_ID = 999999001
+    UNAUTHORIZED_CHAT_ID = "999999001"
+
+    # ------------------------------------------------------------------
+    # /pause auth guard (fix 1)
+    # ------------------------------------------------------------------
+
+    def _guard_only_authorizes_owner(self, owner_user_id: int):
+        """Guard closure that only authorizes the fake owner's user id."""
+        def _guard(user_id):
+            try:
+                return int(user_id) == owner_user_id
+            except (TypeError, ValueError):
+                return False
+        return _guard
+
+    def test_unauthorized_pause_does_not_set_pause_flag(self):
+        """A /pause from an UNAUTHORIZED sender must be a total no-op:
+        pause flag stays cleared, no stranded interrupt for the operator's
+        next authorized call, no reply, no log-outbound."""
+        owner_uid = int(FAKE_CHAT_ID)
+        guard = MagicMock(side_effect=self._guard_only_authorizes_owner(owner_uid))
+        daemon, mocks = _make_daemon(guard_fn=guard)
+        assert not daemon._pause_requested.is_set()
+
+        stranger_update = make_telegram_update(
+            42, "/pause",
+            chat_id=self.UNAUTHORIZED_CHAT_ID,
+            from_id=self.UNAUTHORIZED_USER_ID,
+        )
+        daemon._on_update_queued(stranger_update)
+
+        # PauseFlag stays cleared — nothing was set.
+        assert not daemon._pause_requested.is_set()
+        # No deferred/stranded pause bookkeeping.
+        assert daemon._batch_pause_was_deferred is False
+        # No outbound reply to the stranger's chat (nor anywhere else).
+        mocks["send_response"].assert_not_called()
+
+    def test_unauthorized_pause_does_not_interrupt_next_authorized_call(self):
+        """A stranger's /pause followed by the operator's authorized text
+        must NOT cause the operator's dispatch to see an interrupt request.
+        The strand test — a pre-set flag from the unauthorized sender would
+        make the watchdog interrupt the operator's next Claude call."""
+        owner_uid = int(FAKE_CHAT_ID)
+        guard = MagicMock(side_effect=self._guard_only_authorizes_owner(owner_uid))
+        daemon, mocks = _make_daemon(guard_fn=guard)
+        daemon._lock_manager._lock_state = "unlocked"
+        daemon._lock_manager._state["unlock_timestamp"] = time.time()
+
+        # Stranger fires /pause via the poller callback.
+        stranger_update = make_telegram_update(
+            42, "/pause",
+            chat_id=self.UNAUTHORIZED_CHAT_ID,
+            from_id=self.UNAUTHORIZED_USER_ID,
+        )
+        daemon._on_update_queued(stranger_update)
+
+        # The pause flag must NOT be set — the operator's next call is safe.
+        assert not daemon._pause_requested.is_set()
+
+        # Now the operator's authorized text: dispatch runs normally and
+        # sees a cleared PauseFlag at call entry.
+        owner_update = make_telegram_update(43, "hello there")
+        with patch("landline.orchestrator.save_state"), \
+             patch("landline.orchestrator.log_conversation"), \
+             patch("landline.orchestrator.drain_inject_queue",
+                   return_value=("", [])), \
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent",
+                   return_value=None):
+            daemon._process_update_batch([owner_update])
+        mocks["run_claude"].assert_called_once()
+        # The dispatch call must NOT have seen a pre-set pause flag —
+        # after a clean run the flag remains cleared.
+        assert not daemon._pause_requested.is_set()
+
+    def test_authorized_pause_still_sets_pause_flag(self):
+        """Regression guard: the auth check must not break the happy path.
+        An authorized /pause still requests the interrupt."""
+        owner_uid = int(FAKE_CHAT_ID)
+        guard = MagicMock(side_effect=self._guard_only_authorizes_owner(owner_uid))
+        daemon, mocks = _make_daemon(guard_fn=guard)
+        assert not daemon._pause_requested.is_set()
+
+        owner_pause = make_telegram_update(7, "/pause")  # from.id == FAKE_CHAT_ID
+        daemon._on_update_queued(owner_pause)
+
+        assert daemon._pause_requested.is_set()
+
+    def test_unauthorized_pause_anonymous_shape_no_from_id(self):
+        """A /pause update with no from.id (anonymous / channel-post shape)
+        must be dropped: no pause flag set, no reply."""
+        owner_uid = int(FAKE_CHAT_ID)
+        guard = MagicMock(side_effect=self._guard_only_authorizes_owner(owner_uid))
+        daemon, mocks = _make_daemon(guard_fn=guard)
+
+        anonymous_update = {
+            "update_id": 99,
+            "message": {
+                "message_id": 990,
+                "chat": {"id": int(self.UNAUTHORIZED_CHAT_ID)},
+                # NB: no "from" key -> extract_user_id returns None.
+                "text": "/pause",
+                "date": int(time.time()),
+            },
+        }
+        daemon._on_update_queued(anonymous_update)
+        assert not daemon._pause_requested.is_set()
+        mocks["send_response"].assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Overflow-drain notice (fix 2)
+    # ------------------------------------------------------------------
+
+    def test_overflow_notice_never_goes_to_unauthorized_chat(self):
+        """A burst of >MAX_QUEUED_UPDATES from an UNAUTHORIZED chat must
+        produce ZERO outbound sendMessage to that chat. The overflow notice
+        is operator-only, so a stranger's burst cannot elicit a reply that
+        confirms the bot exists + is busy (an enumeration oracle that would
+        defeat REJECTION_MODE=silent)."""
+        owner_uid = int(FAKE_CHAT_ID)
+        guard = MagicMock(side_effect=self._guard_only_authorizes_owner(owner_uid))
+        daemon, mocks = _make_daemon(guard_fn=guard)
+        daemon._lock_manager._lock_state = "unlocked"
+        daemon._lock_manager._state["unlock_timestamp"] = time.time()
+
+        burst_size = MAX_QUEUED_UPDATES + 5
+        burst = [
+            make_telegram_update(
+                1_000_000 + i, "burst-%d" % i,
+                chat_id=self.UNAUTHORIZED_CHAT_ID,
+                from_id=self.UNAUTHORIZED_USER_ID,
+            )
+            for i in range(burst_size)
+        ]
+
+        class FakePoller:
+            _drained = False
+
+            def __init__(self_inner, **_kw):
+                pass
+
+            def start(self_inner):
+                pass
+
+            def signal_stop(self_inner):
+                pass
+
+            def stop(self_inner):
+                pass
+
+            def drain(self_inner, block_timeout_seconds=None):
+                if not self_inner._drained:
+                    self_inner._drained = True
+                    return list(burst)
+                daemon.running = False
+                return []
+
+            def has_pending(self_inner):
+                return False
+
+            def advance_processed_cursor(self_inner, uid):
+                pass
+
+            def discard_queued_ids(self_inner, ids):
+                pass
+
+            def last_successful_poll(self_inner):
+                return time.time()
+
+        with patch("landline.orchestrator.BackgroundPoller", FakePoller), \
+             patch("landline.orchestrator.save_state"), \
+             patch("landline.orchestrator.log_conversation"), \
+             patch("landline.orchestrator.sweep_media_caches"), \
+             patch("landline.orchestrator.OutboundSpoolReplayer"), \
+             patch("landline.orchestrator.time.sleep"):
+            daemon.run()
+
+        # ZERO outbound sendMessage to the unauthorized chat_id — not the
+        # overflow notice, not a reject reply, not anything. The classifier
+        # is REJECTION_MODE=silent by default, so the whole burst produces
+        # no writes to the stranger's chat.
+        sends_to_stranger = [
+            call for call in mocks["send_response"].call_args_list
+            if len(call[0]) >= 2 and call[0][1] == self.UNAUTHORIZED_CHAT_ID
+        ]
+        assert sends_to_stranger == [], (
+            "overflow / any outbound must NEVER reach an unauthorized "
+            "chat_id — leaking to %r would be an enumeration oracle. "
+            "Got: %r" % (self.UNAUTHORIZED_CHAT_ID, sends_to_stranger)
+        )
+        # And any overflow notice that DID fire went to the operator only.
+        overflow_notices = [
+            call for call in mocks["send_response"].call_args_list
+            if len(call[0]) >= 3 and "processing the first" in call[0][2]
+        ]
+        for call in overflow_notices:
+            assert call[0][1] == daemon.chat_id, (
+                "overflow notice must land on operator's chat_id (%r), "
+                "not %r" % (daemon.chat_id, call[0][1])
+            )

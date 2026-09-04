@@ -54,8 +54,9 @@ class TestExtractChatId:
         assert extract_chat_id({"chat": {"id": "67890"}}) == "67890"
 
     def test_missing_chat_returns_default(self):
-        """No ``chat`` key → default. The ``run()`` overflow-notice path
-        falls back to ``self.chat_id`` when this returns the empty default."""
+        """No ``chat`` key → default. Callers pass their own fallback (e.g. a
+        chat_id extracted from a sibling message in the batch) when they need
+        one; the helper stays defaulting-to-empty."""
         assert extract_chat_id({}) == ""
         assert extract_chat_id({}, default="fallback") == "fallback"
 

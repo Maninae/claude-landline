@@ -21,6 +21,7 @@ from landline.runtime.batch_classifier import (
     _is_pause_command,
     classify_updates,
     extract_chat_id,
+    extract_user_id,
 )
 from landline.telegram import download_file
 from landline.claude.dispatch import ClaudeDispatcher, ClaudeStreamResult
@@ -196,12 +197,30 @@ class TelegramDaemon:
     def _on_update_queued(self, update: Dict) -> None:
         """Poller-thread callback: O(1), non-blocking; detects /pause and sets
         the pause flag so the watchdog can interrupt the in-flight Claude call.
+
+        - Auth-gated: an unauthorized sender's /pause must have ZERO effect on
+          the daemon (no pause flag set, no stranded interrupt of the operator's
+          next authorized call, no reply). Extract from.id and check the guard
+          BEFORE honoring the pause request; anonymous / non-allowlisted senders
+          fall through as a no-op — the classify_updates pass will silently
+          drop their update through its own guard, same posture as any other
+          unauthorized inbound (no enumeration oracle).
+        - Callback runs on the poller thread; keep the auth check O(1) via the
+          cached allowlist in ``landline.runtime.guard`` (60s TTL). No I/O.
         """
         message = update.get("message") or {}
         text = (message.get("text") or "").strip().lower()
-        if _is_pause_command(text):
-            self._pause_requested.request_pause()
-            log("/pause detected — requesting interrupt")
+        if not _is_pause_command(text):
+            return
+        user_id = extract_user_id(message)
+        if user_id is None or not self._guard_fn(user_id):
+            # Unauthorized (or anonymous) /pause — silently ignore. Do NOT set
+            # the pause flag; a stranded flag would interrupt the operator's
+            # NEXT authorized call. The classifier's own guard will drop the
+            # update in the main-loop path without reply/reaction.
+            return
+        self._pause_requested.request_pause()
+        log("/pause detected — requesting interrupt")
 
     def _handle_restart_continuation(self) -> None:
         """Delegator — see ``restart.py``."""
@@ -433,9 +452,14 @@ class TelegramDaemon:
                 if len(updates) > MAX_QUEUED_UPDATES:
                     overflow = len(updates) - MAX_QUEUED_UPDATES
                     dropped = updates[MAX_QUEUED_UPDATES:]
-                    notice_chat = extract_chat_id(
-                        dropped[0].get("message") or {}
-                    ) or self.chat_id
+                    # Overflow notice goes ONLY to the operator's own chat —
+                    # NEVER to a dropped sender's chat_id. Bursting >30
+                    # messages from an unauthorized chat MUST NOT elicit any
+                    # outbound reply (that would be an enumeration oracle that
+                    # confirms the bot exists and is busy, defeating
+                    # REJECTION_MODE=silent). The operator's chat is the one
+                    # place this notice belongs.
+                    notice_chat = self.chat_id
                     # Send BEFORE advancing dropped cursors — a raised send
                     # leaves them un-advanced for Telegram re-delivery.
                     notice_sent = False

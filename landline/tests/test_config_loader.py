@@ -169,6 +169,55 @@ class TestLoadOverridesFailFast:
             _load_overrides(tmp_path)
 
 
+class TestRejectionModeValidation:
+    """``rejection_mode`` is a security-load-bearing knob (silent-by-default
+    removes an enumeration oracle for unauthorized senders). The loader
+    constrains its value to a fixed allowlist so a typo can't silently
+    flip a silent gate into a loud one — the invalid value must fail
+    LOUD at startup, not degrade to "reply" behaviour."""
+
+    def test_silent_value_accepted(self, tmp_path):
+        (tmp_path / "landline.json").write_text(json.dumps({
+            "rejection_mode": "silent",
+        }))
+        from landline.config import _load_overrides
+        assert _load_overrides(tmp_path)["rejection_mode"] == "silent"
+
+    def test_reply_value_accepted(self, tmp_path):
+        (tmp_path / "landline.json").write_text(json.dumps({
+            "rejection_mode": "reply",
+        }))
+        from landline.config import _load_overrides
+        assert _load_overrides(tmp_path)["rejection_mode"] == "reply"
+
+    def test_typo_raises_system_exit(self, tmp_path):
+        """A typo like "Silent" (wrong case) must NOT silently coerce to
+        anything — including the loud "reply" path. Fail loud on invalid."""
+        for typo in ("Silent", "SILENT", "quiet", "loud", "off", "none", ""):
+            (tmp_path / "landline.json").write_text(json.dumps({
+                "rejection_mode": typo,
+            }))
+            from landline.config import _load_overrides
+            with pytest.raises(SystemExit):
+                _load_overrides(tmp_path)
+
+    def test_non_string_raises_system_exit(self, tmp_path):
+        (tmp_path / "landline.json").write_text(json.dumps({
+            "rejection_mode": True,
+        }))
+        from landline.config import _load_overrides
+        with pytest.raises(SystemExit):
+            _load_overrides(tmp_path)
+
+    def test_null_raises_system_exit(self, tmp_path):
+        (tmp_path / "landline.json").write_text(json.dumps({
+            "rejection_mode": None,
+        }))
+        from landline.config import _load_overrides
+        with pytest.raises(SystemExit):
+            _load_overrides(tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # Subprocess tests: constants derive from _cfg + overrides applied at import
 # ---------------------------------------------------------------------------

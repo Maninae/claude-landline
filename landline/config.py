@@ -64,6 +64,24 @@ def _v_path_or_none(v: Any) -> Optional[str]:
     return os.path.expanduser(v)
 
 
+# Allowed values for ``rejection_mode``. Constrained via the loader so a typo
+# ("Silent", "quiet", "loud") can't silently flip the silent-by-default gate
+# into a loud enumeration oracle: the invalid value fails loud at startup.
+_REJECTION_MODE_ALLOWED = frozenset({"silent", "reply"})
+
+
+def _v_rejection_mode(v: Any) -> str:
+    if not isinstance(v, str):
+        raise ValueError("expected string")
+    if v not in _REJECTION_MODE_ALLOWED:
+        raise ValueError(
+            "expected one of %s" % (
+                ", ".join(sorted(repr(x) for x in _REJECTION_MODE_ALLOWED)),
+            )
+        )
+    return v
+
+
 # Fixed allowlist of JSON keys → validator. Unknown key raises SystemExit at
 # import (fail-fast; never run half-configured).
 _ALLOWED_KEYS = {
@@ -82,7 +100,7 @@ _ALLOWED_KEYS = {
     "whisper_model_dir": _v_path_str,
     "whisper_language": _v_str,
     "reaction_acks_enabled": _v_bool,
-    "rejection_mode": _v_str,
+    "rejection_mode": _v_rejection_mode,
     "archive_extractor": _v_path_or_none,
     # Cosmetic profile label for the /status header (e.g. "mineru", "staging").
     # Deployer-facing only — never a security control. Surfaced by
