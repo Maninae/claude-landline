@@ -785,3 +785,66 @@ def test_usage_stats_model_label_max_is_reasonable():
     from landline.config import USAGE_STATS_MODEL_LABEL_MAX
     assert USAGE_STATS_MODEL_LABEL_MAX >= 16
     assert USAGE_STATS_MODEL_LABEL_MAX <= 256
+
+
+# ---------------------------------------------------------------------------
+# Inject queue — one canonical WORKSPACE-derived expression
+# ---------------------------------------------------------------------------
+
+
+def test_inject_queue_dir_under_cache():
+    """Canonical inject-queue path lives on the config module (single
+    source of truth). Both ``orchestrator.daemon.INJECT_QUEUE_DIR`` and
+    ``media.video._INJECT_QUEUE_DIR`` re-export / alias it."""
+    from landline.config import INJECT_QUEUE_DIR, WORKSPACE
+    assert INJECT_QUEUE_DIR == WORKSPACE / "cache" / "inject-queue"
+
+
+def test_inject_queue_dir_daemon_and_video_share_config_object():
+    """Regression guard against the pre-collapse state: two independent
+    ``WORKSPACE / "cache" / "inject-queue"`` expressions (one in
+    ``orchestrator/daemon.py``, one in ``media/video.py``) that could
+    silently drift. Post-collapse, both aliases MUST resolve to the same
+    Path object as the config canonical."""
+    from landline.config import INJECT_QUEUE_DIR
+    from landline.orchestrator import daemon as daemon_mod
+    from landline.media import video as video_mod
+    assert daemon_mod.INJECT_QUEUE_DIR is INJECT_QUEUE_DIR
+    assert video_mod._INJECT_QUEUE_DIR is INJECT_QUEUE_DIR
+
+
+# ---------------------------------------------------------------------------
+# Cosmetic profile_name
+# ---------------------------------------------------------------------------
+
+
+def test_profile_name_default_is_none():
+    """Default: PROFILE_NAME is None → /status header stays plain, no
+    parenthesis. Only multi-daemon deployers set it."""
+    from landline.config import PROFILE_NAME
+    assert PROFILE_NAME is None
+
+
+def test_profile_name_accepts_string_from_landline_json(tmp_path):
+    """The loader accepts a string and passes it through unchanged."""
+    from landline.config import _load_overrides
+    (tmp_path / "landline.json").write_text('{"profile_name": "mineru"}')
+    overrides = _load_overrides(tmp_path)
+    assert overrides == {"profile_name": "mineru"}
+
+
+def test_profile_name_accepts_null_from_landline_json(tmp_path):
+    """Explicit JSON null coerces to Python None (same as the default)."""
+    from landline.config import _load_overrides
+    (tmp_path / "landline.json").write_text('{"profile_name": null}')
+    overrides = _load_overrides(tmp_path)
+    assert overrides == {"profile_name": None}
+
+
+def test_profile_name_rejects_non_string(tmp_path):
+    """A number/bool for profile_name is a config error — fail-fast at
+    import so the daemon never runs half-configured."""
+    from landline.config import _load_overrides
+    (tmp_path / "landline.json").write_text('{"profile_name": 42}')
+    with pytest.raises(SystemExit):
+        _load_overrides(tmp_path)

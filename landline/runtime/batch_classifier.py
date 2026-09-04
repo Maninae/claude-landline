@@ -18,7 +18,7 @@ command / text / photo / pause / document / voice / video buckets.
   video-note format.
 """
 
-from typing import Dict, List, TYPE_CHECKING, Tuple
+from typing import Dict, List, Optional, TYPE_CHECKING, Tuple
 
 from landline import config as _config
 from landline.config import (
@@ -46,11 +46,39 @@ def extract_chat_id(message: Dict, default: str = "") -> str:
     """Pull `str(chat.id)` from a Telegram message dict, defaulting on miss.
 
     - Centralizes the defensive two-level `.get("chat", {}).get("id", ...)`
-      walk + `str(...)` coercion the rest of the daemon depends on
-      (allowlist cache key, lock checks, log fields).
+      walk + `str(...)` coercion the rest of the daemon depends on for
+      chat-scoped bookkeeping (per-chat senders, lock state, log fields,
+      the destination for a loud-mode rejection reply).
     - Always returns a `str`; `default` on missing chat / chat.id.
+    - Chat id is NOT the auth identity anymore — see ``extract_user_id`` for
+      that. Callers still want chat id for the bucket / reply target.
     """
     return str(message.get("chat", {}).get("id", default))
+
+
+def extract_user_id(message: Dict) -> Optional[int]:
+    """Pull the Telegram sender's ``from.id`` from a message dict.
+
+    Returns the integer user id, or ``None`` when ``from`` / ``from.id`` is
+    absent (an anonymous message shape — e.g. channel post — the daemon has
+    no way to authorize and must drop).
+
+    Load-bearing invariant: this is the value fed to the guard. A 1:1 owner
+    bot has ``from.id == chat.id`` so the migration from the legacy chat-id
+    gate is a no-op live; a group/guest sender would carry a different
+    ``from.id`` from the group's ``chat.id`` and MUST be authorized on the
+    former (see ``landline.runtime.guard`` module docstring).
+    """
+    from_field = message.get("from")
+    if not isinstance(from_field, dict):
+        return None
+    user_id = from_field.get("id")
+    if user_id is None:
+        return None
+    try:
+        return int(user_id)
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_acceptable_document(document_field: Dict) -> bool:
@@ -169,9 +197,35 @@ def classify_updates(
             daemon._advance_update_cursor(update_id)
             continue
 
-        if not daemon._guard_fn(chat_id):
-            log(f"Rejected message from unauthorized chat: {chat_id}")
+        # Auth identity is the sender's from.id (a Telegram USER id), NOT
+        # chat.id. In a 1:1 owner bot they're equal, but a group/guest
+        # sender presents a distinct from.id that MUST be the value we
+        # authorize against. See landline.runtime.guard module docstring.
+        user_id = extract_user_id(message)
+        if user_id is None:
+            # No from.id → the message shape is anonymous (channel post-like);
+            # the daemon has no user identity to authorize against, so drop.
+            # Silent (no reject reply, no reaction) — same posture as any
+            # other unauthorized message: no enumeration oracle.
+            log(
+                "Dropping message with missing from.id: "
+                f"chat_id={chat_id}, update_id={update_id}"
+            )
             daemon._advance_update_cursor(update_id)
+            continue
+
+        if not daemon._guard_fn(user_id):
+            # Log both ids: from.id is what got rejected, chat.id is the
+            # surface the sender reached us on (useful for incident triage,
+            # especially when a group chat exposes an unauthorized from.id
+            # via a chat that's on the allowlist for other reasons).
+            log(
+                "Rejected message from unauthorized user: "
+                f"from_id={user_id}, chat_id={chat_id}"
+            )
+            daemon._advance_update_cursor(update_id)
+            # Loud-mode reply (REJECTION_MODE=="reply") lands in the chat
+            # the sender messaged from, not to the user id.
             daemon._reject_fn(daemon.token, chat_id)
             continue
 

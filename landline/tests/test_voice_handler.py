@@ -547,6 +547,7 @@ class TestDispatchVoiceRejectionsClearAck:
     def _make_msg_with_mid(self, mid=555, duration=15, key="voice"):
         return {
             "chat": {"id": 12345},
+            "from": {"id": 12345},
             "message_id": mid,
             key: {"file_id": "vx", "duration": duration},
         }

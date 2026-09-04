@@ -85,8 +85,11 @@ security add-generic-password -s telegram-bot-token \
 security add-generic-password -s telegram-chat-id \
     -a landline -w '123456789'
 
-# 3. Allowlist (comma-separated chat_ids). Fail-closed: only these chats
-#    can send messages to the bot. Include your own chat_id.
+# 3. Allowlist (comma-separated Telegram USER ids — the `from.id` on each
+#    inbound message, NOT the chat.id). Fail-closed: only these users can
+#    send messages to the bot. For a 1:1 owner bot your user id equals your
+#    chat id, so the same value works; in a group / multi-user context the
+#    two differ and this must be the sender's user id. Include your own.
 security add-generic-password -s telegram-allowed-chat-ids \
     -a landline -w '123456789'
 
@@ -150,6 +153,7 @@ Start with something this minimal. Add keys as needed.
 | `whisper_language` | `"en"` | Pinned language (skips auto-detect, faster and more accurate for a known-language operator). | `"en"` |
 | `reaction_acks_enabled` | `true` | Sends 👀 on receipt and 👌 on turn completion via `setMessageReaction`. Kill switch — flip to `false` if Telegram ever removes one of the emojis from the allowed set. | `false` |
 | `rejection_mode` | `"silent"` | `"silent"` sends nothing to unauthorized senders (removes the enumeration oracle). `"reply"` restores a "This bot is private." reply — useful during incident response. | `"silent"` |
+| `profile_name` | `null` | Optional cosmetic label surfaced in the `/status` header (in parentheses after `agent_name`). Purely for eyeballing WHICH daemon replied when you run more than one on the same Mac — never an auth surface. `null` keeps the header plain. | `"mineru"` |
 
 ### The `bypassPermissions` warning
 
@@ -256,7 +260,74 @@ If something isn't working:
   `launchctl bootout gui/$UID ~/Library/LaunchAgents/com.landline.telegram-daemon.plist`
   first, then bootstrap.
 
-## 7. Day-two operations
+## 7. Running multiple daemons on one Mac
+
+Landline is designed to run one instance per **profile** (agent + workspace
++ bot). Two profiles on the same Mac (e.g. `mineru` for personal work,
+`staging` for testing) coexist cleanly as long as **every** per-profile
+name is distinct — otherwise they clobber each other's Keychain entries,
+launchd label, PID lock, and disk state.
+
+The three axes you MUST separate:
+
+| Axis | Why it must be per-profile | How |
+|---|---|---|
+| **Workspace directory** | State, cache, media, PID lock, spool, daily log, `landline.json`. Two daemons sharing a workspace fight over the singleton flock and corrupt each other's state. | Point `WorkingDirectory` in each plist at a distinct dir (`~/.mineru`, `~/.landline-staging`, etc.). Export `LANDLINE_WORKSPACE` if you launch the daemon interactively from another cwd. |
+| **Keychain account** | The five `telegram-*` services are shared service names; only the **account** disambiguates. Two daemons with the same account would read the same bot token and route each other's traffic. | Set `"keychain_account": "<profile>"` in each `landline.json` and re-add the five secrets under that account. |
+| **launchd label** | Two plists with the same `Label` bootstrap-conflict, and `KeepAlive` restarts the wrong one on crash. `/status`'s `launchctl list` filter also depends on the label prefix. | Give each plist a distinct `Label` (`com.mineru.telegram-daemon` vs `com.landline-staging.telegram-daemon`) and set `"launchd_label_prefix"` in each `landline.json` to match. |
+
+Two other knobs that help operationally:
+
+- **`profile_name`** in `landline.json` — cosmetic label surfaced in the
+  `/status` header (e.g. `**Rook System Status** (mineru)`). Not an auth
+  surface; purely so you can eyeball which daemon replied when you send
+  `/status` to both bots.
+- **Distinct Telegram bots** — each profile gets its own bot from
+  BotFather (one token per profile Keychain entry) and its own allowlist.
+  A single bot handling two profiles is not a supported configuration.
+
+### Worked example: adding a `mineru` profile alongside a default `landline`
+
+```bash
+# 1. Workspace
+mkdir -p ~/.mineru/{cache,logs/telegram-daemon,memory/daily}
+
+# 2. Keychain entries under a distinct account. Substitute your own values.
+security add-generic-password -s telegram-bot-token       -a mineru -w '<new-bot-token>'
+security add-generic-password -s telegram-chat-id         -a mineru -w '<your-user-id>'
+security add-generic-password -s telegram-allowed-chat-ids -a mineru -w '<your-user-id>'
+PASSPHRASE='second-passphrase'
+HASH=$(printf %s "$PASSPHRASE" | shasum -a 256 | awk '{print $1}')
+security add-generic-password -s telegram-unlock-hash    -a mineru -w "$HASH"
+
+# 3. landline.json — every per-profile axis distinct.
+cat > ~/.mineru/landline.json <<'JSON'
+{
+  "keychain_account": "mineru",
+  "launchd_label_prefix": "com.mineru",
+  "agent_name": "Mineru",
+  "profile_name": "mineru"
+}
+JSON
+
+# 4. Plist — copy the template, retarget WorkingDirectory + Label.
+cp deploy/com.landline.telegram-daemon.plist \
+   ~/Library/LaunchAgents/com.mineru.telegram-daemon.plist
+${EDITOR:-vi} ~/Library/LaunchAgents/com.mineru.telegram-daemon.plist
+# Change the <Label> to com.mineru.telegram-daemon, WorkingDirectory to
+# /Users/YOU/.mineru, and (recommended) StandardOutPath / StandardErrorPath
+# to /Users/YOU/.mineru/logs/telegram-daemon/{stdout,stderr}.log so the
+# two daemons never share a log file.
+
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.mineru.telegram-daemon.plist
+launchctl list | grep -E '(landline|mineru)'
+```
+
+At startup each daemon logs its resolved workspace and inject-queue path
+(`Inject queue: /Users/YOU/.mineru/cache/inject-queue`) so you can
+eyeball which is which in the log tail.
+
+## 8. Day-two operations
 
 - **Restart after an edit:** `./deploy/restart.sh` — compile, import,
   test, `bootout`+`bootstrap`, tail. Never raw `launchctl`.

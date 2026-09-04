@@ -13,7 +13,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from landline.runtime.batch_classifier import classify_updates, extract_chat_id
+from landline.runtime.batch_classifier import (
+    classify_updates,
+    extract_chat_id,
+    extract_user_id,
+)
 
 
 def _make_daemon(running: bool = True) -> MagicMock:
@@ -76,6 +80,7 @@ class TestExtractChatId:
             "update_id": 1,
             "message": {
                 "chat": {"id": 555},
+                "from": {"id": 555},
                 "text": "hi",
             },
         }
@@ -203,6 +208,7 @@ class TestClassifierStillWorksAfterPrune:
             "update_id": 1,
             "message": {
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "text": "hello agent",
             },
         }
@@ -219,6 +225,7 @@ class TestClassifierStillWorksAfterPrune:
             "update_id": 2,
             "message": {
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "text": "/pause",
             },
         }
@@ -234,6 +241,7 @@ class TestClassifierStillWorksAfterPrune:
             "update_id": 3,
             "message": {
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "text": "/status",
             },
         }
@@ -249,6 +257,7 @@ class TestClassifierStillWorksAfterPrune:
             "update_id": 4,
             "message": {
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "photo": [{"file_id": "f", "width": 1, "height": 1}],
             },
         }
@@ -340,6 +349,7 @@ class TestDocumentBucket:
             "update_id": uid,
             "message": {
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "document": document,
             },
         }
@@ -424,6 +434,7 @@ class TestVoiceBucket:
             "update_id": uid,
             "message": {
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 media_key: {"file_id": f"{media_key}-file", "duration": duration},
             },
         }
@@ -460,6 +471,7 @@ class TestVoiceBucket:
             "update_id": 201,
             "message": {
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "photo": [{"file_id": "p", "width": 1, "height": 1}],
                 "voice": {"file_id": "v", "duration": 5},
             },
@@ -499,6 +511,7 @@ class TestVideoBucket:
             "update_id": uid,
             "message": {
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "video": {
                     "file_id": "vidfile-1",
                     "duration": 5,
@@ -518,6 +531,7 @@ class TestVideoBucket:
             "update_id": uid,
             "message": {
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "document": {
                     "file_id": "docvid-1",
                     "file_name": file_name,
@@ -575,6 +589,7 @@ class TestVideoBucket:
             "update_id": 302,
             "message": {
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "video_note": {"file_id": "vn-1", "duration": 5},
             },
         }
@@ -591,6 +606,7 @@ class TestVideoBucket:
             "update_id": 303,
             "message": {
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "document": {
                     "file_id": "d-1",
                     "file_name": "report.pdf",
@@ -612,6 +628,7 @@ class TestVideoBucket:
             "update_id": 304,
             "message": {
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "photo": [{"file_id": "p", "width": 1, "height": 1}],
                 "video": {"file_id": "v", "file_size": 1024},
             },
@@ -652,6 +669,7 @@ class TestReactionAcks:
             "message": {
                 "message_id": message_id if message_id is not None else uid * 10,
                 "chat": {"id": chat_id},
+                "from": {"id": chat_id},
                 "text": text,
             },
         }
@@ -675,6 +693,7 @@ class TestReactionAcks:
             "message": {
                 "message_id": 777,
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "photo": [{"file_id": "p", "width": 1, "height": 1}],
             },
         }
@@ -693,6 +712,7 @@ class TestReactionAcks:
             "message": {
                 "message_id": 888,
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "voice": {"file_id": "v", "duration": 5},
             },
         }
@@ -711,6 +731,7 @@ class TestReactionAcks:
             "message": {
                 "message_id": 999,
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "document": {
                     "file_id": "d",
                     "file_name": "report.pdf",
@@ -750,6 +771,7 @@ class TestReactionAcks:
             "message": {
                 "message_id": 333,
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "text": "edited",
                 "edit_date": 123456,
             },
@@ -807,6 +829,7 @@ class TestReactionAcks:
             "message": {
                 "message_id": 2222,
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
             },
         }
         with patch("landline.runtime.batch_classifier.reactions.set_reaction_async") as mock_ack:
@@ -822,6 +845,7 @@ class TestReactionAcks:
             "message": {
                 "message_id": 3333,
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "document": {
                     "file_id": "d",
                     "file_name": "malware.exe",
@@ -874,6 +898,7 @@ class TestDocumentRejectLogPrivacy:
             "update_id": 999,
             "message": {
                 "chat": {"id": 12345},
+                "from": {"id": 12345},
                 "document": document,
             },
         }
@@ -892,3 +917,210 @@ class TestDocumentRejectLogPrivacy:
                         f"filename leaked into classifier log: {arg!r}"
                     )
                     assert "XSensitiveMarker" not in arg
+
+
+# ---------------------------------------------------------------------------
+# extract_user_id helper — from.id is the auth identity now
+# ---------------------------------------------------------------------------
+
+class TestExtractUserId:
+    """The classifier's auth path routes ``message["from"]["id"]`` to the
+    guard (not chat.id). See ``landline.runtime.guard`` module docstring
+    for the security rationale."""
+
+    def test_returns_int_from_id(self):
+        assert extract_user_id({"from": {"id": 987654321}}) == 987654321
+        assert isinstance(
+            extract_user_id({"from": {"id": 42}}), int
+        )
+
+    def test_coerces_string_id_to_int(self):
+        """Belt-and-suspenders: some Telegram edge cases may serialize id
+        as a string. Coerce to int so the guard's Set[int] lookup hits."""
+        assert extract_user_id({"from": {"id": "555"}}) == 555
+
+    def test_missing_from_returns_none(self):
+        """No ``from`` field → None. Classifier drops the message
+        (anonymous shape has no user id to authorize against)."""
+        assert extract_user_id({}) is None
+        assert extract_user_id({"chat": {"id": 111}}) is None
+
+    def test_missing_from_id_returns_none(self):
+        """``from`` present but ``from.id`` absent → None (drop)."""
+        assert extract_user_id({"from": {}}) is None
+
+    def test_non_dict_from_returns_none(self):
+        """Malformed ``from`` (a string, a list) → None. Never crash."""
+        assert extract_user_id({"from": "anonymous"}) is None
+        assert extract_user_id({"from": None}) is None
+
+    def test_uncoerceable_id_returns_none(self):
+        """A weird id shape (dict, list) that isn't an int → None."""
+        assert extract_user_id({"from": {"id": {"nested": 1}}}) is None
+        assert extract_user_id({"from": {"id": None}}) is None
+
+
+class TestFromIdIsAuthIdentity:
+    """The guard receives ``from.id``, NOT ``chat.id``. Two integration
+    proofs: an owner-shape message (chat.id == from.id) authorizes as
+    before, and a group-chat shape (chat.id != from.id, from.id is the
+    intruder's user id) authorizes on the from.id — not the group id."""
+
+    def test_guard_receives_from_id_int(self):
+        """Guard is called with the sender's ``from.id`` as int."""
+        daemon = _make_daemon()
+        update = {
+            "update_id": 1,
+            "message": {
+                "chat": {"id": 999_000_000},  # a group chat id
+                "from": {"id": 111_222_333},  # the sender's user id
+                "text": "hi",
+            },
+        }
+        classify_updates(daemon, [update])
+        daemon._guard_fn.assert_called_once_with(111_222_333)
+
+    def test_group_sender_not_authorized_via_group_chat_id(self):
+        """Load-bearing security regression guard.
+
+        Pre-migration bug: authorizing on ``chat.id`` would ADMIT a group
+        message whose ``chat.id`` (the group's id) happened to match an
+        allow-listed value — even though the actual sender's ``from.id``
+        was not on the allowlist. This test wires ``_guard_fn`` to allow
+        ONLY the group's chat id (999) and DENY the from.id (444);
+        the classifier must reject."""
+        daemon = _make_daemon()
+        # Allow chat.id (999), deny from.id (444). If the classifier still
+        # authorizes on chat.id, the reject_fn will NOT be called; if it
+        # correctly authorizes on from.id, it WILL be called.
+        daemon._guard_fn = MagicMock(return_value=False)
+        update = {
+            "update_id": 1,
+            "message": {
+                "chat": {"id": 999},
+                "from": {"id": 444},
+                "text": "attack",
+            },
+        }
+        classify_updates(daemon, [update])
+        daemon._guard_fn.assert_called_once_with(444)
+        # Reject reply lands in the CHAT surface (string), NOT the from.id.
+        daemon._reject_fn.assert_called_once_with(daemon.token, "999")
+
+    def test_owner_shape_backward_compat(self):
+        """1:1 owner-bot shape (chat.id == from.id) still authorizes — the
+        migration is a no-op for the common case."""
+        daemon = _make_daemon()
+        update = {
+            "update_id": 2,
+            "message": {
+                "chat": {"id": 123_456_789},
+                "from": {"id": 123_456_789},
+                "text": "hi",
+            },
+        }
+        classify_updates(daemon, [update])
+        daemon._guard_fn.assert_called_once_with(123_456_789)
+        daemon._reject_fn.assert_not_called()
+
+
+class TestMissingFromIdSilentlyDropped:
+    """A message shape with no ``from`` (channel post-like, malformed
+    update) has NO identity to authorize against. The classifier must:
+
+      - NOT call the guard (nothing to check).
+      - NOT call ``reject_fn`` (no enumeration oracle, no visible ack).
+      - NOT bucket the message.
+      - Advance the cursor so the same broken update doesn't loop.
+    """
+
+    def test_no_from_field_drops_silently(self):
+        daemon = _make_daemon()
+        update = {
+            "update_id": 42,
+            "message": {
+                "chat": {"id": 12345},
+                "text": "should never reach a bucket",
+                # No "from" — anonymous / channel-post-like
+            },
+        }
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(
+            daemon, [update],
+        )
+        assert cmds == texts == photos == pauses == docs == voices == videos == []
+        daemon._guard_fn.assert_not_called()
+        daemon._reject_fn.assert_not_called()
+        daemon._advance_update_cursor.assert_called_once_with(42)
+
+    def test_no_from_id_drops_silently(self):
+        """``from`` present but ``from.id`` missing — same drop."""
+        daemon = _make_daemon()
+        update = {
+            "update_id": 43,
+            "message": {
+                "chat": {"id": 12345},
+                "from": {},  # no id
+                "text": "hi",
+            },
+        }
+        cmds, texts, photos, pauses, docs, voices, videos = classify_updates(
+            daemon, [update],
+        )
+        assert cmds == texts == photos == pauses == docs == voices == videos == []
+        daemon._guard_fn.assert_not_called()
+        daemon._reject_fn.assert_not_called()
+        daemon._advance_update_cursor.assert_called_once_with(43)
+
+
+class TestUnauthorizedSenderSilentlyDropped:
+    """Guard denies (from.id not on allowlist) → the classifier must
+    silently drop: reject_fn is invoked (which under default
+    ``REJECTION_MODE == "silent"`` sends nothing — see ``guard.py``), no
+    reaction is fired (enumeration oracle), no bucket, cursor advances.
+    """
+
+    def test_unauthorized_from_id_no_bucket_no_reaction(self):
+        from landline.runtime.batch_classifier import reactions as _r
+        daemon = _make_daemon()
+        daemon._guard_fn = MagicMock(return_value=False)
+        daemon._batch_ack_message_ids = {}
+        update = {
+            "update_id": 88,
+            "message": {
+                "message_id": 555,
+                "chat": {"id": 999_999_999},
+                "from": {"id": 999_999_999},
+                "text": "attack",
+            },
+        }
+        with patch.object(_r, "set_reaction_async") as mock_react:
+            cmds, texts, photos, pauses, docs, voices, videos = classify_updates(
+                daemon, [update],
+            )
+        assert cmds == texts == photos == pauses == docs == voices == videos == []
+        # No 👀 reaction ever fires for an unauthorized sender.
+        mock_react.assert_not_called()
+        assert daemon._batch_ack_message_ids == {}
+        # Cursor advances (attacker can't spam-replay the same message).
+        daemon._advance_update_cursor.assert_called_once_with(88)
+        # reject_fn IS called (with the chat surface — the guard.reject_message
+        # implementation is what enforces silent vs loud mode; see test_guard).
+        daemon._reject_fn.assert_called_once_with(daemon.token, "999999999")
+
+    def test_unauthorized_reject_targets_chat_not_from_id(self):
+        """When a group message would somehow reach here, the reject reply
+        (loud mode) must target the chat surface, not the sender's user id
+        — you can't send a bot message to a bare user id."""
+        daemon = _make_daemon()
+        daemon._guard_fn = MagicMock(return_value=False)
+        update = {
+            "update_id": 89,
+            "message": {
+                "message_id": 556,
+                "chat": {"id": 111},   # group id
+                "from": {"id": 222},   # attacker
+                "text": "attack",
+            },
+        }
+        classify_updates(daemon, [update])
+        daemon._reject_fn.assert_called_once_with(daemon.token, "111")

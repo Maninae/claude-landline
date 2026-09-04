@@ -13,6 +13,7 @@ from landline.config import (
     DOCTOR_SCRIPT,
     LAUNCHD_LABEL_PREFIX,
     MORNING_BRIEF_GLOB,
+    PROFILE_NAME,
     WORKSPACE,
 )
 from landline.runtime.lock import LockManager
@@ -34,8 +35,19 @@ def _status_text(
     lock_manager: LockManager,
     workspace: Path,
 ) -> str:
-    """Build the /status response. Runs subprocesses for system info."""
-    lines = [f"**{AGENT_NAME} System Status**\n"]
+    """Build the /status response. Runs subprocesses for system info.
+
+    - Header surfaces the optional cosmetic ``PROFILE_NAME`` in parentheses so
+      an operator running multiple daemons on one Mac (per-profile plist,
+      per-profile keychain account, per-profile workspace — see
+      ``docs/SETUP.md`` → "Running multiple daemons") can tell them apart at
+      a glance. Purely visual; never an auth/security surface.
+    """
+    if PROFILE_NAME:
+        header = f"**{AGENT_NAME} System Status** ({PROFILE_NAME})\n"
+    else:
+        header = f"**{AGENT_NAME} System Status**\n"
+    lines = [header]
 
     try:
         result = subprocess.run(

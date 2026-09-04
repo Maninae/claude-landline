@@ -30,6 +30,7 @@ def _make_daemon_stub():
 def _photo_msg(mid, file_id="p-1", media_group_id=None):
     msg = {
         "chat": {"id": 12345},
+        "from": {"id": 12345},
         "message_id": mid,
         "photo": [{"file_id": file_id, "file_size": 1024}],
     }

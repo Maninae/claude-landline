@@ -272,8 +272,11 @@ class TestE2EConversationFlow:
         assert not daemon._pause_requested.is_set()
 
     def test_unauthorized_chat_rejected(self):
-        """Foreign chat_id (not on allowlist) -> guard denies, reject_fn fires,
-        no Claude dispatch, cursor advances so the attacker can't spam."""
+        """Foreign sender (from.id not on allowlist) → guard denies,
+        reject_fn fires against the chat surface, no Claude dispatch, cursor
+        advances so the attacker can't spam. Post-migration the guard
+        authorizes on ``from.id`` (int); the reject reply still targets the
+        chat id (string) — see ``guard.reject_message`` docstring."""
         guard = MagicMock(return_value=False)
         reject = MagicMock()
         run_claude = MagicMock()
@@ -307,7 +310,9 @@ class TestE2EConversationFlow:
         with patch("landline.orchestrator.save_state"):
             daemon._process_update_batch([update])
 
-        guard.assert_called_with("999999")
+        # Guard now gets the sender's from.id (int); reject still targets the
+        # chat surface (string).
+        guard.assert_called_with(999999)
         reject.assert_called_once_with(daemon.token, "999999")
         run_claude.assert_not_called()
         # Cursor advanced so we don't redeliver every poll.

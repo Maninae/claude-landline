@@ -108,6 +108,57 @@ class TestStatusText:
         text = _status_text(state, lm, tmp_workspace)
         assert "morning-2026-05-10.md" in text
 
+    def test_profile_name_absent_header_stays_plain(
+        self, no_subprocess, tmp_workspace, monkeypatch,
+    ):
+        """Default: no PROFILE_NAME → header is bare, no parenthesis."""
+        from landline.config import AGENT_NAME
+        monkeypatch.setattr(
+            "landline.runtime.commands.PROFILE_NAME", None,
+        )
+        lm = self._make_lock_manager()
+        state = {"session_id": None, "turn_count": 0}
+        text = _status_text(state, lm, tmp_workspace)
+        # Header line has no trailing "(profile)" segment.
+        header_line = text.splitlines()[0]
+        assert header_line == f"**{AGENT_NAME} System Status**"
+
+    def test_profile_name_present_header_gets_parenthetical(
+        self, no_subprocess, tmp_workspace, monkeypatch,
+    ):
+        """Multi-daemon deployers set PROFILE_NAME to disambiguate two
+        Landlines running on the same Mac — /status header shows it in
+        parens so an operator can eyeball WHICH daemon replied."""
+        from landline.config import AGENT_NAME
+        monkeypatch.setattr(
+            "landline.runtime.commands.PROFILE_NAME", "staging",
+        )
+        lm = self._make_lock_manager()
+        state = {"session_id": None, "turn_count": 0}
+        text = _status_text(state, lm, tmp_workspace)
+        header_line = text.splitlines()[0]
+        assert header_line == f"**{AGENT_NAME} System Status** (staging)"
+
+    def test_profile_name_is_cosmetic_only(self):
+        """Contract guard: PROFILE_NAME must never influence any auth,
+        Keychain, or path logic — those live in KEYCHAIN_ACCOUNT and
+        LANDLINE_WORKSPACE. If a future refactor keys secrets off
+        PROFILE_NAME, this test's grep will flag it early."""
+        import inspect
+        from landline.runtime import commands as cmd_mod
+        from landline.runtime import guard as guard_mod
+        from landline.runtime import security as sec_mod
+        # PROFILE_NAME must not appear in the guard or security modules
+        # at all — it's a display concern, not a security control.
+        for mod in (guard_mod, sec_mod):
+            src = inspect.getsource(mod)
+            assert "PROFILE_NAME" not in src, (
+                f"{mod.__name__} references PROFILE_NAME — it is cosmetic "
+                "only, not an auth surface"
+            )
+        # Commands module DOES reference it (that's the display path).
+        assert "PROFILE_NAME" in inspect.getsource(cmd_mod)
+
 
 class TestFmtTokens:
     def test_millions(self):

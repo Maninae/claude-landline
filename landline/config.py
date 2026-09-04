@@ -84,6 +84,11 @@ _ALLOWED_KEYS = {
     "reaction_acks_enabled": _v_bool,
     "rejection_mode": _v_str,
     "archive_extractor": _v_path_or_none,
+    # Cosmetic profile label for the /status header (e.g. "mineru", "staging").
+    # Deployer-facing only — never a security control. Surfaced by
+    # commands.py:_status_text; NOT used to key Keychain/paths (that's
+    # keychain_account + LANDLINE_WORKSPACE).
+    "profile_name": _v_str_or_none,
 }
 
 
@@ -199,6 +204,13 @@ else:
 # /status ``launchctl list`` filter prefix. Explicit ``com.landline`` default
 # so an empty-string doesn't match every job; deployers override to their prefix.
 LAUNCHD_LABEL_PREFIX = _cfg("launchd_label_prefix", "com.landline")
+
+# Optional cosmetic profile label. Surfaced ONLY in the /status header so an
+# operator running multiple daemons on one Mac can tell them apart at a glance
+# ("Rook (mineru)" vs "Rook (staging)"). None = header stays plain. NOT an
+# auth/security surface — that job belongs to keychain_account + the workspace
+# path, both of which already isolate multi-profile installs.
+PROFILE_NAME = _cfg("profile_name", None)
 
 # Glob (WORKSPACE-relative) for "morning brief" files surfaced by /status.
 # ``None`` skips the briefs line entirely.
@@ -392,6 +404,12 @@ MEDIA_CACHE_DIR_MODE = 0o700
 # Producer (out-of-tree cron): keeps the literal (not an import) to stay
 # landline/-import-free so cron deliveries survive any import-time error.
 INJECT_TIMESTAMP_FORMAT = "%Y%m%dT%H%M%S"
+
+# Canonical inject-queue directory. Consumers (``orchestrator/daemon.py``,
+# ``media/video.py``) re-export or alias this constant so there is exactly
+# one WORKSPACE-derived expression for the queue path. The daemon logs the
+# resolved path at startup so multi-profile deployers can eyeball it.
+INJECT_QUEUE_DIR = WORKSPACE / "cache" / "inject-queue"
 
 # ---------------------------------------------------------------------------
 # File paths

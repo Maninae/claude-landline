@@ -245,6 +245,7 @@ class TestProcessUpdateBatch:
         daemon, mocks = _make_daemon()
         update = {"update_id": 1, "message": {
             "chat": {"id": int(FAKE_CHAT_ID)},
+            "from": {"id": int(FAKE_CHAT_ID)},
             "date": int(time.time()),
             "sticker": {"file_id": "fake_sticker", "width": 1, "height": 1},
         }}
@@ -260,6 +261,7 @@ class TestProcessUpdateBatch:
         daemon, mocks = _make_daemon()
         update = {"update_id": 7, "message": {
             "chat": {"id": int(FAKE_CHAT_ID)},
+            "from": {"id": int(FAKE_CHAT_ID)},
             "date": int(time.time()),
         }}
         with patch("landline.orchestrator.save_state"):
@@ -1766,6 +1768,7 @@ class TestNotifyAdvanceOrdering:
         # Empty (no media) message — exercises the non-media branch.
         update = {"update_id": 77, "message": {
             "chat": {"id": int(FAKE_CHAT_ID)},
+            "from": {"id": int(FAKE_CHAT_ID)},
             "date": int(time.time()),
         }}
         with patch("landline.orchestrator.save_state"):
@@ -1782,6 +1785,7 @@ class TestNotifyAdvanceOrdering:
         daemon, mocks = _make_daemon(send_response_fn=send_response)
         update = {"update_id": 78, "message": {
             "chat": {"id": int(FAKE_CHAT_ID)},
+            "from": {"id": int(FAKE_CHAT_ID)},
             "date": int(time.time()),
             "video": {"file_id": "fake", "duration": 1},
         }}
@@ -1795,6 +1799,7 @@ class TestNotifyAdvanceOrdering:
         daemon, mocks = _make_daemon()
         update = {"update_id": 79, "message": {
             "chat": {"id": int(FAKE_CHAT_ID)},
+            "from": {"id": int(FAKE_CHAT_ID)},
             "date": int(time.time()),
         }}
         with patch("landline.orchestrator.save_state"):
@@ -2192,6 +2197,7 @@ class TestDocumentBatch:
         message = {
             "message_id": uid * 10,
             "chat": {"id": int(FAKE_CHAT_ID)},
+            "from": {"id": int(FAKE_CHAT_ID)},
             "date": int(time.time()),
             "document": {
                 "file_id": f"docfile-{uid}",
@@ -2309,6 +2315,7 @@ class TestVoiceBatchWiring:
             "message": {
                 "message_id": uid * 10,
                 "chat": {"id": int(FAKE_CHAT_ID)},
+                "from": {"id": int(FAKE_CHAT_ID)},
                 "date": int(time.time()),
                 key: {"file_id": f"voice-{uid}", "duration": duration},
             },
@@ -2385,6 +2392,7 @@ class TestNonTextBrushOffWording:
         # Sticker / animation / video are still unsupported.
         update = {"update_id": 500, "message": {
             "chat": {"id": int(FAKE_CHAT_ID)},
+            "from": {"id": int(FAKE_CHAT_ID)},
             "date": int(time.time()),
             "sticker": {"file_id": "s"},
         }}
@@ -2557,6 +2565,7 @@ class TestAckPartitioningAcrossMediaTypes:
             "message": {
                 "message_id": 1010,
                 "chat": {"id": int(FAKE_CHAT_ID)},
+                "from": {"id": int(FAKE_CHAT_ID)},
                 "date": now_ts,
                 "photo": [{"file_id": "pic", "file_size": 100}],
             },
@@ -2600,6 +2609,7 @@ class TestAckPartitioningAcrossMediaTypes:
                 "message": {
                     "message_id": mid,
                     "chat": {"id": int(FAKE_CHAT_ID)},
+                    "from": {"id": int(FAKE_CHAT_ID)},
                     "date": int(time.time()),
                     "document": {
                         "file_id": "d%d" % uid,
@@ -2649,6 +2659,7 @@ class TestAckPartitioningAcrossMediaTypes:
             "message": {
                 "message_id": 3010,
                 "chat": {"id": int(FAKE_CHAT_ID)},
+                "from": {"id": int(FAKE_CHAT_ID)},
                 "date": int(time.time()),
                 "voice": {
                     "file_id": "vv",
@@ -2787,6 +2798,7 @@ class TestRejectionPathsClearAck:
                 "message": {
                     "message_id": uid * 10,
                     "chat": {"id": int(FAKE_CHAT_ID)},
+                    "from": {"id": int(FAKE_CHAT_ID)},
                     "date": int(time.time()),
                     "voice": {"file_id": f"v-{uid}", "duration": 5},
                 },
@@ -2823,6 +2835,7 @@ class TestRejectionPathsClearAck:
                 "message": {
                     "message_id": uid * 10,
                     "chat": {"id": int(FAKE_CHAT_ID)},
+                    "from": {"id": int(FAKE_CHAT_ID)},
                     "date": int(time.time()),
                     "document": {
                         "file_id": f"d-{uid}",
@@ -2870,6 +2883,7 @@ class TestRejectionPathsClearAck:
             "message": {
                 "message_id": 12000,
                 "chat": {"id": chat_id_int},
+                "from": {"id": chat_id_int},
                 "date": int(time.time()),
                 "photo": [{"file_id": "p-1", "width": 100, "height": 100}],
             },
@@ -2879,6 +2893,7 @@ class TestRejectionPathsClearAck:
             "message": {
                 "message_id": 12010,
                 "chat": {"id": chat_id_int},
+                "from": {"id": chat_id_int},
                 "date": int(time.time()),
                 "voice": {"file_id": "v-1", "duration": 5},
             },
@@ -2888,6 +2903,7 @@ class TestRejectionPathsClearAck:
             "message": {
                 "message_id": 12020,
                 "chat": {"id": chat_id_int},
+                "from": {"id": chat_id_int},
                 "date": int(time.time()),
                 "document": {
                     "file_id": "d-1",

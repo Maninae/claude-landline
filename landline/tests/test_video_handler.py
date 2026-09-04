@@ -50,6 +50,7 @@ def _make_bare_video_msg(
 ):
     msg = {
         "chat": {"id": 12345},
+        "from": {"id": 12345},
         "video": {
             "file_id": file_id,
             "file_size": file_size,
@@ -72,6 +73,7 @@ def _make_video_document_msg(
 ):
     msg = {
         "chat": {"id": 12345},
+        "from": {"id": 12345},
         "document": {
             "file_id": file_id,
             "file_name": file_name,
@@ -118,6 +120,7 @@ class TestExtractVideoField:
     def test_document_with_non_video_mime_not_returned(self):
         msg = {
             "chat": {"id": 12345},
+            "from": {"id": 12345},
             "document": {
                 "file_id": "d-1", "file_name": "x.pdf",
                 "mime_type": "application/pdf",

@@ -16,12 +16,14 @@ class TestAllowedChatIds:
     def test_parses_comma_separated_ids(self):
         with patch("landline.runtime.guard.keychain_get_status", return_value=("111,222,333", "ok")):
             ids = allowed_chat_ids()
-        assert ids == {"111", "222", "333"}
+        # Post-migration: int semantics. The Keychain comma-string format is
+        # unchanged (existing entries keep working); the parsed set is Set[int].
+        assert ids == {111, 222, 333}
 
     def test_strips_whitespace(self):
         with patch("landline.runtime.guard.keychain_get_status", return_value=(" 111 , 222 ", "ok")):
             ids = allowed_chat_ids()
-        assert ids == {"111", "222"}
+        assert ids == {111, 222}
 
     def test_empty_keychain_returns_empty_set(self):
         with patch("landline.runtime.guard.keychain_get_status", return_value=(None, "absent")):
@@ -49,7 +51,7 @@ class TestAllowedChatIds:
     def test_single_id(self):
         with patch("landline.runtime.guard.keychain_get_status", return_value=("12345", "ok")):
             ids = allowed_chat_ids()
-        assert ids == {"12345"}
+        assert ids == {12345}
 
 
 class TestIsAllowed:
@@ -158,8 +160,8 @@ class TestCacheBehavior:
         ) as mock_kc:
             first = allowed_chat_ids()
             second = allowed_chat_ids()
-        assert first == {"111"}
-        assert second == {"111"}  # cached, not the new "222"
+        assert first == {111}
+        assert second == {111}  # cached, not the new 222
         assert mock_kc.call_count == 1
 
     def test_cache_refresh_picks_up_new_value(self):
@@ -171,8 +173,8 @@ class TestCacheBehavior:
             first = allowed_chat_ids()
             guard_module._cached_at = time.time() - 120
             second = allowed_chat_ids()
-        assert first == {"111"}
-        assert second == {"222"}
+        assert first == {111}
+        assert second == {222}
 
     def test_keychain_failure_preserves_cached_allowlist(self):
         """Resilience contract: when keychain_get_status returns (None, ...) after
@@ -282,3 +284,114 @@ class TestCacheBehavior:
             assert is_allowed("123") is True  # cache preserved across locked
             assert is_allowed("456") is True
             assert is_allowed("999") is False  # still not allowed
+
+
+# ---------------------------------------------------------------------------
+# Guard migration: chat.id → from.id (Set[int] allowlist)
+# ---------------------------------------------------------------------------
+
+class TestIntSetAllowlistParsing:
+    """The allowlist is now a ``Set[int]``. The Keychain value shape
+    (comma-separated string) is unchanged so an existing chat-id-era entry
+    (the operator's live chat_id == their from_id in the 1:1 owner-bot case)
+    keeps working with no migration step — same integer value on both sides.
+    """
+
+    def test_returns_int_set_not_str_set(self):
+        """Post-migration invariant: the parsed set contains ints, not
+        strs. A regression to str would silently break ``is_allowed`` for
+        callers passing int (from.id is always int from the classifier)."""
+        with patch(
+            "landline.runtime.guard.keychain_get_status",
+            return_value=("111,222,333", "ok"),
+        ):
+            ids = allowed_chat_ids()
+        assert ids == {111, 222, 333}
+        for entry in ids:
+            assert isinstance(entry, int), (
+                f"expected int in allowlist, got {type(entry).__name__}"
+            )
+
+    def test_backward_compat_comma_string_format(self):
+        """A pre-migration Keychain entry written as a comma-string of
+        integer chat_ids (the format the SETUP docs have always shown)
+        parses cleanly into the same int set — no manual migration."""
+        legacy_value = "111111111,222222222"
+        with patch(
+            "landline.runtime.guard.keychain_get_status",
+            return_value=(legacy_value, "ok"),
+        ):
+            ids = allowed_chat_ids()
+        assert ids == {111111111, 222222222}
+
+    def test_int_from_id_authorizes(self):
+        """The classifier now passes ``from.id`` (int) to the guard.
+        ``is_allowed(int)`` must resolve without coercion churn."""
+        with patch(
+            "landline.runtime.guard.keychain_get_status",
+            return_value=("42", "ok"),
+        ):
+            assert is_allowed(42) is True
+            assert is_allowed(43) is False
+
+    def test_non_integer_tokens_silently_skipped(self):
+        """A hand-edited Keychain typo (a bare word, a stray letter) must
+        NEVER crash the daemon or fail open. Junk tokens skip; the rest of
+        the allowlist stays valid."""
+        with patch(
+            "landline.runtime.guard.keychain_get_status",
+            return_value=("111,foo,222,bar,333", "ok"),
+        ):
+            ids = allowed_chat_ids()
+        assert ids == {111, 222, 333}
+
+    def test_all_junk_allowlist_fails_closed(self):
+        """Corollary of the previous test: an allowlist made entirely of
+        non-integer tokens parses to the empty set — which is_allowed
+        rejects (fail-closed)."""
+        with patch(
+            "landline.runtime.guard.keychain_get_status",
+            return_value=("foo,bar,baz", "ok"),
+        ):
+            assert is_allowed(111) is False
+            assert is_allowed(0) is False
+
+    def test_is_allowed_coerces_str_input(self):
+        """``is_allowed`` is defensive against callers that hand it a str
+        (older test paths, ad-hoc CLI probes)."""
+        with patch(
+            "landline.runtime.guard.keychain_get_status",
+            return_value=("777", "ok"),
+        ):
+            assert is_allowed("777") is True
+
+    def test_is_allowed_rejects_uncoerceable_input(self):
+        """A non-numeric input (dict, None, arbitrary object) never authorizes."""
+        with patch(
+            "landline.runtime.guard.keychain_get_status",
+            return_value=("777", "ok"),
+        ):
+            assert is_allowed(None) is False
+            assert is_allowed("not a number") is False
+            assert is_allowed({"user": 777}) is False
+
+    def test_empty_allowlist_fails_closed(self):
+        """CRITICAL security invariant: an empty allowlist (empty string in
+        Keychain) rejects every user id — no fail-open path, no default
+        admin. Pinned separately from the pre-migration test so a
+        migration regression trips this class specifically."""
+        with patch(
+            "landline.runtime.guard.keychain_get_status",
+            return_value=("", "ok"),
+        ):
+            assert is_allowed(111) is False
+            assert allowed_chat_ids() == set()
+
+    def test_absent_keychain_entry_fails_closed(self):
+        """Cold-start with no allowlist entry at all → empty set → deny."""
+        with patch(
+            "landline.runtime.guard.keychain_get_status",
+            return_value=(None, "absent"),
+        ):
+            assert is_allowed(111) is False
+            assert allowed_chat_ids() == set()

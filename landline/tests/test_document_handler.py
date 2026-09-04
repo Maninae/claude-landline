@@ -68,6 +68,7 @@ def _make_daemon_stub():
 def _make_doc_msg(file_id="doc-1", file_name="report.pdf", file_size=1234, caption=None):
     msg = {
         "chat": {"id": 12345},
+        "from": {"id": 12345},
         "document": {
             "file_id": file_id,
             "file_name": file_name,
@@ -201,6 +202,7 @@ class TestProcessDocumentBatch:
 def _make_doc_msg_with_mid(mid, file_id="doc-x", file_name="report.pdf"):
     return {
         "chat": {"id": 12345},
+        "from": {"id": 12345},
         "message_id": mid,
         "document": {
             "file_id": file_id,
@@ -509,6 +511,7 @@ def _make_zip_msg(
     """Telegram document envelope for a zip. Mirrors _make_doc_msg."""
     msg = {
         "chat": {"id": 12345},
+        "from": {"id": 12345},
         "message_id": 700,
         "document": {
             "file_id": file_id,

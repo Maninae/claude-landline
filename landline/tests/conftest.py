@@ -309,11 +309,24 @@ def make_telegram_update(
     date: Optional[int] = None,
     has_photo: bool = False,
     is_edit: bool = False,
+    from_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Build a synthetic Telegram update dict."""
+    """Build a synthetic Telegram update dict.
+
+    - ``from_id`` defaults to ``int(chat_id)`` so every synthetic update
+      carries a ``from.id`` — the classifier's auth extraction requires it
+      after the guard migration from chat.id to from.id (see
+      ``landline.runtime.batch_classifier.extract_user_id``). Tests that
+      specifically want to exercise the "missing from.id → drop" path pass
+      ``from_id=None`` — but ``None`` here is the DEFAULT-fill trigger, so
+      such tests should build the dict inline instead.
+    - The 1:1 owner-bot invariant (``chat.id == from.id``) is preserved by
+      the default; group / multi-user shapes override ``from_id``.
+    """
     message: Dict[str, Any] = {
         "message_id": update_id * 10,
         "chat": {"id": int(chat_id)},
+        "from": {"id": int(chat_id) if from_id is None else int(from_id)},
         "date": date or int(time.time()),
     }
     if text is not None:

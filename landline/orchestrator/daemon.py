@@ -28,6 +28,7 @@ from landline.runtime.commands import CommandRouter
 from landline import config
 from landline.config import (
     COALESCENCE_WINDOW_SECONDS,
+    INJECT_QUEUE_DIR,
     MAX_QUEUED_UPDATES,
     STARTUP_DELAY,
     WORKSPACE,
@@ -59,7 +60,12 @@ __all__ = [
 ]
 
 
-INJECT_QUEUE_DIR = WORKSPACE / "cache" / "inject-queue"
+# Re-exported from ``landline.config`` — that module owns the single
+# WORKSPACE-derived expression. Kept as a module-level name here so
+# ``patch("landline.orchestrator.INJECT_QUEUE_DIR")`` (through the facade)
+# and ``_d.INJECT_QUEUE_DIR`` in batch.py both continue to resolve.
+# (Local rebind, not a re-import; the import above populates it.)
+
 
 
 def _reset_persistent_claude_for_new() -> None:
@@ -375,6 +381,11 @@ class TelegramDaemon:
         log("Telegram daemon starting (streaming mode)")
         log(f"Session: {self.state.get('session_id') or 'none'}")
         log(f"Lock state: {self._lock_manager.lock_state_label}")
+        # Resolved inject-queue path: makes it eyeballable per-daemon when
+        # multiple profiles share a Mac (each profile has its own WORKSPACE
+        # and therefore its own queue dir). Reads the facade-visible name so
+        # a test-time rebind still logs the effective path.
+        log(f"Inject queue: {INJECT_QUEUE_DIR}")
         time.sleep(STARTUP_DELAY)
 
         # Sweep before the poller starts so we can never race an in-flight

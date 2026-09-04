@@ -68,6 +68,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from landline.config import (
+    INJECT_QUEUE_DIR,
     INJECT_TIMESTAMP_FORMAT,
     MEDIA_CACHE_DIR_MODE,
     TELEGRAM_FILE_SIZE_LIMIT,
@@ -87,10 +88,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only
     from landline.orchestrator import TelegramDaemon
 
 
-# Inject-queue directory — mirrors ``landline.orchestrator.INJECT_QUEUE_DIR``.
-# Reproduced here (not imported) to keep this module usable without a live
-# orchestrator import cycle. Both point at the same WORKSPACE path.
-_INJECT_QUEUE_DIR = WORKSPACE / "cache" / "inject-queue"
+# Inject-queue directory — module-level alias of the canonical
+# ``landline.config.INJECT_QUEUE_DIR`` (single WORKSPACE-derived source of
+# truth). Kept under this name so existing tests that monkeypatch
+# ``landline.media.video._INJECT_QUEUE_DIR`` (see test_video_handler.py)
+# continue to redirect writes without touching the config module.
+_INJECT_QUEUE_DIR = INJECT_QUEUE_DIR
 
 # Default synthesized extension when Telegram omits ``file_name`` on a bare
 # ``video`` message (typical for camera roll uploads).
