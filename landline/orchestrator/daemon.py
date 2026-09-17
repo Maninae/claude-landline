@@ -10,7 +10,6 @@
 
 import signal
 import sys
-import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -32,7 +31,6 @@ from landline.config import (
     COALESCENCE_WINDOW_SECONDS,
     INJECT_QUEUE_DIR,
     MAX_QUEUED_UPDATES,
-    MEDIA_SWEEP_INTERVAL_SECONDS,
     NETWORK_ALERT_MIN_INTERVAL_SECONDS,
     POLL_ERROR_ALERT_AFTER,
     RESTART_CONTINUATION_MAX_ATTEMPTS,
@@ -40,7 +38,11 @@ from landline.config import (
     WORKSPACE,
 )
 from landline.media.document import process_document_batch
-from landline.media.cache import _sweep_telegram_image_cache, sweep_media_caches
+from landline.media.cache import (
+    MediaCacheSweeper,
+    _sweep_telegram_image_cache,
+    sweep_media_caches,
+)
 from landline.media.video import process_video_batch
 from landline.runtime.inject import drain_inject_queue
 from landline.runtime.lock import LockManager
@@ -141,9 +143,10 @@ class TelegramDaemon:
         self._outbound_spool_replayer: Optional[OutboundSpoolReplayer] = None
         # F5: periodic media-cache sweeper. Startup-only sweep let caches grow
         # for the daemon's multi-week life; this thread re-runs the sweep on
-        # MEDIA_SWEEP_INTERVAL_SECONDS so 24h retention actually holds.
-        self._media_sweep_stop: threading.Event = threading.Event()
-        self._media_sweep_thread: Optional[threading.Thread] = None
+        # MEDIA_SWEEP_INTERVAL_SECONDS so 24h retention actually holds. Same
+        # shape as ``_outbound_spool_replayer`` — start()/stop() lifecycle,
+        # Event-driven wait, daemon thread. Lifecycle in ``run()`` / ``_shutdown``.
+        self._media_cache_sweeper: Optional[MediaCacheSweeper] = None
 
         # Poller-staleness rate-limit + recovery counter (see poller_health.py).
         self._poller_stale_check_last_at: float = 0.0
@@ -216,7 +219,8 @@ class TelegramDaemon:
         # F5: stop the periodic media-cache sweeper. Event.wait returns True
         # on set, so latency to exit is bounded by the current wait cycle
         # (worst case: MEDIA_SWEEP_INTERVAL_SECONDS).
-        self._media_sweep_stop.set()
+        if self._media_cache_sweeper is not None:
+            self._media_cache_sweeper.stop()
         self.running = False
         # Stop the dispatcher so its stale-session retry guard doesn't fire a
         # fresh-session retry during shutdown and overwrite persisted session_id.
@@ -475,22 +479,6 @@ class TelegramDaemon:
     def _replace_poller_in_place(self, reason: str) -> None:
         _poller_health.replace_poller_in_place(self, reason)
 
-    def _media_sweep_loop(self) -> None:
-        """Background thread body: periodic media-cache sweep (F5).
-
-        Mirrors the ``OutboundSpoolReplayer._loop`` pattern — Event-driven
-        wait for prompt shutdown, per-pass exceptions logged + swallowed so
-        one bad FS call can't kill the thread and let caches grow unbounded.
-        """
-        while not self._media_sweep_stop.is_set():
-            try:
-                sweep_media_caches()
-            except Exception as sweep_error:
-                log(f"Periodic media cache sweep raised: {sweep_error!r}")
-            # Event.wait returns True on set → shutdown latency ≤ the interval.
-            if self._media_sweep_stop.wait(MEDIA_SWEEP_INTERVAL_SECONDS):
-                return
-
     def run(self) -> None:
         log("Telegram daemon starting (streaming mode)")
         log(f"Session: {self.state.get('session_id') or 'none'}")
@@ -525,14 +513,10 @@ class TelegramDaemon:
 
         # F5: background media-cache sweeper. Startup sweep alone let caches
         # grow for the daemon's multi-week life; this thread enforces the 24h
-        # retention on MEDIA_SWEEP_INTERVAL_SECONDS.
-        self._media_sweep_stop.clear()
-        self._media_sweep_thread = threading.Thread(
-            target=self._media_sweep_loop,
-            name="media-cache-sweeper",
-            daemon=True,
-        )
-        self._media_sweep_thread.start()
+        # retention on MEDIA_SWEEP_INTERVAL_SECONDS. Same start()/stop() shape
+        # as the spool replayer above.
+        self._media_cache_sweeper = MediaCacheSweeper()
+        self._media_cache_sweeper.start()
 
         # F10 (fix 1): the poller starts BEFORE _handle_restart_continuation
         # so an inbound /pause during the continuation is reachable — the
@@ -640,7 +624,8 @@ class TelegramDaemon:
             # so no join required for process exit, but stopping here means
             # a clean run() teardown reaches log(...) with no lingering
             # background work.
-            self._media_sweep_stop.set()
+            if self._media_cache_sweeper is not None:
+                self._media_cache_sweeper.stop()
             # Belt-and-suspenders spool stop for the crash path — signal
             # handler already covers SIGTERM, but a raised exception out of
             # the main loop still deserves a clean stop signal.

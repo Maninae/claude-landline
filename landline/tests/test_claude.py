@@ -1465,6 +1465,12 @@ class TestStreamSenderEmitFailureTracking:
         The notice routes through
         ``landline.runtime.notifications.send_health_alert`` (async iMessage), NOT
         the failing text transport. See ``_record_emit_failure``.
+
+        Deterministic: each payload is followed by ``flush()`` (message
+        boundary) so the worker emits payloads one at a time instead of
+        coalescing them into a single batch; ``close(timeout=5.0)`` then
+        enqueues STOP and joins the worker, so all emits (and any resulting
+        ``send_health_alert``) complete before ``close()`` returns.
         """
         threshold = StreamSender._EMIT_FAILURE_THRESHOLD
         with patch("landline.runtime.notifications.send_health_alert") as mock_alert:
@@ -1473,11 +1479,8 @@ class TestStreamSenderEmitFailureTracking:
             sender = self._make_recorded_sender(raise_until=10_000)
             for i in range(threshold):
                 sender.text("payload-%d" % i)
-                # Wait past the text window so the worker emits each individually.
-                time.sleep(0.12)
-            # Give the worker one more tick to send the fallback.
-            time.sleep(0.15)
-            sender.close()
+                sender.flush()
+            sender.close(timeout=5.0)
         # Exactly ONE alert dispatched — never loops, even though every send
         # raises. Also: the failing text transport must NOT have received
         # the fallback text (that was the M7 bug).
@@ -1503,17 +1506,17 @@ class TestStreamSenderEmitFailureTracking:
             sender = self._make_recorded_sender(raise_until=1)
             # First payload: fails (count=1)
             sender.text("first")
-            time.sleep(0.12)
+            sender.flush()
             # Second payload: succeeds, resets counter
             sender.text("second")
-            time.sleep(0.12)
+            sender.flush()
             # Now fail again - but only (threshold - 1) times; not enough to trip.
             # Since the test transport doesn't keep failing here, just do regular
             # sends.
             for i in range(threshold - 1):
                 sender.text("more-%d" % i)
-                time.sleep(0.12)
-            sender.close()
+                sender.flush()
+            sender.close(timeout=5.0)
         assert mock_alert.call_count == 0, (
             "Health alert fired despite mid-streak success (streak should "
             "have reset before the threshold was crossed)"
@@ -1526,9 +1529,8 @@ class TestStreamSenderEmitFailureTracking:
             sender = self._make_recorded_sender(raise_until=10_000)
             for i in range(threshold + 5):
                 sender.text("payload-%d" % i)
-                time.sleep(0.1)
-            time.sleep(0.15)
-            sender.close()
+                sender.flush()
+            sender.close(timeout=5.0)
         # Exactly one health alert, even after many more failures.
         assert mock_alert.call_count == 1
 
@@ -1556,9 +1558,8 @@ class TestStreamSenderEmitFailureTracking:
             )
             for i in range(threshold):
                 sender.status("tool-%d" % i)
-                time.sleep(0.12)
-            time.sleep(0.15)
-            sender.close()
+                sender.flush()
+            sender.close(timeout=5.0)
         # Fallback dispatched via the async iMessage transport.
         assert mock_alert.call_count == 1
 
@@ -1594,9 +1595,8 @@ class TestStreamSenderEmitFailureTracking:
             )
             for i in range(threshold):
                 sender.text("payload-%d" % i)
-                time.sleep(0.1)
-            time.sleep(0.15)
-            sender.close()
+                sender.flush()
+            sender.close(timeout=5.0)
 
         # (1) send_health_alert called exactly once.
         assert mock_alert.call_count == 1, (
@@ -2291,3 +2291,211 @@ class TestF3StdinWriteTimeout:
         assert writes[-1] == "<flush>"
         assert any("hello" in w for w in writes if isinstance(w, str))
         pc.kill.assert_not_called()
+
+
+class TestF21TerminateWithEscalation:
+    """F21 — SIGTERM -> SIGKILL escalation with a LOUD ERROR line when the
+    child survives both. The helper on PersistentClaude is shared with
+    streaming.py's interrupt branch so operators see ONE dialect for this
+    pathology across the codebase."""
+
+    def _mock_proc(self, wait_side_effects, pid=12345):
+        """A Popen-shaped mock whose ``wait`` calls apply the given side
+        effects in order (return values or raised exceptions)."""
+        proc = MagicMock()
+        proc.pid = pid
+        proc.poll.return_value = None
+        proc.wait.side_effect = wait_side_effects
+        return proc
+
+    def test_terminate_succeeds_no_kill(self):
+        """Clean SIGTERM: first wait returns cleanly -> kill() never called,
+        no error log."""
+        pc = PersistentClaude()
+        proc = self._mock_proc(wait_side_effects=[0])
+        with patch("landline.claude.persistent.log") as mock_log:
+            pc._terminate_with_escalation(proc, term_grace=0.05,
+                                          kill_grace=0.05)
+        proc.terminate.assert_called_once()
+        proc.kill.assert_not_called()
+        # Exactly one wait call (the SIGTERM wait). The error line for
+        # "did not exit after SIGKILL escalation" must NOT appear.
+        assert proc.wait.call_count == 1
+        assert not any(
+            "SIGKILL escalation" in (call.args[0] if call.args else "")
+            for call in mock_log.mock_calls
+        ), "unexpected escalation ERROR line: %r" % mock_log.mock_calls
+
+    def test_term_times_out_kill_succeeds(self):
+        """SIGTERM times out -> SIGKILL follows -> kill's wait returns cleanly.
+        Both signals get sent; the LOUD ERROR line must NOT appear."""
+        pc = PersistentClaude()
+        # First wait: TERM times out. Second wait: KILL succeeds.
+        proc = self._mock_proc(
+            wait_side_effects=[Exception("term timeout"), 0]
+        )
+        with patch("landline.claude.persistent.log") as mock_log:
+            pc._terminate_with_escalation(proc, term_grace=0.05,
+                                          kill_grace=0.05)
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+        assert proc.wait.call_count == 2
+        assert not any(
+            "SIGKILL escalation" in (call.args[0] if call.args else "")
+            for call in mock_log.mock_calls
+        ), "unexpected escalation ERROR line: %r" % mock_log.mock_calls
+
+    def test_both_time_out_logs_error(self):
+        """Both waits time out -> LOUD ERROR line, matching streaming.py's
+        watchdog dialect (pid, poll(), elapsed seconds). Never raises."""
+        pc = PersistentClaude()
+        # Both waits raise timeout.
+        proc = self._mock_proc(
+            wait_side_effects=[
+                Exception("term timeout"), Exception("kill timeout"),
+            ],
+            pid=54321,
+        )
+        with patch("landline.claude.persistent.log") as mock_log:
+            # Must not raise even though every step failed to reap.
+            pc._terminate_with_escalation(proc, term_grace=0.05,
+                                          kill_grace=0.05)
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+        # Exactly one LOUD ERROR line matching the shared dialect —
+        # includes "SIGKILL escalation", the pid, and "elapsed=".
+        escalation_lines = [
+            call.args[0] for call in mock_log.mock_calls
+            if call.args and "SIGKILL escalation" in call.args[0]
+        ]
+        assert len(escalation_lines) == 1, (
+            "expected exactly one 'SIGKILL escalation' log line, got %r"
+            % escalation_lines
+        )
+        line = escalation_lines[0]
+        assert line.startswith("ERROR: "), (
+            "escalation line must start with ERROR: got %r" % line
+        )
+        assert "54321" in line, "pid missing from escalation line: %r" % line
+        assert "elapsed=" in line, (
+            "elapsed missing from escalation line: %r" % line
+        )
+
+    def test_kill_uses_shared_helper_and_closes_pipes(self):
+        """``PersistentClaude.kill()`` funnels through the shared helper
+        (no more silent-except swallows) and still closes the three pipes
+        so fds are freed. Regression against the old dual-``except:pass``
+        shape that hid a wedged child."""
+        pc = PersistentClaude()
+        mock_proc = MagicMock()
+        mock_proc.pid = 99
+        mock_proc.stdin = MagicMock()
+        mock_proc.stdout = MagicMock()
+        mock_proc.stderr = MagicMock()
+        # TERM's wait times out; KILL's wait succeeds. Same escalation
+        # branch the old test_kill_falls_back_to_kill_when_terminate_times_out
+        # exercised.
+        mock_proc.wait.side_effect = [Exception("timeout"), 0]
+        pc._proc = mock_proc
+        pc.kill()
+        mock_proc.terminate.assert_called_once()
+        mock_proc.kill.assert_called_once()
+        mock_proc.stdin.close.assert_called_once()
+        mock_proc.stdout.close.assert_called_once()
+        mock_proc.stderr.close.assert_called_once()
+
+
+class TestF23StreamSenderDropAfterClose:
+    """F23 — silent drops on a closed sender used to be invisible. Now the
+    FIRST drop logs one byte-counted line (latched), counters keep
+    accumulating on subsequent drops, and ``close()`` emits a final tally
+    line if anything was dropped. LOG-ONLY: producers never synchronously
+    emit past close (racing the daemon-thread final drain is the bug we're
+    documenting)."""
+
+    def test_drop_after_close_logs_once_and_accumulates_counters(self):
+        """Close a live sender, then push several text() calls at it: only
+        ONE post-close log line is emitted; ``dropped_bytes`` reflects the
+        sum of every dropped payload."""
+        sender = _make_sender()
+        # Close cleanly (empty queue -> immediate STOP + join).
+        sender.close(timeout=2.0)
+        # Now producers try to enqueue after close — these must be dropped.
+        with patch("landline.claude.sender.log") as mock_log:
+            sender.text("first-drop")   # 10 bytes
+            sender.text("second-drop")  # 11 bytes, no additional log line
+            sender.status("stat-drop")  # 9 bytes  (status counter)
+        assert sender.dropped_bytes == (21, 9), (
+            "counters must include every dropped payload: got %r"
+            % (sender.dropped_bytes,)
+        )
+        # Exactly ONE first-drop log line — the latch prevents spam.
+        first_drop_lines = [
+            call.args[0] for call in mock_log.mock_calls
+            if call.args and "on a closed sender" in call.args[0]
+        ]
+        assert len(first_drop_lines) == 1, (
+            "expected exactly one first-drop log line (latched); got %r"
+            % first_drop_lines
+        )
+        # The single line names both counters and the chat_id, so an
+        # operator can grep the incident to the affected chat.
+        line = first_drop_lines[0]
+        assert "chat 123" in line, (
+            "log must name the chat_id: %r" % line
+        )
+        # First call was text=10, status=0 -> that's the observed snapshot.
+        assert "10 text-char(s)" in line, (
+            "first log must reflect the initial dropped delta: %r" % line
+        )
+
+    def test_close_emits_final_tally_after_producer_drops(self):
+        """Producers that raced ``close()`` show up in the final tally line
+        that ``close()`` emits AFTER the drain returns. A close with no
+        drops stays quiet."""
+        # Case 1: drops happened -> final tally line appears.
+        sender = _make_sender()
+        sender.close(timeout=2.0)
+        # Trip the counters post-close.
+        sender.text("A")
+        sender.status("B")
+        with patch("landline.claude.sender.log") as mock_log:
+            # Second close is idempotent, so build a fresh sender to
+            # exercise the tally on the SAME instance.
+            pass
+        # A second close call on the same sender is idempotent and would
+        # not re-run the tally, so verify the tally path in isolation by
+        # constructing a sender, tripping drops mid-close, and letting
+        # close() emit the final line.
+        sender2 = _make_sender()
+        with patch("landline.claude.sender.log") as mock_log2:
+            # Close puts _closed=True first, joins the worker, then does
+            # the tally. Emulate a producer that races by seeding the
+            # counters directly (equivalent to a drop-latched producer
+            # having already logged the first-drop line).
+            sender2._dropped_text_bytes = 5
+            sender2._dropped_status_bytes = 3
+            sender2._drop_log_emitted = True   # first-drop already emitted
+            sender2.close(timeout=2.0)
+        tally_lines = [
+            call.args[0] for call in mock_log2.mock_calls
+            if call.args and "final drop tally" in call.args[0]
+        ]
+        assert len(tally_lines) == 1, (
+            "expected exactly one final-tally line on a non-zero close; "
+            "got %r" % tally_lines
+        )
+        assert "5 text-char(s)" in tally_lines[0]
+        assert "3 status-char(s)" in tally_lines[0]
+
+        # Case 2: no drops -> final tally line does NOT appear.
+        sender3 = _make_sender()
+        with patch("landline.claude.sender.log") as mock_log3:
+            sender3.close(timeout=2.0)
+        tally_lines_quiet = [
+            call.args[0] for call in mock_log3.mock_calls
+            if call.args and "final drop tally" in call.args[0]
+        ]
+        assert tally_lines_quiet == [], (
+            "zero-drop close must stay quiet; got %r" % tally_lines_quiet
+        )

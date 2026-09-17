@@ -43,8 +43,42 @@ _REACTION_ENDPOINT = "https://api.telegram.org/bot{token}/setMessageReaction"
 # still holds. Queue is unbounded (worst-case backlog ~60 items on a
 # 30-update batch; dropping would reintroduce the race).
 _reaction_queue = queue.Queue()  # type: queue.Queue
+# Unbounded queue on purpose (dropping is the bug); log once past this depth.
+# Module-local — matches the sibling pattern in ``landline.claude.sender``
+# (see config.py header: worker-loop tunables stay module-local).
+_QUEUE_HIGH_WATER = 1000
+_queue_high_water_logged = False
+_queue_high_water_lock = threading.Lock()
 _worker_lock = threading.Lock()
 _worker_thread = None  # type: Optional[threading.Thread]
+
+
+def _note_queue_depth() -> None:
+    """Log once past the high-water mark; latch resets below half (hysteresis).
+
+    Makes a Telegram backlog or a runaway enqueue loop observable instead
+    of silently growing toward OOM. ``qsize`` is O(1).
+
+    State is module-level (one shared queue for the whole process), so
+    the check-and-set is guarded by ``_queue_high_water_lock`` — otherwise
+    two concurrent enqueues crossing the threshold at the same instant
+    could each observe ``_queue_high_water_logged is False`` and both log,
+    breaking the "log ONCE per crossing" contract.
+    """
+    global _queue_high_water_logged
+    depth = _reaction_queue.qsize()
+    if depth > _QUEUE_HIGH_WATER:
+        with _queue_high_water_lock:
+            if not _queue_high_water_logged:
+                _queue_high_water_logged = True
+                log(
+                    "reactions queue is backing up (%d queued) "
+                    "— Telegram reaction delivery is falling behind"
+                    % depth
+                )
+    elif depth < _QUEUE_HIGH_WATER // 2:
+        with _queue_high_water_lock:
+            _queue_high_water_logged = False
 
 
 def _ensure_worker_started() -> None:
@@ -110,6 +144,7 @@ def set_reaction_async(
         return
     _ensure_worker_started()
     _reaction_queue.put((token, chat_id, message_id, emoji))
+    _note_queue_depth()
 
 
 def set_reactions_batch_async(
@@ -130,6 +165,7 @@ def set_reactions_batch_async(
     _ensure_worker_started()
     for mid in ids:
         _reaction_queue.put((token, chat_id, mid, emoji))
+        _note_queue_depth()
 
 
 def _do_react(

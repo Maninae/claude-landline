@@ -3339,84 +3339,147 @@ class TestNetworkAlertLatchOnDaemon:
             assert mock_alert.call_count == 2
 
 
-class TestMediaCacheSweeperThread:
-    """F5: the background media-cache sweeper runs sweep_media_caches on a
-    fixed interval. Startup-only sweep let caches accumulate for the
-    daemon's multi-week life; this thread enforces 24h retention."""
+class TestMediaCacheSweeper:
+    """B1 / F5: ``MediaCacheSweeper`` is the co-located sibling of
+    ``OutboundSpoolReplayer`` — a background thread that re-runs
+    ``sweep_media_caches`` on ``MEDIA_SWEEP_INTERVAL_SECONDS`` so 24h
+    retention actually holds across the daemon's multi-week life.
 
-    def test_media_sweep_loop_invokes_sweep_at_interval(self):
-        """Drive the sweep loop directly with a compressed interval and a
-        controllable stop event. Confirm sweep_media_caches is called at
-        least twice (initial + after wait) and the loop exits promptly on
-        stop.set()."""
-        daemon, _ = _make_daemon()
-        # Reset the stop event to a fresh one so a prior test can't leak
-        # a set state.
-        import threading as _threading
-        daemon._media_sweep_stop = _threading.Event()
+    The daemon's earlier ad-hoc sweep thread (``_media_sweep_stop`` /
+    ``_media_sweep_thread`` / ``_media_sweep_loop``) has been folded into
+    this class so lifecycle shape matches the spool replayer's
+    ``start()`` / ``stop()`` / ``_loop()``.
+    """
+
+    def test_start_spawns_named_daemon_thread_that_invokes_sweep(self):
+        """start() → thread is daemon, name is ``media-cache-sweeper``,
+        and ``sweep_media_caches`` is invoked at least once inside the
+        loop. Uses a tiny interval so the test completes fast."""
+        from landline.media.cache import MediaCacheSweeper
+
         call_count = {"n": 0}
+        sweep_event = __import__("threading").Event()
 
         def counting_sweep(*args, **kwargs):
             call_count["n"] += 1
-            if call_count["n"] >= 3:
-                # Signal stop after 3 sweeps so the test terminates.
-                daemon._media_sweep_stop.set()
+            sweep_event.set()
             return 0
 
-        # Tiny interval so the test completes fast.
-        with patch("landline.orchestrator.sweep_media_caches",
-                   side_effect=counting_sweep), \
-             patch("landline.orchestrator.MEDIA_SWEEP_INTERVAL_SECONDS",
-                   0.01):
-            daemon._media_sweep_loop()
+        with patch(
+            "landline.media.cache.sweep_media_caches",
+            side_effect=counting_sweep,
+        ):
+            sweeper = MediaCacheSweeper(interval_seconds=0.01)
+            sweeper.start()
+            try:
+                # Wait up to 1s for the first sweep — plenty of headroom
+                # for thread startup jitter on a loaded CI host.
+                assert sweep_event.wait(timeout=1.0), (
+                    "MediaCacheSweeper never invoked sweep_media_caches — "
+                    "thread may not have started."
+                )
+            finally:
+                sweeper.stop()
+                # Best-effort join so an over-slow thread can't leak into
+                # a sibling test's timing budget.
+                if sweeper._thread is not None:
+                    sweeper._thread.join(timeout=1.0)
 
-        assert call_count["n"] >= 2, (
-            "Sweeper must invoke sweep_media_caches on the interval, "
-            "got %d call(s)" % call_count["n"]
+        assert sweeper._thread is not None
+        assert sweeper._thread.daemon is True, (
+            "sweeper thread MUST be a daemon so it can't hold interpreter "
+            "shutdown; parity with OutboundSpoolReplayer."
         )
+        assert sweeper._thread.name == "media-cache-sweeper", (
+            "thread name is the observable identity used by ops greps"
+        )
+        assert call_count["n"] >= 1
 
-    def test_media_sweep_loop_swallows_exceptions_and_continues(self):
-        """A raising sweep_media_caches must NOT kill the loop — the
-        exception is logged and the next tick runs."""
-        daemon, _ = _make_daemon()
-        import threading as _threading
-        daemon._media_sweep_stop = _threading.Event()
+    def test_stop_exits_thread_within_one_interval(self):
+        """stop() flips the Event; the loop returns as soon as its
+        ``_stop.wait(interval)`` observes the set state. Bound is one
+        interval, so a small interval + generous timeout proves it."""
+        from landline.media.cache import MediaCacheSweeper
+
+        with patch("landline.media.cache.sweep_media_caches"):
+            sweeper = MediaCacheSweeper(interval_seconds=0.05)
+            sweeper.start()
+            # Give the thread a beat to enter its first wait so stop()
+            # exercises the actual wait-and-return path.
+            time.sleep(0.02)
+            sweeper.stop()
+
+            # Latency to exit is bounded by one interval (0.05s) plus any
+            # in-progress sweep_media_caches call (mocked, near-zero).
+            # 2.0s gives ~40x headroom for a jittery host.
+            assert sweeper._thread is not None
+            sweeper._thread.join(timeout=2.0)
+            assert not sweeper._thread.is_alive(), (
+                "sweeper thread did not exit within one interval after "
+                "stop() — Event.wait / return contract regressed."
+            )
+
+    def test_loop_swallows_sweep_exceptions_and_continues(self):
+        """A raising ``sweep_media_caches`` must NOT kill the loop —
+        parity with ``OutboundSpoolReplayer._loop``. One bad FS call
+        would otherwise let caches grow unbounded."""
+        from landline.media.cache import MediaCacheSweeper
+
         call_count = {"n": 0}
+        second_sweep = __import__("threading").Event()
 
         def flaky_sweep(*args, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise RuntimeError("simulated FS error")
-            daemon._media_sweep_stop.set()
+            second_sweep.set()
             return 0
 
-        with patch("landline.orchestrator.sweep_media_caches",
-                   side_effect=flaky_sweep), \
-             patch("landline.orchestrator.MEDIA_SWEEP_INTERVAL_SECONDS",
-                   0.01), \
-             patch("landline.orchestrator.log") as mock_log:
-            daemon._media_sweep_loop()
+        with patch(
+            "landline.media.cache.sweep_media_caches",
+            side_effect=flaky_sweep,
+        ), patch("landline.media.cache.log") as mock_log:
+            sweeper = MediaCacheSweeper(interval_seconds=0.01)
+            sweeper.start()
+            try:
+                # The second sweep proves the first exception did not kill
+                # the loop.
+                assert second_sweep.wait(timeout=1.0), (
+                    "loop died after the first raising sweep — parity "
+                    "with OutboundSpoolReplayer._loop broken."
+                )
+            finally:
+                sweeper.stop()
+                if sweeper._thread is not None:
+                    sweeper._thread.join(timeout=1.0)
 
-        # Second call ran despite the first raising.
-        assert call_count["n"] == 2
-        # Error was logged.
+        assert call_count["n"] >= 2
         assert any(
             "Periodic media cache sweep raised" in str(c.args[0])
             for c in mock_log.call_args_list
-        )
+        ), "raising sweep must be logged, never silently swallowed"
 
-    def test_media_sweep_thread_started_in_run(self):
-        """run() must spawn the sweep thread so a long-lived daemon
-        actually enforces retention past the startup sweep."""
+
+class TestDaemonStartsMediaCacheSweeperInRun:
+    """The daemon's ``run()`` must construct and start a ``MediaCacheSweeper``
+    alongside ``OutboundSpoolReplayer``. Without this, the startup sweep
+    is a one-shot and caches grow for the daemon's multi-week life."""
+
+    def test_run_starts_sweeper_via_MediaCacheSweeper(self):
         daemon, _ = _make_daemon()
-        started = {"sweep": False}
+        started = {"sweeper": None}
 
-        real_thread_ctor = __import__("threading").Thread
+        class FakeSweeper:
+            def __init__(self_inner, interval_seconds=None):
+                self_inner._started = False
+                self_inner._stopped = False
 
-        def spy_thread(**kwargs):
-            if kwargs.get("name") == "media-cache-sweeper":
-                started["sweep"] = True
-            return real_thread_ctor(**kwargs)
+            def start(self_inner):
+                self_inner._started = True
+                started["sweeper"] = self_inner
+
+            def stop(self_inner):
+                self_inner._stopped = True
 
         class FakePoller:
             def __init__(self_inner, **_kw):
@@ -3445,20 +3508,23 @@ class TestMediaCacheSweeperThread:
                 return time.time()
 
         with patch("landline.orchestrator.BackgroundPoller", FakePoller), \
-             patch("landline.orchestrator.threading.Thread",
-                   side_effect=spy_thread), \
+             patch("landline.orchestrator.MediaCacheSweeper", FakeSweeper), \
              patch("landline.orchestrator.sweep_media_caches"), \
              patch("landline.orchestrator.save_state"), \
              patch("landline.orchestrator.time.sleep"):
-            # Stop the sweep immediately so the daemon thread exits before
-            # the test finishes.
-            daemon._media_sweep_stop.set()
             daemon.run()
 
-        assert started["sweep"], (
-            "run() must start a thread named 'media-cache-sweeper' — "
-            "the sweep is otherwise startup-only and caches grow "
-            "unbounded over the daemon's multi-week life."
+        assert started["sweeper"] is not None, (
+            "run() must construct+start a MediaCacheSweeper — otherwise "
+            "the sweep is startup-only and caches grow unbounded over "
+            "the daemon's multi-week life."
+        )
+        assert started["sweeper"]._started is True
+        # The main-loop teardown (finally-block) plus _shutdown belt-and-
+        # suspenders both call stop() → we expect at least one stop().
+        assert started["sweeper"]._stopped is True, (
+            "run()'s teardown must call sweeper.stop() so a clean exit "
+            "leaves no lingering thread work."
         )
 
 

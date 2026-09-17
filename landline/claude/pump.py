@@ -202,13 +202,35 @@ class StreamPump:
                     block = self._handle_event(block, event)
                 except Exception as event_error:
                     # One malformed event must not kill the process's only
-                    # reader — log and keep pumping. Drift from the old
-                    # per-turn reader accepted: a sender that RAISES here
-                    # is logged but no longer surfaces as result.error on
-                    # the turn (grep "StreamPump event error" if a turn
-                    # ever looks successful while nothing rendered).
+                    # reader — the sole-reader invariant is load-bearing, so
+                    # we log-and-continue here rather than propagate. F24:
+                    # ALSO attach a diagnostic to the currently-pending
+                    # dispatched handle so the turn does not return as
+                    # silent success — the handle still completes normally
+                    # on result / EOF (sole completion lives in
+                    # ``_close_block`` / ``_complete_pending``; re-routing
+                    # completion here caused a past desync bug). Streaming
+                    # surfaces ``handle.error`` as ``result.error`` so the
+                    # dispatcher takes the failure branch. First error wins
+                    # — a later handler raise on the same turn is logged
+                    # but does not overwrite the diagnostic. Scope the stamp to
+                    # the RAISING block's OWN handle, and only when that is the
+                    # current dispatched turn: otherwise an unsolicited block
+                    # that raises mid-interleave (registered after it opened,
+                    # its result not yet seen) would leak its error onto a
+                    # newly-registered dispatched handle it has nothing to do
+                    # with (review F24 cross-attribution gap).
                     log("StreamPump event error on %r: %s"
                         % (event.get("type"), event_error))
+                    with self._lock:
+                        owning_handle = block.handle if block is not None else None
+                        if (owning_handle is not None
+                                and owning_handle is self._pending
+                                and owning_handle.error is None):
+                            owning_handle.error = (
+                                "pump event error on %r: %s"
+                                % (event.get("type"), event_error)
+                            )
         except Exception as read_error:
             # Includes ValueError from the watchdog closing stdout mid-read
             # (interrupt / timeout / process-death) — same class of exit the

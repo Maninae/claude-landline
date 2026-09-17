@@ -13,12 +13,14 @@
 """
 
 import shutil
+import threading
 import time
 from typing import Any, Iterable, Optional
 
 from landline.config import (
     MEDIA_CACHE_DIRS,
     MEDIA_CACHE_RETENTION_HOURS,
+    MEDIA_SWEEP_INTERVAL_SECONDS,
     TELEGRAM_IMAGE_DIR,
     TELEGRAM_IMAGE_RETENTION_HOURS,
 )
@@ -130,3 +132,54 @@ def sweep_media_caches(
             # Path impl could raise before we get there.
             log(f"Media cache sweep loop failed for {d}: {loop_error}")
     return total
+
+
+class MediaCacheSweeper:
+    """F5: background thread running ``sweep_media_caches`` on a fixed interval.
+
+    Startup-only sweep let caches grow for the daemon's multi-week life;
+    this thread enforces the ``MEDIA_CACHE_RETENTION_HOURS`` policy on
+    ``MEDIA_SWEEP_INTERVAL_SECONDS`` cadence.
+
+    Shape mirrors ``landline.telegram.spool.OutboundSpoolReplayer`` —
+    ``Event``-driven wait for prompt shutdown, per-pass exceptions logged
+    and swallowed so one bad FS call can't kill the thread and let caches
+    grow unbounded.
+
+    Started by ``TelegramDaemon.run()`` alongside the spool replayer and
+    after the startup sweep has already run once; stopped by the shutdown
+    handler (level-triggered ``Event``; the current pass finishes before
+    exit, so shutdown latency ≤ one interval).
+    """
+
+    def __init__(
+        self, interval_seconds: float = MEDIA_SWEEP_INTERVAL_SECONDS,
+    ) -> None:
+        self._interval = interval_seconds
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        """Spawn the sweeper thread. Idempotent — a second call is a no-op."""
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._loop,
+            name="media-cache-sweeper",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Signal the loop to exit at its next wait boundary."""
+        self._stop.set()
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                sweep_media_caches()
+            except Exception as sweep_error:
+                log(f"Periodic media cache sweep raised: {sweep_error!r}")
+            # Event.wait returns True on set → shutdown latency ≤ the interval.
+            if self._stop.wait(self._interval):
+                return

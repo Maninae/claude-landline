@@ -1711,3 +1711,138 @@ class TestSendResponseSpoolsAllChunksOnMidStreamFailure:
         assert any("/3" in m for m in mid_stream), (
             "expected the chunk index/total in the log; got %r" % mid_stream
         )
+
+
+class TestReactionsQueueHighWaterMark:
+    """F12: the reactions FIFO queue is intentionally unbounded (a dropped
+    reaction would race SET-before-CLEAR back into existence), but a
+    Telegram outage or a runaway enqueue loop could grow it toward OOM
+    silently. Mirroring the ``StreamSender._note_queue_depth`` pattern,
+    we log ONCE when the queue crosses ``_QUEUE_HIGH_WATER`` and reset
+    the latch when it drains below half (hysteresis, no log spam).
+
+    The state is module-level (one shared queue), so two concurrent
+    enqueues cannot both log the same crossing.
+    """
+
+    def _reset_reactions_module_state(self):
+        """Empty the queue and clear the high-water latch so tests observe
+        a deterministic starting point. Global module state is shared
+        across the whole suite.
+
+        Uses monkey-drain (``get_nowait`` in a loop) so we don't accidentally
+        fire the worker thread on stale items from earlier tests.
+        """
+        import queue as _queue
+        from landline.telegram import reactions
+
+        with reactions._queue_high_water_lock:
+            reactions._queue_high_water_logged = False
+        try:
+            while True:
+                reactions._reaction_queue.get_nowait()
+                try:
+                    reactions._reaction_queue.task_done()
+                except Exception:
+                    pass
+        except _queue.Empty:
+            pass
+
+    def _enqueue_directly(self, n: int) -> None:
+        """Push ``n`` synthetic items straight onto the internal queue —
+        bypasses the public API's worker-start and config gate so the
+        test measures ONLY the depth-watermark contract.
+        """
+        from landline.telegram import reactions
+        for i in range(n):
+            reactions._reaction_queue.put(("tok", "chat", i, None))
+
+    def test_crossing_watermark_logs_exactly_once(self, monkeypatch):
+        """Enqueue past _QUEUE_HIGH_WATER and confirm _note_queue_depth
+        emits exactly one high-water log line, no matter how many
+        subsequent puts also observe depth > threshold."""
+        from landline.telegram import reactions
+
+        self._reset_reactions_module_state()
+        # Compress the threshold so the test doesn't move ~1000 items.
+        monkeypatch.setattr(
+            "landline.telegram.reactions._QUEUE_HIGH_WATER", 10,
+        )
+
+        # Pre-load the queue OVER the threshold before any _note call
+        # runs; each _note_queue_depth() sees depth > 10 and would log
+        # if the latch were absent.
+        self._enqueue_directly(20)
+
+        # Patch at the reactions-module binding: reactions.py did
+        # ``from landline.runtime.logging import log``, so ``log`` is
+        # a local name — patching the origin symbol wouldn't intercept
+        # calls made through the imported reference. Same posture as
+        # test_reactions.py's ``patch("landline.telegram.reactions.log")``.
+        with patch("landline.telegram.reactions.log") as mock_log:
+            # Fire _note_queue_depth many times — every call observes
+            # depth > threshold, so a broken latch would log N times.
+            for _ in range(15):
+                reactions._note_queue_depth()
+
+            backing_up_lines = [
+                str(call.args[0]) for call in mock_log.call_args_list
+                if "reactions queue is backing up" in str(call.args[0])
+            ]
+        assert len(backing_up_lines) == 1, (
+            "F12: latch must ensure exactly ONE high-water log per crossing; "
+            "got %d line(s): %r" % (len(backing_up_lines), backing_up_lines)
+        )
+
+        # Cleanup so a later test doesn't inherit the loaded queue or
+        # the tripped latch.
+        self._reset_reactions_module_state()
+
+    def test_cross_drain_below_half_cross_again_logs_twice(
+        self, monkeypatch,
+    ):
+        """Full hysteresis cycle: cross → drain below half → cross again.
+        The latch resets when depth drops below half of the threshold, so
+        the second crossing SHOULD log a second time — that's the whole
+        point of hysteresis (observability of separate backup incidents,
+        no spam within one)."""
+        from landline.telegram import reactions
+
+        self._reset_reactions_module_state()
+        monkeypatch.setattr(
+            "landline.telegram.reactions._QUEUE_HIGH_WATER", 10,
+        )
+
+        with patch("landline.telegram.reactions.log") as mock_log:
+            # First crossing: enqueue 20 items, note once (should log).
+            self._enqueue_directly(20)
+            reactions._note_queue_depth()
+
+            # Drain below half (10 // 2 == 5): pop items until depth < 5.
+            # Threshold check is ``depth < _QUEUE_HIGH_WATER // 2``, so we
+            # need qsize() strictly below 5 → drain to 4.
+            while reactions._reaction_queue.qsize() >= 5:
+                reactions._reaction_queue.get_nowait()
+                try:
+                    reactions._reaction_queue.task_done()
+                except Exception:
+                    pass
+            # This _note call sees depth in the reset window and clears
+            # the latch — no log expected.
+            reactions._note_queue_depth()
+
+            # Second crossing: refill past the threshold and note again.
+            self._enqueue_directly(20)
+            reactions._note_queue_depth()
+
+            backing_up_lines = [
+                str(call.args[0]) for call in mock_log.call_args_list
+                if "reactions queue is backing up" in str(call.args[0])
+            ]
+        assert len(backing_up_lines) == 2, (
+            "F12: after cross → drain-below-half → cross, expected exactly "
+            "TWO log lines (one per crossing); got %d: %r"
+            % (len(backing_up_lines), backing_up_lines)
+        )
+
+        self._reset_reactions_module_state()

@@ -12,6 +12,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 import uuid
 from typing import Deque, List, Optional
 
@@ -24,6 +25,20 @@ from landline.config import (
     WORKSPACE,
 )
 from landline.runtime.logging import log
+
+
+# Escalation grace windows for _terminate_with_escalation. Extracted from
+# kill()'s original 5/3 literals so operators can grep the ceilings; the
+# streaming.py interrupt branch now shares them too (its post-SIGTERM wait
+# was 3s before this consolidation — unified to 5s, a slightly gentler grace
+# before SIGKILL, and it runs on the watchdog thread, not the main loop).
+_TERM_GRACE_SECONDS = 5
+_KILL_GRACE_SECONDS = 3
+# Post-timeout join for the stdin writer thread: give the (now-unblocked,
+# closed-fd) writer a beat to observe the closed pipe and exit. Bounded so
+# a laggard never blocks send_message from returning; it is a daemon
+# thread and will exit with the process regardless.
+_STDIN_WRITER_JOIN_GRACE_SECONDS = 1.0
 
 
 def _resolve_claude_binary() -> str:
@@ -217,7 +232,7 @@ class PersistentClaude:
             # Give the (now-unblocked, closed-fd) writer thread a beat to
             # observe the closed pipe and exit before we return; it's a
             # daemon thread either way, so a laggard won't block shutdown.
-            writer.join(1.0)
+            writer.join(_STDIN_WRITER_JOIN_GRACE_SECONDS)
             raise RuntimeError(
                 "stdin write timed out after "
                 f"{CLAUDE_STDIN_WRITE_TIMEOUT_SECONDS}s"
@@ -240,17 +255,60 @@ class PersistentClaude:
         except Exception as e:
             log(f"SIGINT failed: {e}")
 
+    def _terminate_with_escalation(
+        self,
+        proc: subprocess.Popen,
+        term_grace: float = _TERM_GRACE_SECONDS,
+        kill_grace: float = _KILL_GRACE_SECONDS,
+    ) -> None:
+        """Escalate SIGTERM -> wait -> SIGKILL -> wait; LOUD ERROR if alive.
+
+        A child stuck in a C-level syscall (hung MCP socket, runaway subagent
+        holding fds) can survive SIGTERM and SIGKILL both. Two bounded waits
+        with a final ERROR log make that pathology visible instead of
+        silently swallowed under a bare ``except: pass``. Never raises: every
+        step's exception is logged and the escalation continues to the next.
+
+        Called by ``kill()`` and by ``streaming.py``'s interrupt-branch
+        SIGKILL escalation — one dialect across both call sites so an
+        operator greps a single wording for this class of failure.
+        """
+        start = time.time()
+        try:
+            proc.terminate()
+        except Exception as term_err:
+            log(f"SIGTERM failed: {term_err}")
+        try:
+            proc.wait(timeout=term_grace)
+            return
+        except Exception:
+            # SIGTERM did not land within ``term_grace`` — escalate.
+            pass
+        try:
+            proc.kill()
+        except Exception as kill_err:
+            log(f"SIGKILL failed: {kill_err}")
+        try:
+            proc.wait(timeout=kill_grace)
+            return
+        except Exception:
+            # Still alive after SIGKILL escalation — this is a loud
+            # operational event, so a single ERROR line names pid, poll()
+            # and elapsed seconds. Mirrors the wording dialect used in
+            # streaming.py's watchdog SIGKILL branch.
+            elapsed = time.time() - start
+            log(
+                "ERROR: Claude PID %s did not exit after SIGKILL "
+                "escalation (poll=%s, elapsed=%.1fs)" % (
+                    getattr(proc, "pid", "?"),
+                    proc.poll(),
+                    elapsed,
+                )
+            )
+
     def kill(self) -> None:
         if self._proc is not None:
-            try:
-                self._proc.terminate()
-                self._proc.wait(timeout=5)
-            except Exception:
-                try:
-                    self._proc.kill()
-                    self._proc.wait(timeout=3)
-                except Exception:
-                    pass
+            self._terminate_with_escalation(self._proc)
             self._close_pipes()
 
     def _close_pipes(self) -> None:

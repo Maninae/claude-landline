@@ -1449,7 +1449,7 @@ class TestTryEnqueueOrSendCallers:
         with patch("landline.claude.try_enqueue_or_send", helper_mock), \
              patch("landline.claude.dispatch.STILL_WORKING_NOTICE_SCHEDULE_SECONDS",
                    (0.01, 60.0, 300.0)):
-            notifier = d._start_response_watchdog("123")
+            notifier = d._start_still_working_notifier("123")
             # Give the notifier thread a beat to fire the first tick.
             time.sleep(0.08)
             notifier.cancel()
@@ -1472,7 +1472,7 @@ class TestTryEnqueueOrSendCallers:
         with patch("landline.claude.try_enqueue_or_send", helper_mock), \
              patch("landline.claude.dispatch.STILL_WORKING_NOTICE_SCHEDULE_SECONDS",
                    (0.05, 0.15, 0.30)):
-            notifier = d._start_response_watchdog("123")
+            notifier = d._start_still_working_notifier("123")
             time.sleep(0.6)
             notifier.cancel()
 
@@ -1497,7 +1497,7 @@ class TestTryEnqueueOrSendCallers:
         with patch("landline.claude.try_enqueue_or_send", helper_mock), \
              patch("landline.claude.dispatch.STILL_WORKING_NOTICE_SCHEDULE_SECONDS",
                    (0.02, 0.04, 0.06)):
-            notifier = d._start_response_watchdog("123")
+            notifier = d._start_still_working_notifier("123")
             notifier.cancel()
             # Give the thread time to observe the cancel and exit.
             time.sleep(0.15)

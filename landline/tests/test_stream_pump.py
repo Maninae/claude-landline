@@ -1028,5 +1028,158 @@ class TestOwnedProgressClock(_PumpTestCase):
                 pump._thread.join(timeout=2)
 
 
+class _FirstTextRaisingSender(_FakeSender):
+    """A sender whose FIRST ``text`` call raises, later ops record normally.
+
+    Used to inject an exception into ``StreamPump._route_assistant`` so the
+    outer ``_handle_event`` catch fires. Subsequent ``flush`` / ``text`` on
+    ``_close_block`` still record ops, so a dispatched turn can complete
+    cleanly and the test can assert the diagnostic on ``handle.error``.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.raised = False
+
+    def text(self, delta):
+        if not self.raised:
+            self.raised = True
+            raise RuntimeError("sender kaboom")
+        super().text(delta)
+
+
+class TestF24EventErrorSurfacesOnHandle(_PumpTestCase):
+    """F24 — an exception thrown inside ``_handle_event`` used to be logged
+    and swallowed, so the pump kept reading (correct — sole reader) but the
+    dispatched turn returned as a silent success (wrong — the deltas that
+    raised never reached the sender). Now the outer catch also stamps
+    ``pending.error`` (first error wins) so ``streaming`` surfaces it as
+    ``result.error`` and the dispatcher takes the failure branch.
+
+    Invariants preserved: the pump keeps reading, the handle is still
+    completed by the normal path (``_close_block`` / ``_complete_pending``),
+    completion is NOT re-routed through the catch (that caused a past
+    desync bug)."""
+
+    def test_dispatched_event_raise_stamps_handle_error(self):
+        """A handler raise on the pending turn's assistant event -> handle.error
+        is set to a diagnostic identifying the event type; the turn still
+        completes normally on its ``result`` event."""
+        raising_sender = _FirstTextRaisingSender()
+        handle = TurnHandle()
+        self.pump.register_turn(handle, raising_sender)
+
+        # init -> assistant text raises inside _handle_event -> caught +
+        # diagnostic attached to handle -> pump keeps reading.
+        self.proc.stdout.feed_event(_init_event())
+        self.proc.stdout.feed_event(_assistant_text("m1", "boom"))
+        # result completes the handle normally (sole completion site).
+        self.proc.stdout.feed_event(_result_event("boom"))
+
+        self.assertTrue(handle.done.wait(2))
+        self.assertIsNotNone(
+            handle.error,
+            "expected handle.error to be stamped when the assistant handler "
+            "raised; got None (silent success)",
+        )
+        # The diagnostic must identify the offending event type.
+        self.assertIn("pump event error", handle.error)
+        self.assertIn("assistant", handle.error)
+
+    def test_first_error_wins_when_multiple_raise(self):
+        """Two handler raises on the same turn -> handle.error keeps the FIRST
+        diagnostic (later raises are logged but do not overwrite)."""
+        class _AlwaysRaisingSender(_FakeSender):
+            def text(self, delta):
+                raise RuntimeError("first" if delta == "one" else "second")
+
+        raising_sender = _AlwaysRaisingSender()
+        handle = TurnHandle()
+        self.pump.register_turn(handle, raising_sender)
+
+        self.proc.stdout.feed_event(_init_event())
+        self.proc.stdout.feed_event(_assistant_text("m1", "one"))
+        self.proc.stdout.feed_event(_assistant_text("m2", "two"))
+        self.proc.stdout.feed_event(_result_event("two"))
+
+        self.assertTrue(handle.done.wait(2))
+        self.assertIsNotNone(handle.error)
+        # Whichever raise landed first (both come from the same event type
+        # so we key on the raised message text).
+        self.assertIn("first", handle.error)
+        self.assertNotIn("second", handle.error)
+
+    def test_unsolicited_event_raise_does_not_touch_pending(self):
+        """An exception on an UNSOLICITED block (no pending handle) must not
+        stamp a later-registered handle. Sole reader stays alive; the
+        pending slot is orphan-free."""
+        idle_sender = _FirstTextRaisingSender()
+        with patch("landline.claude._get_or_create_sender",
+                   return_value=idle_sender):
+            self.pump.set_idle_route("chat1", "tok", lambda *a: None,
+                                     lambda *a: None)
+            # Unsolicited turn — no register_turn call precedes this.
+            self.proc.stdout.feed_event(_init_event())
+            self.proc.stdout.feed_event(_assistant_text("bg", "boom"))
+            self.proc.stdout.feed_event(_result_event("boom"))
+            self._settle()
+
+        # NOW register a dispatched turn — its error slot must be pristine
+        # (the earlier unsolicited raise had nowhere to stamp).
+        sender2 = _FakeSender()
+        handle = TurnHandle()
+        self.pump.register_turn(handle, sender2)
+        self.proc.stdout.feed_event(_init_event())
+        self.proc.stdout.feed_event(_assistant_text("m2", "clean"))
+        self.proc.stdout.feed_event(_result_event("clean"))
+        self.assertTrue(handle.done.wait(2))
+        self.assertIsNone(
+            handle.error,
+            "later-registered handle picked up an error from an earlier "
+            "unsolicited block; got %r" % handle.error,
+        )
+        # Sole reader still alive after the earlier raise.
+        self.assertTrue(self.pump.alive)
+
+    def test_unsolicited_raise_mid_interleave_does_not_leak_onto_pending(self):
+        """The interleaved race the sibling test does NOT cover: an unsolicited
+        block is still OPEN (no result yet) when a dispatched turn registers,
+        so ``_pending`` is set while the open block's handle is None. If that
+        open unsolicited block's event then raises, the stamp must go to the
+        RAISING block's own handle (None -> nothing), NOT to ``_pending``.
+        Pre-fix this leaked the error onto the freshly-registered dispatched
+        handle; post-fix the dispatched handle stays pristine."""
+        idle_sender = _FirstTextRaisingSender()
+        with patch("landline.claude._get_or_create_sender",
+                   return_value=idle_sender):
+            self.pump.set_idle_route("chat1", "tok", lambda *a: None,
+                                     lambda *a: None)
+            # Open unsolicited block U (init only) and let the reader consume
+            # it — U is now the open block, handle=None, _pending still None.
+            self.proc.stdout.feed_event(_init_event())
+            self._settle()
+            # A dispatched turn registers WHILE U is still open: _pending is
+            # set, but the currently-open block is still U (handle None).
+            sender2 = _FakeSender()
+            handle = TurnHandle()
+            self.pump.register_turn(handle, sender2)
+            # U's own delta raises inside _handle_event. block is U (handle
+            # None) -> no stamp. Pre-fix read _pending (handle) and leaked.
+            self.proc.stdout.feed_event(_assistant_text("bg", "boom"))
+            self.proc.stdout.feed_event(_result_event("boom"))
+            self._settle()
+        # Now U's raise is behind us; deliver the dispatched turn's own block.
+        self.proc.stdout.feed_event(_init_event())
+        self.proc.stdout.feed_event(_assistant_text("m2", "clean"))
+        self.proc.stdout.feed_event(_result_event("clean"))
+        self.assertTrue(handle.done.wait(2))
+        self.assertIsNone(
+            handle.error,
+            "dispatched handle inherited an error from an unsolicited block "
+            "that raised while still open mid-interleave; got %r" % handle.error,
+        )
+        self.assertTrue(self.pump.alive)
+
+
 if __name__ == "__main__":
     unittest.main()

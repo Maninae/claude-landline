@@ -283,10 +283,10 @@ class ClaudeDispatcher:
         pc = _get_persistent_claude()
         current_session_id = pc.get_session_id()
         is_new_session = current_session_id is None
-        watchdog = self._start_response_watchdog(chat_id)
+        notifier = self._start_still_working_notifier(chat_id)
 
-        # try/finally: watchdog Timer is ALWAYS cancelled — else a raised
-        # exception leaks the Timer → spurious "(Still working...)" message
+        # try/finally: notifier is ALWAYS cancelled — else a raised
+        # exception leaks its thread → spurious "(Still working...)" message
         # after the real response.
         try:
             effective_text = self._inject_history(text, is_new_session)
@@ -308,7 +308,7 @@ class ClaudeDispatcher:
 
             return result
         finally:
-            watchdog.cancel()
+            notifier.cancel()
 
     def _retry_with_fresh_session(
         self, text: str, chat_id: str,
@@ -643,13 +643,18 @@ class ClaudeDispatcher:
         except Exception as alert_error:
             log(f"Auth-expiry alert failed to dispatch: {alert_error}")
 
-    def _start_response_watchdog(self, chat_id: str) -> "_StillWorkingNotifier":
+    def _start_still_working_notifier(self, chat_id: str) -> "_StillWorkingNotifier":
         """Fire escalating "still working…" notices on the schedule in
         ``STILL_WORKING_NOTICE_SCHEDULE_SECONDS`` (F11).
 
         The last interval repeats until ``cancel()`` is called on turn
         completion — the previous one-shot 60s Timer left long hangs
         completely silent for the operator with no cue to send ``/pause``.
+
+        Named for what it starts: the real dispatch watchdog is
+        ``landline.claude.streaming``'s watchdog thread (which interrupts
+        the subprocess on ``/pause``). This helper only fires the
+        "(Still working…)" chat notices, so it's a notifier, not a watchdog.
         """
         notifier = _StillWorkingNotifier(
             chat_id=chat_id,

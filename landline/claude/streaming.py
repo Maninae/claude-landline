@@ -250,6 +250,10 @@ def run_claude_streaming(
                     break
                 if interrupt_check is not None and interrupt_check():
                     log("Interrupted by new incoming message")
+                    # ``result.interrupted`` MUST be set BEFORE escalation so
+                    # the dispatcher's failure-backoff skip stays honored
+                    # even if the SIGKILL path takes several seconds. Exit
+                    # 143 handling downstream is unchanged.
                     result.interrupted = True
                     interrupt_sent.set()
                     handle.interrupt_suppress.set()
@@ -258,32 +262,13 @@ def run_claude_streaming(
                         proc.wait(timeout=5)
                     except Exception:
                         log("Claude did not exit 5s after SIGINT — sending SIGTERM")
-                        try:
-                            proc.terminate()
-                        except Exception as term_err:
-                            log(f"SIGTERM failed: {term_err}")
-                        # F4: SIGKILL escalation. A child stuck in a C-level
-                        # syscall (a hung MCP socket, a runaway subagent
-                        # holding fds) can survive SIGINT and SIGTERM both.
-                        # Bounded wait, then SIGKILL, then log ERROR if the
-                        # process is STILL alive after that.
-                        try:
-                            proc.wait(timeout=3)
-                        except Exception:
-                            try:
-                                proc.kill()
-                            except Exception as kill_err:
-                                log(f"SIGKILL failed: {kill_err}")
-                            try:
-                                proc.wait(timeout=3)
-                            except Exception:
-                                log(
-                                    "ERROR: Claude PID %s did not exit after "
-                                    "SIGKILL escalation (poll=%s)" % (
-                                        getattr(proc, "pid", "?"),
-                                        proc.poll(),
-                                    )
-                                )
+                        # F4/F21: SIGKILL escalation. A child stuck in a
+                        # C-level syscall (a hung MCP socket, a runaway
+                        # subagent holding fds) can survive SIGINT and
+                        # SIGTERM both. Dedupe against ``PersistentClaude``'s
+                        # helper so operators see ONE dialect for this
+                        # pathology across streaming.py and persistent.py.
+                        pc._terminate_with_escalation(proc)
                     _unblock_reader()
                     break
                 # Wake on EITHER done (shutdown/turn-end) OR pause. The

@@ -81,6 +81,16 @@ class StreamSender:
         self._fallback_sent = False
         # One-shot latch for the queue-depth warning (see _note_queue_depth).
         self._queue_high_water_logged = False
+        # F23: byte-counted drop tracking for producers that raced ``close()``.
+        # Silent drops on a closed sender used to leave nothing in the log —
+        # a shutdown-time bug shape (a late unsolicited turn's tail vanishes)
+        # was invisible. Now the FIRST drop after close emits one log line
+        # (latched via ``_drop_log_emitted``); the counters keep accumulating
+        # and ``close()`` logs a final tally after the drain returns. Same
+        # one-shot-then-tally shape as ``_queue_high_water_logged``.
+        self._dropped_text_bytes = 0
+        self._dropped_status_bytes = 0
+        self._drop_log_emitted = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -109,8 +119,16 @@ class StreamSender:
                 self.q.put((_ENTRY_TEXT, delta))
                 self._note_queue_depth()
                 return
-        # Closed sender — drop. close() runs only at shutdown; a synchronous
-        # emit here would race the daemon-thread final drain.
+            # Closed sender — drop. close() runs only at shutdown; a
+            # synchronous emit here would race the daemon-thread final
+            # drain (documented invariant — do NOT try to emit here).
+            # F23: count + latch-log so a burst is visible instead of silent.
+            self._dropped_text_bytes += len(delta)
+            emit_log = not self._drop_log_emitted
+            if emit_log:
+                self._drop_log_emitted = True
+        if emit_log:
+            self._log_first_drop()
 
     def status(self, line: str) -> None:
         """Queue a tool-status line (pre-formatted HTML) for batched HTML send."""
@@ -121,7 +139,37 @@ class StreamSender:
                 self.q.put((_ENTRY_STATUS, line))
                 self._note_queue_depth()
                 return
-        # Closed sender — drop. See .text() for rationale.
+            # Closed sender — drop. See .text() for rationale. F23 tracks
+            # dropped-status bytes on the same latch as dropped-text bytes.
+            self._dropped_status_bytes += len(line)
+            emit_log = not self._drop_log_emitted
+            if emit_log:
+                self._drop_log_emitted = True
+        if emit_log:
+            self._log_first_drop()
+
+    def _log_first_drop(self) -> None:
+        """Emit the ONE post-close drop log line. Called outside ``_close_lock``.
+
+        Reads the counters without re-taking the lock: both callers just
+        incremented under the lock and then released it, so the values
+        observed here include the current drop. Subsequent drops keep
+        accumulating on the counters but never re-log (latched).
+        """
+        log(
+            "StreamSender: dropped %d text-char(s) and %d status-char(s) "
+            "for chat %s on a closed sender — worker already exited "
+            "(shutdown drain)" % (
+                self._dropped_text_bytes,
+                self._dropped_status_bytes,
+                self.chat_id,
+            )
+        )
+
+    @property
+    def dropped_bytes(self) -> Tuple[int, int]:
+        """(text_bytes, status_bytes) dropped on a closed sender. Read-only."""
+        return (self._dropped_text_bytes, self._dropped_status_bytes)
 
     def _note_queue_depth(self) -> None:
         """Log once past the high-water mark; latch resets below half (hysteresis).
@@ -166,10 +214,23 @@ class StreamSender:
                 "StreamSender.close: worker still draining at shutdown after "
                 "%.1fs, exiting anyway" % timeout
             )
-            return
-        # Clean exit — drain any leftover producer-side entries on this
-        # thread so nothing is lost during the in-time shutdown path.
-        self._drain_remaining()
+        else:
+            # Clean exit — drain any leftover producer-side entries on this
+            # thread so nothing is lost during the in-time shutdown path.
+            self._drain_remaining()
+        # F23: final drop tally, AFTER the drain window closes so producers
+        # that raced close() have had their counter increment recorded. Quiet
+        # chats stay quiet — zero-drop closes log nothing.
+        if self._dropped_text_bytes or self._dropped_status_bytes:
+            log(
+                "StreamSender.close: final drop tally for chat %s — "
+                "%d text-char(s), %d status-char(s) dropped on closed "
+                "sender" % (
+                    self.chat_id,
+                    self._dropped_text_bytes,
+                    self._dropped_status_bytes,
+                )
+            )
 
     # Transport helpers (worker-only, except post-close fallbacks).
 
