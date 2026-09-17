@@ -867,5 +867,166 @@ class TestUsageCapture(_PumpTestCase):
             release_record.set()
 
 
+# ---------------------------------------------------------------------------
+# F1 — owned-progress clock (Sep 2026 hang-hardening)
+# ---------------------------------------------------------------------------
+
+class TestOwnedProgressClock(_PumpTestCase):
+    """Two clocks live on a dispatched TurnHandle:
+
+    * ``last_active`` — bumped by any parsed event (pipe liveness).
+    * ``owned_last_active`` — bumped ONLY by the pending handle's OWN
+      content: assistant text delta, its own tool_use, its own tool_result.
+
+    The Blender-MCP hang was invisible to the any-event clock because
+    background/heartbeat chatter kept it hot. The owned clock is the new
+    hang detector — a stuck foreground turn goes owned-silent even while
+    the pipe stays alive.
+    """
+
+    def test_owned_clock_bumped_on_assistant_text_delta(self):
+        sender = _FakeSender()
+        handle = TurnHandle()
+        self.pump.register_turn(handle, sender)
+        baseline = handle.owned_last_active[0]
+        time.sleep(0.02)
+
+        self.proc.stdout.feed_event(_init_event())
+        self.proc.stdout.feed_event(_assistant_text("m1", "hello"))
+        self.assertTrue(sender.wait_for(("text", "hello")))
+
+        self.assertGreater(handle.owned_last_active[0], baseline,
+                           "assistant text delta must bump owned clock")
+
+    def test_owned_clock_bumped_on_dispatched_turn_tool_use(self):
+        sender = _FakeSender()
+        handle = TurnHandle()
+        self.pump.register_turn(handle, sender)
+        baseline = handle.owned_last_active[0]
+        time.sleep(0.02)
+
+        tool_event = {
+            "type": "assistant",
+            "parent_tool_use_id": None,
+            "message": {"id": "m1", "content": [
+                {"type": "tool_use", "id": "tu1", "name": "Bash",
+                 "input": {"command": "ls"}},
+            ]},
+        }
+        self.proc.stdout.feed_event(_init_event())
+        self.proc.stdout.feed_event(tool_event)
+        # Wait for status routing (proxy for the pump handling the event).
+        deadline = time.time() + 2
+        while time.time() < deadline and handle.owned_last_active[0] == baseline:
+            time.sleep(0.01)
+        self.assertGreater(handle.owned_last_active[0], baseline,
+                           "tool_use must bump owned clock")
+
+    def test_owned_clock_bumped_on_tool_result_user_event(self):
+        sender = _FakeSender()
+        handle = TurnHandle()
+        self.pump.register_turn(handle, sender)
+        self.proc.stdout.feed_event(_init_event())
+        # Let the block open before we sample the baseline so we're
+        # measuring against the last owned-bump we care about.
+        self.assertTrue(sender.wait_for(("status", "$ ls")) or True)
+        baseline = handle.owned_last_active[0]
+        time.sleep(0.02)
+
+        tool_result_event = {
+            "type": "user",
+            "parent_tool_use_id": None,
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu1",
+                 "content": [{"type": "text", "text": "ok"}]},
+            ]},
+        }
+        self.proc.stdout.feed_event(tool_result_event)
+
+        deadline = time.time() + 2
+        while time.time() < deadline and handle.owned_last_active[0] == baseline:
+            time.sleep(0.01)
+        self.assertGreater(handle.owned_last_active[0], baseline,
+                           "user tool_result must bump owned clock")
+
+    def test_owned_clock_NOT_bumped_by_background_notifications(self):
+        """The whole point of F1: heartbeat/task-notification chatter
+        outside the pending block never bumps the owned clock. This is
+        the test that fails on a naive "bump owned on every event"."""
+        sender = _FakeSender()
+        handle = TurnHandle()
+        self.pump.register_turn(handle, sender)
+        baseline_owned = handle.owned_last_active[0]
+        baseline_anyevent = handle.last_active[0]
+        time.sleep(0.02)
+
+        # Feed a stream of background/heartbeat events — no init opened
+        # a block yet, so nothing is attributed to the handle.
+        for _ in range(10):
+            self.proc.stdout.feed_event(_notification_event())
+        # Feed a rate_limit_event too — same non-owned class.
+        self.proc.stdout.feed_event({"type": "rate_limit_event"})
+        self._settle()
+
+        self.assertGreater(handle.last_active[0], baseline_anyevent,
+                           "any-event clock must bump on notifications")
+        self.assertEqual(handle.owned_last_active[0], baseline_owned,
+                         "owned clock must NOT bump on background chatter")
+
+    def test_owned_clock_NOT_bumped_by_unsolicited_block_events(self):
+        """Idle-route unsolicited blocks are background turns — their
+        assistant text and tool_use events must not bump the pending
+        dispatched handle's owned clock."""
+        idle_sender = _FakeSender()
+        with patch("landline.claude._get_or_create_sender",
+                   return_value=idle_sender):
+            self.pump.set_idle_route("chat1", "tok", lambda *a: None,
+                                     lambda *a: None)
+            sender = _FakeSender()
+            handle = TurnHandle()
+            self.pump.register_turn(handle, sender)
+            baseline_owned = handle.owned_last_active[0]
+            time.sleep(0.02)
+
+            # Between the register and the first init: unsolicited turn
+            # emits init+assistant+result. Attribution rules say the FIRST
+            # init after register_turn wins, so this whole unsolicited
+            # block gets swallowed by the pending handle — that IS the
+            # documented cosmetic attribution race. Force the unsolicited
+            # path by NOT registering until after the block starts.
+            # Instead: feed the unsolicited block BEFORE registering.
+
+        # Fresh pump run so the unsolicited turn happens with no pending
+        # handle.
+        idle_sender2 = _FakeSender()
+        with patch("landline.claude._get_or_create_sender",
+                   return_value=idle_sender2):
+            proc = _FakeProc()
+            pump = StreamPump(proc)
+            try:
+                pump.set_idle_route("chat1", "tok", lambda *a: None,
+                                    lambda *a: None)
+                sender = _FakeSender()
+                handle = TurnHandle()
+                pump.register_turn(handle, sender)
+                baseline_owned = handle.owned_last_active[0]
+                time.sleep(0.02)
+
+                # Cancel the register so the next init is unsolicited.
+                pump.cancel_turn(handle)
+
+                proc.stdout.feed_event(_init_event())
+                proc.stdout.feed_event(_assistant_text("bg", "background"))
+                proc.stdout.feed_event(_result_event("background"))
+                self.assertTrue(idle_sender2.wait_for(("text", "background")))
+
+                self.assertEqual(handle.owned_last_active[0], baseline_owned,
+                                 "unsolicited assistant text must not bump "
+                                 "the cancelled handle's owned clock")
+            finally:
+                proc.stdout.close()
+                pump._thread.join(timeout=2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -29,18 +29,32 @@ _PID_LOCK_FILE = WORKSPACE / "cache" / "telegram-daemon.pid"
 def _acquire_singleton_lock():
     """Acquire an exclusive flock on the PID file to prevent dual instances.
     Returns the open file handle (must stay open for the lock to hold).
-    Exits with code 0 if another instance holds the lock."""
+    Exits with code 0 if another instance holds the lock.
+
+    Ordering matters: open ``O_RDWR | O_CREAT`` (NOT ``O_TRUNC``), flock, and
+    only then truncate + write the PID. A launchd ``ThrottleInterval`` bounce
+    can race two ``python3 -m landline`` starts against the same file — if
+    truncate came first (as with ``open(..., "w")``), the loser would blank
+    the winner's PID before its flock call fails, leaving the watchdog +
+    operator reading an empty PID file for the primary daemon.
+    """
     _PID_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    lock_fd = open(_PID_LOCK_FILE, "w")
+    fd = os.open(str(_PID_LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
+        # Loser branch: MUST NOT truncate or write — leaving the winner's
+        # PID intact is the whole point of this ordering.
+        os.close(fd)
         log("Another daemon instance is already running — exiting")
-        lock_fd.close()
         sys.exit(0)
-    lock_fd.write(str(os.getpid()))
-    lock_fd.flush()
-    return lock_fd
+    # Winner: safe to publish the PID now that the flock is ours.
+    os.ftruncate(fd, 0)
+    os.write(fd, str(os.getpid()).encode("ascii"))
+    # Wrap the fd in a file object so the existing lifetime contract holds —
+    # the caller keeps the handle alive for the process's life, and its
+    # ``close()`` in the finally-block releases the flock at shutdown.
+    return os.fdopen(fd, "r+")
 
 
 def _emit_fatal_crash_report(fatal_traceback_text: str) -> None:

@@ -1150,3 +1150,138 @@ class TestQueuePutInsideDedupLock:
         # Snapshot + queue drain must both see the item.
         assert 500 in bp.snapshot_dedup_ids()
         assert [u["update_id"] for u in bp.drain()] == [500]
+
+
+class TestRetryAfterClamp:
+    """F6: a huge Retry-After from a 429 must be clamped at
+    POLL_RETRY_AFTER_CAP_SECONDS so a hostile / malformed value cannot
+    wedge receive for the full outage. Mirrors the send-path clamp."""
+
+    def _make_429(self, retry_after_seconds):
+        import urllib.error
+        import io
+
+        class FakeHeaders:
+            def __init__(self, retry_after):
+                self._retry_after = retry_after
+
+            def get(self, key, default=None):
+                if key == "Retry-After":
+                    return self._retry_after
+                return default
+
+        return urllib.error.HTTPError(
+            url="https://api.telegram.org/botX/getUpdates",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=FakeHeaders(str(retry_after_seconds)),
+            fp=io.BytesIO(b""),
+        )
+
+    def test_huge_retry_after_is_clamped_to_cap(self):
+        """A 12-hour Retry-After must NOT sleep for 12 hours — it clamps to
+        POLL_RETRY_AFTER_CAP_SECONDS. Verifies via the observed wait duration."""
+        from landline.config import POLL_RETRY_AFTER_CAP_SECONDS
+
+        bp = BackgroundPoller("token", 0)
+        wait_durations = []
+        huge_retry_after = 12 * 3600  # 43200s — miles over the cap
+
+        def fake_get_updates(token, offset):
+            raise self._make_429(huge_retry_after)
+
+        bp._stop = MagicMock()
+        bp._stop.is_set.side_effect = [False, True]
+
+        def fake_wait(duration):
+            wait_durations.append(duration)
+            return False
+
+        bp._stop.wait.side_effect = fake_wait
+
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert"), \
+             patch("landline.telegram.poller.log"):
+            bp._poll_loop()
+
+        # Exactly one sleep observed, and it MUST be at the cap (or under —
+        # cap governs the retry_after side; current_backoff is 5s so max wins
+        # the cap).
+        assert len(wait_durations) == 1
+        assert wait_durations[0] == POLL_RETRY_AFTER_CAP_SECONDS
+        assert wait_durations[0] < huge_retry_after, (
+            "12h retry_after (%r) must be clamped, got %r"
+            % (huge_retry_after, wait_durations[0])
+        )
+
+    def test_small_retry_after_is_honored_unchanged(self):
+        """A 10s Retry-After is below the 300s cap → passed through as-is
+        (max'd with current_backoff=5s, so 10s wins)."""
+        bp = BackgroundPoller("token", 0)
+        wait_durations = []
+
+        def fake_get_updates(token, offset):
+            raise self._make_429(10)
+
+        bp._stop = MagicMock()
+        bp._stop.is_set.side_effect = [False, True]
+
+        def fake_wait(duration):
+            wait_durations.append(duration)
+            return False
+
+        bp._stop.wait.side_effect = fake_wait
+
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert"), \
+             patch("landline.telegram.poller.log"):
+            bp._poll_loop()
+
+        assert wait_durations == [10]
+
+
+class TestOnUpdateQueuedExceptionLogged:
+    """F8: an on_update_queued exception is isolated from the poll loop
+    (must NOT bump the network error counter or fail the loop) AND is
+    logged so a silently-broken /pause becomes observable."""
+
+    def test_raising_callback_is_logged_but_isolated(self):
+        """The exception is (a) logged with the callback-name marker,
+        (b) does NOT increment consecutive_error_count (no network alert),
+        (c) does NOT break the poll loop (update still queues, next poll
+        still runs)."""
+        def raising_callback(update):
+            raise RuntimeError("simulated /pause detection bug")
+
+        bp = BackgroundPoller("token", 0, on_update_queued=raising_callback)
+        updates = [{"update_id": 1, "message": {"text": "hi"}}]
+        call_count = [0]
+
+        def fake_get_updates(token, offset):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {"ok": True, "result": updates}
+            bp._stop.set()
+            return {"ok": True, "result": []}
+
+        with patch("landline.telegram.poller._telegram_api_get_updates", side_effect=fake_get_updates), \
+             patch("landline.telegram.poller.send_network_alert") as mock_alert, \
+             patch("landline.telegram.poller.log") as mock_log:
+            bp._poll_loop()
+
+        # Update still enqueued.
+        assert bp.drain() == updates
+        # No network-alert path was entered.
+        mock_alert.assert_not_called()
+        # F8: at least one log line names the callback and includes the
+        # exception repr — a broken /pause path is now observable.
+        callback_log_lines = [
+            str(c.args[0]) for c in mock_log.call_args_list
+            if "on_update_queued callback raised" in str(c.args[0])
+        ]
+        assert len(callback_log_lines) >= 1
+        assert "RuntimeError" in callback_log_lines[0]
+        # F8 observability accessor exposes the count + last_at.
+        info = bp.callback_error_info()
+        assert info["count"] == 1
+        assert info["last_at"] is not None

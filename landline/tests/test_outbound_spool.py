@@ -423,3 +423,129 @@ class TestReplayAllPermanent4xx:
             % (code, len(entries))
         )
         assert "-pending.json" in entries[0].name
+
+
+# ---------------------------------------------------------------------------
+# F18: write-time cap in persist() — a burst during an outage must not
+# accumulate unbounded pending files between the 60s replay passes.
+# ---------------------------------------------------------------------------
+
+
+class TestPersistWriteTimeCap:
+    """Regression: SPOOL_MAX_FILES was only enforced by ``replay_all`` (every
+    60s). A Telegram outage during a fast-streaming turn (many chunks + many
+    replies queued) could persist thousands of pending files between passes,
+    starving the atomic state save and filling the disk. persist() must
+    enforce the cap at write time: drop OLDEST pending files so the newest
+    reply is always spooled, log the enforcement so silent capacity failures
+    stay visible, and leave persist-first ordering intact.
+    """
+
+    def test_persist_drops_oldest_when_at_cap(self, tmp_spool, monkeypatch):
+        """With SPOOL_MAX_FILES pre-existing pending files, persist() must
+        unlink the oldest to make room for the new file."""
+        monkeypatch.setattr("landline.telegram.spool.SPOOL_MAX_FILES", 3)
+
+        now = time.time()
+        # Populate exactly SPOOL_MAX_FILES pending files with distinct
+        # created_ns so the oldest is unambiguous.
+        for i in range(3):
+            _write_pending(
+                tmp_spool, "old-%d" % i, created_at=now - 10,
+                created_ns=1_000 + i, uid="u%07d" % i,
+            )
+        pre_names = sorted(p.name for p in tmp_spool.iterdir())
+        assert len(pre_names) == 3
+
+        from landline.telegram.spool import persist
+        with patch("landline.telegram.spool.log") as mock_log:
+            spool_id = persist("42", "new", html_mode=False, label="chunk")
+
+        remaining = list(tmp_spool.iterdir())
+        names = [p.name for p in remaining]
+
+        # The oldest (created_ns=1000, uid=u0000000) must be gone.
+        assert not any(n.startswith("1000-u0000000-") for n in names), (
+            "oldest pending file survived the write-time cap: %r" % names
+        )
+        # The newly persisted file (inflight-<pid>) exists.
+        assert os.path.basename(spool_id) in names
+        # The two younger pre-existing pending files are still there.
+        for keeper_ns in (1001, 1002):
+            assert any(n.startswith("%d-" % keeper_ns) for n in names), (
+                "unexpected: keeper %d-* was dropped; names=%r"
+                % (keeper_ns, names)
+            )
+        # After: total files = SPOOL_MAX_FILES (2 old pending + 1 new
+        # inflight). The cap holds.
+        assert len(remaining) == 3
+
+        # A log line was emitted so silent capacity failures are observable.
+        assert any(
+            "write-time cap" in call.args[0]
+            for call in mock_log.call_args_list
+        ), "no write-time cap log line was emitted"
+
+    def test_persist_does_not_drop_when_under_cap(
+        self, tmp_spool, monkeypatch,
+    ):
+        """A single-file persist against an empty spool must NOT touch other
+        files and MUST NOT log a cap-enforcement line — pure regression
+        against over-eager pruning."""
+        monkeypatch.setattr("landline.telegram.spool.SPOOL_MAX_FILES", 3)
+
+        from landline.telegram.spool import persist
+        with patch("landline.telegram.spool.log") as mock_log:
+            spool_id = persist("42", "hi", html_mode=False, label="chunk")
+
+        entries = list(tmp_spool.iterdir())
+        assert len(entries) == 1
+        assert os.path.basename(spool_id) == entries[0].name
+        # No spurious cap-enforcement log.
+        for call in mock_log.call_args_list:
+            assert "write-time cap" not in call.args[0], (
+                "cap-log fired below the cap: %r" % (call.args,)
+            )
+
+    def test_persist_write_cap_drops_multiple_oldest_when_over(
+        self, tmp_spool, monkeypatch,
+    ):
+        """If somehow the spool is ABOVE the cap (e.g. cap was recently
+        lowered), persist() drops enough oldest files to bring the
+        post-persist total down to SPOOL_MAX_FILES exactly."""
+        monkeypatch.setattr("landline.telegram.spool.SPOOL_MAX_FILES", 3)
+
+        now = time.time()
+        # 5 pending pre-existing (cap is 3) — persist must drop 3 oldest
+        # (leaving 2 kept + 1 new = 3 total).
+        for i in range(5):
+            _write_pending(
+                tmp_spool, "c%d" % i, created_at=now - 10,
+                created_ns=2_000 + i, uid="u%07d" % i,
+            )
+        from landline.telegram.spool import persist
+        with patch("landline.telegram.spool.log") as mock_log:
+            spool_id = persist("42", "new", html_mode=False, label="chunk")
+
+        remaining = list(tmp_spool.iterdir())
+        assert len(remaining) == 3, (
+            "expected 3 total files after cap, got %d: %r"
+            % (len(remaining), [p.name for p in remaining])
+        )
+        # The three oldest (created_ns 2000, 2001, 2002) are gone.
+        for ns in (2000, 2001, 2002):
+            for p in remaining:
+                assert not p.name.startswith("%d-" % ns), (
+                    "kept old file that should have been dropped: %s" % p.name
+                )
+        # The two newest pre-existing (2003, 2004) survived.
+        for ns in (2003, 2004):
+            assert any(p.name.startswith("%d-" % ns) for p in remaining), (
+                "dropped a keeper (%d-*); remaining=%r"
+                % (ns, [p.name for p in remaining])
+            )
+        assert os.path.basename(spool_id) in [p.name for p in remaining]
+        assert any(
+            "write-time cap" in call.args[0]
+            for call in mock_log.call_args_list
+        )

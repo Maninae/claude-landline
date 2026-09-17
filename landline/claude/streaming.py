@@ -25,7 +25,12 @@ import time
 from typing import Any, Callable, List, Optional
 
 from landline.claude.types import ClaudeStreamResult
-from landline.config import CLAUDE_TIMEOUT, TYPING_INTERVAL
+from landline.config import (
+    CLAUDE_DISPATCH_WAIT_POLL_SECONDS,
+    CLAUDE_OWNED_SILENCE_TIMEOUT_SECONDS,
+    CLAUDE_TIMEOUT,
+    TYPING_INTERVAL,
+)
 from landline.runtime.logging import log
 from landline.claude.registry import _SHUTDOWN_DRAIN_TIMEOUT, _close_all_senders
 from landline.claude.pump import TurnHandle, get_or_create_pump
@@ -159,7 +164,12 @@ def run_claude_streaming(
         return result
 
     done = threading.Event()
-    last_active = handle.last_active  # single-cell clock bumped by the pump
+    # Dual clocks (see pump docstring). ``last_active`` is any-event pipe
+    # liveness (bumped on every parsed event). ``owned_last_active`` is
+    # scoped to the dispatched turn's own content (assistant text delta /
+    # tool_use / tool_result) and drives the F1 hang detector.
+    last_active = handle.last_active
+    owned_last_active = handle.owned_last_active
     interrupt_sent = threading.Event()
 
     def _unblock_reader() -> None:
@@ -195,45 +205,140 @@ def run_claude_streaming(
         pause_waker_thread.start()
 
     def watchdog() -> None:
-        while not done.is_set():
-            if proc.poll() is not None:
-                log(f"Claude process died (exit {proc.returncode}), closing pipes")
-                _unblock_reader()
-                break
-            if (time.time() - last_active[0]) >= CLAUDE_TIMEOUT:
-                log(f"Claude silent for {CLAUDE_TIMEOUT}s, killing process")
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                _unblock_reader()
-                break
-            if interrupt_check is not None and interrupt_check():
-                log("Interrupted by new incoming message")
-                result.interrupted = True
-                interrupt_sent.set()
-                handle.interrupt_suppress.set()
-                pc.interrupt()
-                try:
-                    proc.wait(timeout=5)
-                except Exception:
-                    log("Claude did not exit 5s after SIGINT — sending SIGTERM")
-                    try:
-                        proc.terminate()
-                    except Exception as term_err:
-                        log(f"SIGTERM failed: {term_err}")
-                _unblock_reader()
-                break
-            # Wake on EITHER done (shutdown/turn-end) OR pause. The
-            # generation re-check inside interrupt_check at the top of
-            # next iteration makes stale-generation wakes no-ops.
-            if _wait_for_done_or_pause(done, pause_flag, pause_waker, 0.5):
-                if done.is_set():
+        # F2a: the ENTIRE loop body is guarded so no raise inside can
+        # silently kill the watchdog thread and leave dispatch waiting
+        # forever on handle.done. On any exception we log loudly, kill the
+        # process, unblock the reader, and force-complete the handle so
+        # dispatch returns a clean failure.
+        try:
+            while not done.is_set():
+                if proc.poll() is not None:
+                    log(f"Claude process died (exit {proc.returncode}), closing pipes")
+                    _unblock_reader()
                     break
-                continue
+                now = time.time()
+                # Existing any-event pipe-liveness cap. Kept intentionally —
+                # a totally dead pipe (no events of any kind for
+                # CLAUDE_TIMEOUT seconds) is a distinct pathology from an
+                # owned-silent turn behind a chatty stream.
+                if (now - last_active[0]) >= CLAUDE_TIMEOUT:
+                    log(f"Claude silent for {CLAUDE_TIMEOUT}s, killing process")
+                    try:
+                        pc.kill()
+                    except Exception as kill_err:
+                        log(f"pc.kill on any-event timeout failed: {kill_err}")
+                    _unblock_reader()
+                    break
+                # F1: OWNED-progress silence. Only bumped when the pending
+                # dispatched turn's own content arrived (assistant text
+                # delta / its tool_use / its tool_result). This is the
+                # detector for the Blender-MCP hang shape: turn stuck inside
+                # a tool call, background heartbeats keep any-event alive,
+                # nothing owned arrives for hours.
+                if (now - owned_last_active[0]) >= CLAUDE_OWNED_SILENCE_TIMEOUT_SECONDS:
+                    log(
+                        f"Claude owned-progress silent for "
+                        f"{CLAUDE_OWNED_SILENCE_TIMEOUT_SECONDS}s "
+                        f"(pipe last-active {now - last_active[0]:.1f}s ago) "
+                        f"— killing process"
+                    )
+                    try:
+                        pc.kill()
+                    except Exception as kill_err:
+                        log(f"pc.kill on owned-silence timeout failed: {kill_err}")
+                    _unblock_reader()
+                    break
+                if interrupt_check is not None and interrupt_check():
+                    log("Interrupted by new incoming message")
+                    result.interrupted = True
+                    interrupt_sent.set()
+                    handle.interrupt_suppress.set()
+                    pc.interrupt()
+                    try:
+                        proc.wait(timeout=5)
+                    except Exception:
+                        log("Claude did not exit 5s after SIGINT — sending SIGTERM")
+                        try:
+                            proc.terminate()
+                        except Exception as term_err:
+                            log(f"SIGTERM failed: {term_err}")
+                        # F4: SIGKILL escalation. A child stuck in a C-level
+                        # syscall (a hung MCP socket, a runaway subagent
+                        # holding fds) can survive SIGINT and SIGTERM both.
+                        # Bounded wait, then SIGKILL, then log ERROR if the
+                        # process is STILL alive after that.
+                        try:
+                            proc.wait(timeout=3)
+                        except Exception:
+                            try:
+                                proc.kill()
+                            except Exception as kill_err:
+                                log(f"SIGKILL failed: {kill_err}")
+                            try:
+                                proc.wait(timeout=3)
+                            except Exception:
+                                log(
+                                    "ERROR: Claude PID %s did not exit after "
+                                    "SIGKILL escalation (poll=%s)" % (
+                                        getattr(proc, "pid", "?"),
+                                        proc.poll(),
+                                    )
+                                )
+                    _unblock_reader()
+                    break
+                # Wake on EITHER done (shutdown/turn-end) OR pause. The
+                # generation re-check inside interrupt_check at the top of
+                # next iteration makes stale-generation wakes no-ops.
+                if _wait_for_done_or_pause(done, pause_flag, pause_waker, 0.5):
+                    if done.is_set():
+                        break
+                    continue
+        except BaseException as watchdog_error:
+            # F2a: force-complete the turn so dispatch never hangs on a
+            # dead watchdog. Any exception here is a bug — log it prominently.
+            log(
+                "WATCHDOG THREAD DIED: %r — killing Claude and "
+                "force-completing the pending turn" % watchdog_error
+            )
+            try:
+                pc.kill()
+            except Exception as kill_err:
+                log(f"pc.kill on watchdog death failed: {kill_err}")
+            _unblock_reader()
+            if not handle.done.is_set():
+                if handle.error is None:
+                    handle.error = f"watchdog thread died: {watchdog_error!r}"
+                # Unregister from the pump (idempotent) and complete the
+                # handle so the dispatch wait loop unblocks immediately.
+                try:
+                    pump.cancel_turn(handle)
+                except Exception as cancel_err:
+                    log(f"pump.cancel_turn on watchdog death failed: {cancel_err}")
+                    handle.done.set()
 
     wd_thread = threading.Thread(target=watchdog, daemon=True)
-    wd_thread.start()
+    try:
+        wd_thread.start()
+    except (RuntimeError, OSError) as watchdog_start_error:
+        # F2c: OS thread-limit / fd exhaustion. Unregister from the pump so
+        # the dispatched handle is not orphaned and mis-attributed to the
+        # next dispatch (see pump._pending "orphaned by overlapping dispatch"
+        # path), and return a clean failure.
+        log(f"could not start watchdog thread: {watchdog_start_error}")
+        try:
+            pump.cancel_turn(handle)
+        except Exception as cancel_err:
+            log(f"pump.cancel_turn after watchdog start failure: {cancel_err}")
+        if pause_waker is not None:
+            # N2: also set ``done`` — the _pause_to_waker loop polls ``done``,
+            # so setting only pause_waker would leave that thread spinning
+            # every 0.5s for the rest of the daemon's life.
+            done.set()
+            pause_waker.set()
+        if shutdown_hook is not None:
+            shutdown_hook.clear()
+        result.error = f"failed to start watchdog thread: {watchdog_start_error}"
+        return result
 
     typing_done = threading.Event()
 
@@ -244,13 +349,49 @@ def run_claude_streaming(
                 return
 
     typing_thread = threading.Thread(target=typing_loop, daemon=True)
-    typing_thread.start()
+    try:
+        typing_thread.start()
+    except (RuntimeError, OSError) as typing_start_error:
+        # F2c: typing is cosmetic — if we can't spawn its thread we don't
+        # abort the turn, we just log and let the watchdog do its work.
+        # But we DO tear down state cleanly.
+        log(f"could not start typing thread (continuing without it): {typing_start_error}")
+        typing_done.set()
 
     try:
         # Pump routes events to the sender and completes ``handle`` on
-        # result / EOF / read error — never abandoned. Watchdog kill
-        # paths all end in EOF, so this wait always terminates.
-        handle.done.wait()
+        # result / EOF / read error — never abandoned. F2b: poll on a
+        # short interval instead of blocking forever, so a WATCHDOG that
+        # died (F2a caught the exception but is otherwise unreachable)
+        # can't wedge the dispatcher. There is intentionally NO absolute
+        # wall-clock turn ceiling — the owned-silence watchdog is the
+        # only killer.
+        while not handle.done.wait(CLAUDE_DISPATCH_WAIT_POLL_SECONDS):
+            if not wd_thread.is_alive():
+                log(
+                    "watchdog thread is not alive before handle.done — "
+                    "force-completing the pending turn"
+                )
+                try:
+                    pc.kill()
+                except Exception as kill_err:
+                    log(
+                        "pc.kill after watchdog-thread death failed: "
+                        f"{kill_err}"
+                    )
+                _unblock_reader()
+                if not handle.done.is_set():
+                    if handle.error is None:
+                        handle.error = "watchdog thread died before completion"
+                    try:
+                        pump.cancel_turn(handle)
+                    except Exception as cancel_err:
+                        log(
+                            "pump.cancel_turn after watchdog death failed: "
+                            f"{cancel_err}"
+                        )
+                        handle.done.set()
+                break
     finally:
         typing_done.set()
         done.set()

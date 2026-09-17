@@ -19,10 +19,19 @@ completions: subagents, `run_in_background` Bash).
   All text is delivered either way; the burst self-heals. Do NOT counter with
   task-notification counting — a miscount orphans a dispatched turn (hang),
   strictly worse than cosmetic skew.
-- Watchdog note: `_touch()` bumps the pending turn's activity clock on EVERY
-  event (any block) — deliberate OLD-code parity. Scoping it to the owned
-  block would let a >CLAUDE_TIMEOUT background turn kill a healthy process
-  while a dispatch waits behind it.
+- Watchdog is DUAL-CLOCK (F1, Sep 2026 hang-hardening):
+  * ``last_active`` — bumped by ``_touch()`` on EVERY parsed event, any
+    block. Wide by design: measures PIPE LIVENESS. Scoping it to the owned
+    block would let a >CLAUDE_TIMEOUT background turn kill a healthy process
+    while a dispatch waits behind it. Cap ``CLAUDE_TIMEOUT`` (10 min).
+  * ``owned_last_active`` — bumped ONLY when a parsed block attributes to
+    the currently-pending dispatched handle AND carries the turn's own
+    content: assistant text delta, its own tool_use, or its own tool_result.
+    Background/heartbeat chatter never bumps it. This is the HANG DETECTOR:
+    a stuck foreground tool call goes owned-silent even while the pipe
+    stays hot. Cap ``CLAUDE_OWNED_SILENCE_TIMEOUT_SECONDS`` (30 min,
+    deliberately generous — a slow-but-progressing turn must never be
+    clipped).
 
 Symptom of violating the invariant (one-turn lag): sends A and gets nothing;
 sends B and receives A's answer; every reply lags one turn until restart or
@@ -69,8 +78,14 @@ class TurnHandle:
         self.interrupt_suppress = threading.Event()
         # Activity clock (single-cell list, same shape as the old reader) —
         # bumped on EVERY event while this handle is pending so the caller's
-        # CLAUDE_TIMEOUT watchdog keeps working unchanged.
+        # CLAUDE_TIMEOUT pipe-liveness watchdog keeps working unchanged.
         self.last_active: List[float] = [time.time()]
+        # F1: owned-progress clock — bumped ONLY on this handle's own content
+        # (assistant text delta / its own tool_use / its own tool_result),
+        # never on background/heartbeat events. Streaming's watchdog kills
+        # the process when this clock exceeds
+        # CLAUDE_OWNED_SILENCE_TIMEOUT_SECONDS. See pump module docstring.
+        self.owned_last_active: List[float] = [time.time()]
         # Result-shape fields for the pruned-resume vs mid-session-error
         # discriminator (see landline.claude.predicates.looks_like_pruned_resume).
         # Pump-thread writes read by the streaming layer AFTER handle.done.wait().
@@ -154,7 +169,9 @@ class StreamPump:
                 self._pending.done.set()
             self._pending = handle
             self._pending_sender = sender
-            handle.last_active[0] = time.time()
+            now = time.time()
+            handle.last_active[0] = now
+            handle.owned_last_active[0] = now
         if not self.alive:
             # Pump died between the caller's liveness check and now.
             self._complete_pending("stream pump is not running")
@@ -235,6 +252,21 @@ class StreamPump:
         if handle is not None:
             handle.last_active[0] = time.time()
 
+    def _bump_owned_if_pending(self, handle: Optional[TurnHandle]) -> None:
+        """Bump the owned-progress clock on the DISPATCHED turn's own content.
+
+        No-op unless ``handle`` is the currently-registered pending handle —
+        that guard keeps a block whose handle survived a re-anchor (see
+        ``_open_block``) from resurrecting a stale clock. Called from event
+        paths that carry owned content only (assistant text delta / tool_use
+        for the dispatched turn, user tool_result attributed to it)."""
+        if handle is None:
+            return
+        with self._lock:
+            pending = self._pending
+        if pending is handle:
+            handle.owned_last_active[0] = time.time()
+
     # Event handling (pump thread only).
 
     def _handle_event(self, block: Optional[_Block],
@@ -255,10 +287,32 @@ class StreamPump:
         if etype == "result":
             return self._close_block(block, event)
 
+        if etype == "user":
+            # Tool-result messages come back as ``user`` events with a
+            # ``content`` array containing ``{"type": "tool_result", ...}``
+            # items. When the pending dispatched turn's own tool_result
+            # arrives, treat it as OWNED progress (F1) so the owned-silence
+            # watchdog resets even if no assistant text has streamed yet.
+            if block is not None and block.handle is not None:
+                self._maybe_bump_owned_on_tool_result(block, event)
+            return block
+
         # rate_limit_event / system/thinking_tokens / task_started|updated|
-        # notification / user tool_results — no routable content; _touch()
-        # already counted it as activity.
+        # notification — no routable content; _touch() already counted it as
+        # any-event activity but it does NOT bump the owned-progress clock.
         return block
+
+    def _maybe_bump_owned_on_tool_result(self, block: _Block,
+                                        event: Dict) -> None:
+        """Detect a tool_result payload for the dispatched turn and bump owned."""
+        msg_obj = event.get("message") or {}
+        content = msg_obj.get("content") or []
+        if not isinstance(content, list):
+            return
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "tool_result":
+                self._bump_owned_if_pending(block.handle)
+                return
 
     def _open_block(self, block: Optional[_Block],
                     event: Dict) -> _Block:
@@ -339,6 +393,9 @@ class StreamPump:
                 tool_id = content_block.get("id", "")
                 if tool_id and tool_id not in block.seen_tool_ids:
                     block.seen_tool_ids.add(tool_id)
+                    # F1: a fresh tool_use from the dispatched turn is owned
+                    # progress even before its result comes back.
+                    self._bump_owned_if_pending(handle)
                     status = _format_tool_status(content_block)
                     if status:
                         sender.status(status)
@@ -357,6 +414,8 @@ class StreamPump:
             block.routed_any_text = True
             if handle is not None:
                 handle.streamed_parts.append(delta)
+                # F1: assistant text delta is the canonical owned-progress signal.
+                self._bump_owned_if_pending(handle)
 
     def _close_block(self, block: Optional[_Block],
                      event: Dict) -> Optional[_Block]:

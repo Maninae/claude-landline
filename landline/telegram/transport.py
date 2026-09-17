@@ -316,16 +316,24 @@ def send_response(token: str, chat_id: str, text: str) -> None:
             continue
 
         # Both HTML and plain failed — log truncation so partial delivery is observable.
+        # F19: fall through with ``continue`` (not ``return``) so every
+        # subsequent chunk still calls _send_with_retry_tracked, which
+        # persists the chunk to the spool BEFORE its send attempt. That way
+        # a mid-stream Telegram outage does not permanently drop chunks
+        # i+1..N — they land as pending spool files that the background
+        # replayer + startup pass will deliver once the network recovers.
+        # (Pre-F19 the ``return`` bypassed persist for every later chunk,
+        # defeating at-least-once for those chunks entirely.)
         if total > 1:
             log(
                 f"Telegram send aborted mid-stream for chat_id={chat_id}: "
-                f"chunk {index}/{total} failed after retries "
-                f"(last code={fallback_code}); "
-                f"chunks {index}..{total} will NOT be delivered"
+                f"chunk {index}/{total} failed live send after retries "
+                f"(last code={fallback_code}); spooled (plain-text) for "
+                f"at-least-once replay when the network recovers"
             )
         else:
             log(
                 f"Telegram send failed for chat_id={chat_id}: "
                 f"single chunk failed after retries (last code={fallback_code})"
             )
-        return
+        continue

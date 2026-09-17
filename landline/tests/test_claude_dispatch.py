@@ -1439,32 +1439,75 @@ class TestTryEnqueueOrSendCallers:
         assert callable(warning_calls[0].kwargs.get("direct_fn"))
 
     def test_still_working_uses_try_enqueue_or_send(self):
-        """The watchdog "(Still working...)" branch must route through
-        landline.claude.try_enqueue_or_send. Use a Timer test seam (immediate
-        fire) so we don't sleep 60s."""
+        """The escalating notifier's first tick must route through
+        landline.claude.try_enqueue_or_send with the initial (60s-slot)
+        message. Uses a compressed schedule so the test finishes in <100ms."""
         helper_mock = MagicMock()
         d = self._make_dispatcher()
 
-        class ImmediateTimer:
-            def __init__(self, _delay, fn):
-                self._fn = fn
-                self.daemon = False
+        # Compressed schedule for the test: first fire at ~10ms.
+        with patch("landline.claude.try_enqueue_or_send", helper_mock), \
+             patch("landline.claude.dispatch.STILL_WORKING_NOTICE_SCHEDULE_SECONDS",
+                   (0.01, 60.0, 300.0)):
+            notifier = d._start_response_watchdog("123")
+            # Give the notifier thread a beat to fire the first tick.
+            time.sleep(0.08)
+            notifier.cancel()
 
-            def start(self):
-                self._fn()
+        assert helper_mock.call_count >= 1
+        first_call = helper_mock.call_args_list[0]
+        assert first_call.kwargs.get("html") is not None
+        assert "Still working" in str(first_call.kwargs.get("html"))
+        assert callable(first_call.kwargs.get("direct_fn"))
 
-            def cancel(self):
-                pass
+    def test_still_working_escalates_messages(self):
+        """F11: the notifier walks the full schedule and fires escalating
+        messages — first "Still working", then "taking longer than usual",
+        then "silent for a while". Cancel stops further ticks cleanly."""
+        helper_mock = MagicMock()
+        d = self._make_dispatcher()
+
+        # Compressed schedule. Wait ~5x the last offset so thread-startup
+        # jitter doesn't cost us the last fire.
+        with patch("landline.claude.try_enqueue_or_send", helper_mock), \
+             patch("landline.claude.dispatch.STILL_WORKING_NOTICE_SCHEDULE_SECONDS",
+                   (0.05, 0.15, 0.30)):
+            notifier = d._start_response_watchdog("123")
+            time.sleep(0.6)
+            notifier.cancel()
+
+        # At least three fires (the schedule) — the notifier may also have
+        # started the last-interval repeat before the test cancelled it.
+        assert helper_mock.call_count >= 3, (
+            "expected >=3 escalating fires, got %d" % helper_mock.call_count
+        )
+        messages = [
+            str(c.kwargs.get("html")) for c in helper_mock.call_args_list
+        ]
+        assert "Still working" in messages[0]
+        assert "taking longer than usual" in messages[1]
+        assert "silent for a while" in messages[2]
+
+    def test_still_working_cancel_stops_further_ticks(self):
+        """F11: after cancel() the notifier thread must exit — no further
+        chat notices fire, and the thread completes so it does not leak."""
+        helper_mock = MagicMock()
+        d = self._make_dispatcher()
 
         with patch("landline.claude.try_enqueue_or_send", helper_mock), \
-             patch("landline.claude.dispatch.threading.Timer", ImmediateTimer):
-            watchdog = d._start_response_watchdog("123")
-            watchdog.cancel()
-        assert helper_mock.call_count == 1
-        call_kwargs = helper_mock.call_args.kwargs
-        assert call_kwargs.get("html") is not None
-        assert "Still working" in str(call_kwargs.get("html"))
-        assert callable(call_kwargs.get("direct_fn"))
+             patch("landline.claude.dispatch.STILL_WORKING_NOTICE_SCHEDULE_SECONDS",
+                   (0.02, 0.04, 0.06)):
+            notifier = d._start_response_watchdog("123")
+            notifier.cancel()
+            # Give the thread time to observe the cancel and exit.
+            time.sleep(0.15)
+        # A cancel BEFORE the first delay elapses means zero fires.
+        assert helper_mock.call_count == 0
+        # Thread must exit — verify with a short join.
+        notifier._thread.join(timeout=1.0)
+        assert not notifier._thread.is_alive(), (
+            "_StillWorkingNotifier thread leaked after cancel"
+        )
 
 
 class TestLooksLikePrunedResume:

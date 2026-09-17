@@ -65,10 +65,19 @@ def replace_poller_in_place(daemon, reason: str) -> None:
     # (old stops, main loop only reads new's queue, and dedup blocks
     # Telegram's re-delivery — silently lost). At-least-once across swap.
     orphaned_updates = old.drain()
+    # F7: seed the fresh poller's outage-start from the daemon so the very
+    # first on_network_error callback reports the TRUE outage duration (not a
+    # local reset-to-now duration). The daemon side latches the alert once
+    # per incident against NETWORK_ALERT_MIN_INTERVAL_SECONDS, so a stall-mid-
+    # outage swap can't re-fire the alert per poll iteration.
+    seed_outage_start = daemon._network_outage_start_at
     new_poller = _d.BackgroundPoller(
         token=daemon.token,
         initial_last_processed_update_id=old_cursor,
         on_update_queued=daemon._on_update_queued,
+        on_network_error=daemon._on_poller_network_error,
+        on_network_recovered=daemon._on_poller_network_recovered,
+        initial_network_failure_start_at=seed_outage_start,
     )
     # Seed dedup with BOTH old_dedup AND the forwarded ids: the poller
     # thread may have atomically added an update to (dedup ∪ queue) between

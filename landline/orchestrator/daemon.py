@@ -10,6 +10,7 @@
 
 import signal
 import sys
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -31,6 +32,10 @@ from landline.config import (
     COALESCENCE_WINDOW_SECONDS,
     INJECT_QUEUE_DIR,
     MAX_QUEUED_UPDATES,
+    MEDIA_SWEEP_INTERVAL_SECONDS,
+    NETWORK_ALERT_MIN_INTERVAL_SECONDS,
+    POLL_ERROR_ALERT_AFTER,
+    RESTART_CONTINUATION_MAX_ATTEMPTS,
     STARTUP_DELAY,
     WORKSPACE,
 )
@@ -40,6 +45,7 @@ from landline.media.video import process_video_batch
 from landline.runtime.inject import drain_inject_queue
 from landline.runtime.lock import LockManager
 from landline.runtime.logging import log
+from landline.runtime.notifications import send_network_alert
 from landline.telegram.spool import OutboundSpoolReplayer
 from landline.claude.pause_flag import PauseFlag
 from landline.media.photo import dispatch_photo_group, process_photo_batch
@@ -133,10 +139,29 @@ class TelegramDaemon:
         self._background_poller: Optional[BackgroundPoller] = None
         # Background outbound-spool replayer. Lifecycle in ``run()`` / ``_shutdown``.
         self._outbound_spool_replayer: Optional[OutboundSpoolReplayer] = None
+        # F5: periodic media-cache sweeper. Startup-only sweep let caches grow
+        # for the daemon's multi-week life; this thread re-runs the sweep on
+        # MEDIA_SWEEP_INTERVAL_SECONDS so 24h retention actually holds.
+        self._media_sweep_stop: threading.Event = threading.Event()
+        self._media_sweep_thread: Optional[threading.Thread] = None
 
         # Poller-staleness rate-limit + recovery counter (see poller_health.py).
         self._poller_stale_check_last_at: float = 0.0
         self._poller_stale_recovery_count: int = 0
+
+        # F7: network-outage iMessage alert latch. The old design kept this
+        # local to _poll_loop, so every ~7-min poller_health swap during a
+        # real outage re-fired the alert (~200/day). Latch now lives on the
+        # daemon so it survives poller swaps.
+        # - ``_network_outage_start_at``: wall-clock start of the current
+        #   outage. Seeded when the poller first reports a network error;
+        #   fed into replacement pollers by poller_health so outage_seconds
+        #   reflects the true cross-swap duration. Cleared on recovery.
+        # - ``_network_alert_sent_at``: wall-clock time of the most recent
+        #   fired alert. Combined with NETWORK_ALERT_MIN_INTERVAL_SECONDS
+        #   as a defensive floor if the recovery-driven reset ever misses.
+        self._network_outage_start_at: Optional[float] = None
+        self._network_alert_sent_at: Optional[float] = None
 
         # /pause flag: set by the poller thread on classify; cleared ONLY by
         # ``_finalize_response`` on ``result.interrupted`` OR by
@@ -188,6 +213,10 @@ class TelegramDaemon:
         # Signal spool replayer to stop; current pass finishes; daemon thread.
         if self._outbound_spool_replayer is not None:
             self._outbound_spool_replayer.stop()
+        # F5: stop the periodic media-cache sweeper. Event.wait returns True
+        # on set, so latency to exit is bounded by the current wait cycle
+        # (worst case: MEDIA_SWEEP_INTERVAL_SECONDS).
+        self._media_sweep_stop.set()
         self.running = False
         # Stop the dispatcher so its stale-session retry guard doesn't fire a
         # fresh-session retry during shutdown and overwrite persisted session_id.
@@ -221,6 +250,56 @@ class TelegramDaemon:
             return
         self._pause_requested.request_pause()
         log("/pause detected — requesting interrupt")
+
+    def _on_poller_network_error(self, outage_seconds: float) -> None:
+        """Poller-thread callback: network-layer failure observed.
+
+        F7 latch: at most one iMessage alert per outage incident. Fires via
+        the async ``send_network_alert`` path so the poller thread NEVER
+        blocks on osascript. Contract mirrors ``_on_update_queued``:
+
+        - O(1) work, no I/O on the poller thread (osascript runs on a daemon
+          worker thread inside ``send_network_alert``).
+        - Exceptions are the caller's problem to swallow — the poller wraps
+          this call in try/except so a bug here can't break polling.
+        - Idempotent across in-process poller swaps: the latch lives on
+          ``self`` (not in ``_poll_loop`` locals), so a swap during a real
+          outage does NOT re-fire the alert on the fresh poller's first
+          error report.
+        - Defensive NETWORK_ALERT_MIN_INTERVAL_SECONDS floor rides ON TOP of
+          the latch, matching the auth-alert 6h floor rationale in CLAUDE.md
+          "Poller self-heal + auth-expiry alert".
+        """
+        now = time.time()
+        # Anchor the outage start (used to seed a fresh poller mid-swap).
+        # Prefer the poller's own view (now - outage_seconds) since the poller
+        # picked up the error first; only anchor if we don't already have one.
+        if self._network_outage_start_at is None:
+            self._network_outage_start_at = now - max(outage_seconds, 0.0)
+        if outage_seconds < POLL_ERROR_ALERT_AFTER:
+            return
+        # Once-per-incident latch is the primary gate.
+        if self._network_alert_sent_at is not None:
+            # Defensive floor: if the recovery reset path ever misses, still
+            # cap alert cadence at NETWORK_ALERT_MIN_INTERVAL_SECONDS so a
+            # stuck-set latch can't spam Owen indefinitely across restarts
+            # of the reset logic.
+            if now - self._network_alert_sent_at < NETWORK_ALERT_MIN_INTERVAL_SECONDS:
+                return
+        self._network_alert_sent_at = now
+        send_network_alert(outage_seconds)
+
+    def _on_poller_network_recovered(self) -> None:
+        """Poller-thread callback: first successful poll after an outage.
+
+        Clears both latch fields so the next outage starts fresh. Called by
+        every poller (initial + replacement) on the first success after any
+        error run, and once by a mid-outage-swap replacement poller on its
+        very first successful poll even if it never observed an error itself
+        (see ``_initial_network_failure_start_at`` handling in the poller).
+        """
+        self._network_outage_start_at = None
+        self._network_alert_sent_at = None
 
     def _handle_restart_continuation(self) -> None:
         """Delegator — see ``restart.py``."""
@@ -396,6 +475,22 @@ class TelegramDaemon:
     def _replace_poller_in_place(self, reason: str) -> None:
         _poller_health.replace_poller_in_place(self, reason)
 
+    def _media_sweep_loop(self) -> None:
+        """Background thread body: periodic media-cache sweep (F5).
+
+        Mirrors the ``OutboundSpoolReplayer._loop`` pattern — Event-driven
+        wait for prompt shutdown, per-pass exceptions logged + swallowed so
+        one bad FS call can't kill the thread and let caches grow unbounded.
+        """
+        while not self._media_sweep_stop.is_set():
+            try:
+                sweep_media_caches()
+            except Exception as sweep_error:
+                log(f"Periodic media cache sweep raised: {sweep_error!r}")
+            # Event.wait returns True on set → shutdown latency ≤ the interval.
+            if self._media_sweep_stop.wait(MEDIA_SWEEP_INTERVAL_SECONDS):
+                return
+
     def run(self) -> None:
         log("Telegram daemon starting (streaming mode)")
         log(f"Session: {self.state.get('session_id') or 'none'}")
@@ -407,34 +502,52 @@ class TelegramDaemon:
         log(f"Inject queue: {INJECT_QUEUE_DIR}")
         time.sleep(STARTUP_DELAY)
 
-        # Sweep before the poller starts so we can never race an in-flight
-        # Claude turn reading a cached file.
+        # Sweep once at startup before ANY handler runs so we can never race
+        # an in-flight Claude turn reading a cached file. The background
+        # sweeper (started below) keeps caches trimmed for the daemon's life.
         sweep_media_caches()
 
         self._background_poller = BackgroundPoller(
             token=self.token,
             initial_last_processed_update_id=self.state["last_update_id"],
             on_update_queued=self._on_update_queued,
+            on_network_error=self._on_poller_network_error,
+            on_network_recovered=self._on_poller_network_recovered,
         )
 
-        # Restart-continuation runs BEFORE poller start so an inbound /pause
-        # can't race the continuation dispatch and set the flag before
-        # _invoke_claude_call begins. Continuation doesn't depend on the poller.
-        self._handle_restart_continuation()
-
-        # Spool replayer starts AFTER restart continuation, BEFORE the poller.
-        # Sync startup flush already ran in __main__.main; this thread only
-        # handles files that fail on the next live send. send_fn closures
-        # self.token so the spool module stays credential-free.
+        # Spool replayer: only handles files that fail on the next live send
+        # (sync startup flush already ran in __main__.main). send_fn closes
+        # over self.token so the spool module stays credential-free.
         self._outbound_spool_replayer = OutboundSpoolReplayer(
             send_fn=self._spool_replay_send,
         )
         self._outbound_spool_replayer.start()
 
+        # F5: background media-cache sweeper. Startup sweep alone let caches
+        # grow for the daemon's multi-week life; this thread enforces the 24h
+        # retention on MEDIA_SWEEP_INTERVAL_SECONDS.
+        self._media_sweep_stop.clear()
+        self._media_sweep_thread = threading.Thread(
+            target=self._media_sweep_loop,
+            name="media-cache-sweeper",
+            daemon=True,
+        )
+        self._media_sweep_thread.start()
+
+        # F10 (fix 1): the poller starts BEFORE _handle_restart_continuation
+        # so an inbound /pause during the continuation is reachable — the
+        # poller's on_update_queued callback sets the pause flag, and the
+        # in-flight dispatch's watchdog interrupts. Old ordering (continuation
+        # SYNCHRONOUSLY before poller.start) wedged startup on a hung
+        # continuation with /pause unreachable. The main loop still doesn't
+        # start until after the continuation returns, so there is no
+        # concurrent dispatch to race — only the poller thread is queuing
+        # updates for later drain.
         self._background_poller.start()
         log("Background poller started")
 
         try:
+            self._handle_restart_continuation()
             while self.running:
                 updates = self._background_poller.drain(block_timeout_seconds=1.0)
                 # Silent-TCP-stall recovery check every iteration; method is
@@ -523,6 +636,16 @@ class TelegramDaemon:
                 save_state(self.state)
         finally:
             self._background_poller.stop()
+            # F5: signal the media sweeper to exit its wait. Daemon thread,
+            # so no join required for process exit, but stopping here means
+            # a clean run() teardown reaches log(...) with no lingering
+            # background work.
+            self._media_sweep_stop.set()
+            # Belt-and-suspenders spool stop for the crash path — signal
+            # handler already covers SIGTERM, but a raised exception out of
+            # the main loop still deserves a clean stop signal.
+            if self._outbound_spool_replayer is not None:
+                self._outbound_spool_replayer.stop()
             save_state(self.state)
             log("Telegram daemon stopped")
 

@@ -19,6 +19,7 @@ from landline.config import (
     CLAUDE,
     CLAUDE_MODEL,
     CLAUDE_PERMISSION_MODE,
+    CLAUDE_STDIN_WRITE_TIMEOUT_SECONDS,
     STDERR_BUFFER_MAX,
     WORKSPACE,
 )
@@ -166,6 +167,16 @@ class PersistentClaude:
             return self._proc
 
     def send_message(self, text: str) -> None:
+        """Write one NDJSON turn on stdin, bounded by
+        ``CLAUDE_STDIN_WRITE_TIMEOUT_SECONDS``.
+
+        A full pipe (Claude stopped draining stdin) would freeze the main
+        loop here indefinitely — BEFORE the streaming watchdog is armed,
+        so the existing silence caps never fire. F3 wraps the write on a
+        helper thread and, on timeout, kills the child (closes stdin,
+        releasing the blocked writer) and raises so the dispatcher records
+        a failure and can retry with a fresh process.
+        """
         if not self.is_alive or self._proc is None:
             raise RuntimeError("Process not alive")
         msg = json.dumps({
@@ -175,8 +186,44 @@ class PersistentClaude:
             "parent_tool_use_id": None,
         })
         assert self._proc.stdin is not None
-        self._proc.stdin.write(msg + "\n")
-        self._proc.stdin.flush()
+        stdin = self._proc.stdin
+        payload = msg + "\n"
+
+        # Container mutated by the helper thread so the caller can see any
+        # exception the write itself raised (BrokenPipeError, OSError...).
+        error_holder: List[Optional[BaseException]] = [None]
+
+        def _do_write() -> None:
+            try:
+                stdin.write(payload)
+                stdin.flush()
+            except BaseException as write_error:
+                error_holder[0] = write_error
+
+        writer = threading.Thread(
+            target=_do_write, daemon=True, name="claude-stdin-write",
+        )
+        writer.start()
+        writer.join(CLAUDE_STDIN_WRITE_TIMEOUT_SECONDS)
+        if writer.is_alive():
+            log(
+                "stdin write did not complete in %ss — killing Claude"
+                % CLAUDE_STDIN_WRITE_TIMEOUT_SECONDS
+            )
+            try:
+                self.kill()
+            except Exception as kill_error:
+                log(f"kill after stdin-write timeout failed: {kill_error}")
+            # Give the (now-unblocked, closed-fd) writer thread a beat to
+            # observe the closed pipe and exit before we return; it's a
+            # daemon thread either way, so a laggard won't block shutdown.
+            writer.join(1.0)
+            raise RuntimeError(
+                "stdin write timed out after "
+                f"{CLAUDE_STDIN_WRITE_TIMEOUT_SECONDS}s"
+            )
+        if error_holder[0] is not None:
+            raise error_holder[0]
 
     def interrupt(self) -> None:
         # Snapshot ``self._proc`` under the lock, then release before

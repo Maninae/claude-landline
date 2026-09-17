@@ -23,6 +23,7 @@ from landline.config import (
     POLL_ERROR_BACKOFF_BASE,
     POLL_ERROR_BACKOFF_MAX,
     POLL_ERROR_LOG_EVERY_N,
+    POLL_RETRY_AFTER_CAP_SECONDS,
     POLL_TIMEOUT,
 )
 from landline.runtime.logging import log
@@ -66,6 +67,9 @@ class BackgroundPoller:
         token: str,
         initial_last_processed_update_id: int,
         on_update_queued: Optional[Callable[[Dict], None]] = None,
+        on_network_error: Optional[Callable[[float], None]] = None,
+        on_network_recovered: Optional[Callable[[], None]] = None,
+        initial_network_failure_start_at: Optional[float] = None,
     ) -> None:
         """Construct a BackgroundPoller.
 
@@ -73,6 +77,21 @@ class BackgroundPoller:
             on_update_queued: optional callback invoked synchronously on the
                 poller thread after each enqueue. MUST be O(1) and non-blocking;
                 exceptions are swallowed and do NOT affect poll error counting.
+            on_network_error: optional callback invoked once per network-layer
+                failure (URLError / timeout / OSError, incl. 429). Argument is
+                the current outage duration in seconds. The daemon-side latch
+                (F7) decides whether an iMessage alert is actually sent. If
+                omitted, the poller falls back to firing ``send_network_alert``
+                directly with a local once-per-outage latch (test back-compat).
+            on_network_recovered: optional callback invoked once on the first
+                successful poll after an outage. Used by the daemon to clear
+                its network-alert latch and reset the shared outage start
+                across in-process poller swaps.
+            initial_network_failure_start_at: seed for ``network_failure_start_time``.
+                Passed by ``poller_health.replace_poller_in_place`` when
+                swapping a stale poller mid-outage so ``outage_seconds``
+                reflects true total duration across the swap, not just this
+                fresh poller's local view.
         """
         self.token = token
         self._incoming_updates_queue: "queue.Queue[Dict]" = queue.Queue()
@@ -87,6 +106,15 @@ class BackgroundPoller:
         # Cleared in _poll_loop once the set drops back below the cap.
         self._dedup_cap_reached_logged = False
         self._on_update_queued = on_update_queued
+        self._on_network_error = on_network_error
+        self._on_network_recovered = on_network_recovered
+        self._initial_network_failure_start_at = initial_network_failure_start_at
+        # F8 observability: last exception raised by _on_update_queued so
+        # /status can surface a silently-broken /pause path. Never touched
+        # by the poll error counter (invariant: callback exceptions do NOT
+        # affect polling health).
+        self._last_callback_error_at: Optional[float] = None
+        self._callback_error_count: int = 0
         self._stop = threading.Event()
         # Silent-TCP-stall detector: last successful get_updates timestamp
         # (empty results count — an empty long-poll return proves the socket
@@ -128,6 +156,19 @@ class BackgroundPoller:
         """
         with self._last_successful_poll_lock:
             return self._last_successful_poll_at
+
+    def callback_error_info(self) -> Dict[str, Optional[float]]:
+        """Diagnostic snapshot of the ``on_update_queued`` callback error state.
+
+        Returned dict is safe to include in a ``/status`` reply — no PII, just
+        a count and the wall-clock time of the most recent exception (or
+        ``None`` if the callback has never raised in this poller's lifetime).
+        Populated by F8's logged-but-isolated catch around the callback.
+        """
+        return {
+            "count": self._callback_error_count,
+            "last_at": self._last_callback_error_at,
+        }
 
     def snapshot_dedup_ids(self) -> List[int]:
         """Ordered snapshot of the dedup set for handoff to a replacement poller.
@@ -229,7 +270,16 @@ class BackgroundPoller:
         consecutive_error_count = 0
         consecutive_api_error_count = 0  # independent of the network counter
         current_backoff_seconds = POLL_ERROR_BACKOFF_BASE
-        network_failure_start_time: Optional[float] = None
+        # Seeded from constructor (F7) so a fresh replacement poller during a
+        # cross-swap outage reports the TRUE outage duration in on_network_error
+        # callbacks, not a reset-to-now duration that would defeat the
+        # daemon-side alert latch's once-per-incident behavior.
+        network_failure_start_time: Optional[float] = (
+            self._initial_network_failure_start_at
+        )
+        # Local latch is only used when no on_network_error callback is wired
+        # (test back-compat / defensive path). Production wires the daemon
+        # callback, and the load-bearing latch lives on the daemon (F7).
         imsg_alert_sent = False
 
         while not self._stop.is_set():
@@ -267,12 +317,22 @@ class BackgroundPoller:
                         # silently dropped.
                         self._incoming_updates_queue.put(update)
                     # Isolated try/except — callback exceptions MUST NOT touch
-                    # poll error counting or outage alerting.
+                    # poll error counting or outage alerting. But a silently
+                    # broken callback is the ONLY path that sets the /pause
+                    # flag from the poller thread, so a swallowed exception
+                    # here is invisible /pause loss. F8: log it (still
+                    # isolated) so a broken callback becomes observable.
                     if self._on_update_queued is not None:
                         try:
                             self._on_update_queued(update)
-                        except Exception:
-                            pass
+                        except Exception as callback_exc:
+                            self._callback_error_count += 1
+                            self._last_callback_error_at = time.time()
+                            log(
+                                f"on_update_queued callback raised: "
+                                f"{callback_exc!r} (total callback errors: "
+                                f"{self._callback_error_count})"
+                            )
 
                 # Record success on EVERY return (empty results count — an
                 # empty long-poll return proves the socket round-tripped).
@@ -286,6 +346,33 @@ class BackgroundPoller:
                     current_backoff_seconds = POLL_ERROR_BACKOFF_BASE
                     network_failure_start_time = None
                     imsg_alert_sent = False
+                    # F7: tell the daemon so it can drop its cross-swap
+                    # outage-start seed and re-arm the alert latch for the
+                    # next incident. Isolated so a broken callback can't
+                    # crash the poll loop.
+                    if self._on_network_recovered is not None:
+                        try:
+                            self._on_network_recovered()
+                        except Exception as recovery_exc:
+                            log(
+                                f"on_network_recovered callback raised: "
+                                f"{recovery_exc!r}"
+                            )
+                elif self._initial_network_failure_start_at is not None:
+                    # First successful poll for a REPLACEMENT poller that
+                    # was constructed with a seeded outage start (mid-outage
+                    # swap that immediately succeeded). Notify recovery so
+                    # the daemon-side latch resets even though this poller
+                    # never itself observed an error.
+                    self._initial_network_failure_start_at = None
+                    if self._on_network_recovered is not None:
+                        try:
+                            self._on_network_recovered()
+                        except Exception as recovery_exc:
+                            log(
+                                f"on_network_recovered callback raised: "
+                                f"{recovery_exc!r}"
+                            )
 
                 # Success clears the API-error throttle (so the next fault
                 # logs its first traceback) and re-arms the dedup-cap latch.
@@ -311,13 +398,29 @@ class BackgroundPoller:
                     log(f"Poll network error (#{consecutive_error_count}): {reason}")
 
                 outage_seconds = time.time() - network_failure_start_time
-                if not imsg_alert_sent and outage_seconds >= POLL_ERROR_ALERT_AFTER:
+                # F7: alert path is the daemon callback (cross-swap latched).
+                # Fallback direct-send + local latch is retained for tests
+                # that construct BackgroundPoller in isolation without a
+                # daemon wire-up.
+                if self._on_network_error is not None:
+                    try:
+                        self._on_network_error(outage_seconds)
+                    except Exception as alert_exc:
+                        log(
+                            f"on_network_error callback raised: "
+                            f"{alert_exc!r}"
+                        )
+                elif not imsg_alert_sent and outage_seconds >= POLL_ERROR_ALERT_AFTER:
                     imsg_alert_sent = True
                     send_network_alert(outage_seconds)
 
                 # Telegram 429 (Too Many Requests) rides through as HTTPError:
                 # honor Retry-After (header → JSON body → current backoff)
                 # and sleep the max so we never return sooner than asked.
+                # F6: clamp Retry-After at POLL_RETRY_AFTER_CAP_SECONDS so a
+                # server-supplied giant value (or a malformed / hostile 429)
+                # cannot wedge receive for the full outage. Mirrors the
+                # send-path's SEND_RETRY_AFTER_CAP.
                 sleep_seconds = current_backoff_seconds
                 if (
                     isinstance(poll_error, urllib.error.HTTPError)
@@ -341,11 +444,24 @@ class BackgroundPoller:
                         except (AttributeError, ValueError, TypeError, OSError, json.JSONDecodeError):
                             retry_after_seconds = None
                     if retry_after_seconds is not None and retry_after_seconds > 0:
-                        sleep_seconds = max(current_backoff_seconds, retry_after_seconds)
-                        log(
-                            f"Telegram 429 received; honoring Retry-After "
-                            f"{retry_after_seconds:.1f}s (sleeping {sleep_seconds:.1f}s)"
+                        clamped_retry_after = min(
+                            retry_after_seconds, POLL_RETRY_AFTER_CAP_SECONDS,
                         )
+                        sleep_seconds = max(
+                            current_backoff_seconds, clamped_retry_after,
+                        )
+                        if clamped_retry_after < retry_after_seconds:
+                            log(
+                                f"Telegram 429 Retry-After "
+                                f"{retry_after_seconds:.1f}s clamped to "
+                                f"{POLL_RETRY_AFTER_CAP_SECONDS}s cap "
+                                f"(sleeping {sleep_seconds:.1f}s)"
+                            )
+                        else:
+                            log(
+                                f"Telegram 429 received; honoring Retry-After "
+                                f"{retry_after_seconds:.1f}s (sleeping {sleep_seconds:.1f}s)"
+                            )
 
                 if self._stop.wait(sleep_seconds):
                     return

@@ -1333,10 +1333,15 @@ class TestRestartContinuation:
             daemon._handle_restart_continuation()
         mocks["run_claude"].assert_not_called()
 
-    def test_continuation_runs_before_poller_start(self, tmp_path):
-        """run() must call _handle_restart_continuation BEFORE starting the
-        background poller. A /pause queued during the restart window can't
-        race the continuation if the poller isn't running yet."""
+    def test_continuation_runs_after_poller_start(self, tmp_path):
+        """F10 fix 1: run() must start the poller BEFORE dispatching the
+        restart continuation, so an inbound /pause during a hung continuation
+        is REACHABLE (the poller thread sets the pause flag; the dispatch
+        watchdog interrupts). The old ordering (continuation synchronously
+        before poller.start) wedged startup on a hung continuation with
+        /pause unreachable. The main loop still doesn't process updates
+        until the continuation returns, so there is no concurrent dispatch
+        race — only the poller thread queuing updates for later drain."""
         daemon, mocks = _make_daemon()
         daemon._lock_manager._lock_state = "unlocked"
         daemon._lock_manager._state["unlock_timestamp"] = time.time()
@@ -1375,11 +1380,13 @@ class TestRestartContinuation:
         daemon._handle_restart_continuation = fake_continuation
         with patch("landline.orchestrator.BackgroundPoller", FakePoller), \
              patch("landline.orchestrator.save_state"), \
+             patch("landline.orchestrator.sweep_media_caches"), \
              patch("landline.orchestrator.time.sleep"):
             daemon.run()
-        assert order == ["continuation", "poller_start"], (
-            "Restart continuation must run BEFORE poller start — order=%r"
-            % order
+        assert order == ["poller_start", "continuation"], (
+            "F10 fix 1: poller.start must run BEFORE the continuation "
+            "dispatch so /pause is reachable during a hung continuation. "
+            "Got order=%r" % order
         )
 
     def test_restart_continuation_trigger_preserved_on_dispatch_error(
@@ -3183,3 +3190,381 @@ class TestUnauthorizedSenderInvisible:
                 "overflow notice must land on operator's chat_id (%r), "
                 "not %r" % (daemon.chat_id, call[0][1])
             )
+
+
+class TestNetworkAlertLatchOnDaemon:
+    """F7: the network-outage iMessage alert latch lives on the daemon so
+    it survives ``poller_health.replace_poller_in_place`` swaps. Under the
+    old local-to-_poll_loop latch, a ~7-min stall-swap cadence during a
+    real outage refired the alert on every swap; the daemon-side latch
+    fires at most once per outage incident."""
+
+    def test_daemon_callback_fires_alert_once_when_over_threshold(self):
+        """First over-threshold callback fires the async alert; the second
+        callback (still in the same outage) DOES NOT re-fire."""
+        from landline.config import POLL_ERROR_ALERT_AFTER
+
+        daemon, _ = _make_daemon()
+        with patch("landline.orchestrator.send_network_alert") as mock_alert:
+            # Below threshold — no alert.
+            daemon._on_poller_network_error(POLL_ERROR_ALERT_AFTER - 1)
+            assert mock_alert.call_count == 0
+            # Past threshold — alert fires.
+            daemon._on_poller_network_error(POLL_ERROR_ALERT_AFTER + 1)
+            assert mock_alert.call_count == 1
+            # Second over-threshold callback in the same outage — LATCHED,
+            # no re-fire.
+            daemon._on_poller_network_error(POLL_ERROR_ALERT_AFTER + 30)
+            assert mock_alert.call_count == 1
+        # Outage-start anchor was seeded (so a replacement poller across a
+        # swap inherits the true start time).
+        assert daemon._network_outage_start_at is not None
+        assert daemon._network_alert_sent_at is not None
+
+    def test_recovery_clears_latch_for_next_incident(self):
+        """After ``_on_poller_network_recovered`` runs, the NEXT outage
+        must be able to fire a fresh alert."""
+        from landline.config import POLL_ERROR_ALERT_AFTER
+
+        daemon, _ = _make_daemon()
+        with patch("landline.orchestrator.send_network_alert") as mock_alert:
+            daemon._on_poller_network_error(POLL_ERROR_ALERT_AFTER + 1)
+            assert mock_alert.call_count == 1
+            daemon._on_poller_network_recovered()
+            # Both latch fields cleared.
+            assert daemon._network_outage_start_at is None
+            assert daemon._network_alert_sent_at is None
+            # Fresh outage → alert can fire again.
+            daemon._on_poller_network_error(POLL_ERROR_ALERT_AFTER + 5)
+            assert mock_alert.call_count == 2
+
+    def test_alert_fires_once_across_simulated_poller_swaps(self):
+        """F7 headline: a real outage that triggers multiple poller_health
+        swaps (each swap constructs a fresh poller and would previously
+        re-fire the alert on its first over-threshold error) must yield
+        EXACTLY ONE iMessage alert across all swaps. Simulated by wiring
+        the daemon callback the same way replace_poller_in_place does, then
+        firing several over-threshold errors from several 'pollers'."""
+        from landline.config import POLL_ERROR_ALERT_AFTER
+
+        daemon, _ = _make_daemon()
+
+        def simulate_poller_lifetime(outage_seconds_seen, alerts_out):
+            """A fresh poller with the daemon callback wired in. Fires N
+            over-threshold error callbacks, then simulates being swapped
+            away without ever seeing a recovery."""
+            for s in outage_seconds_seen:
+                daemon._on_poller_network_error(s)
+
+        with patch("landline.orchestrator.send_network_alert") as mock_alert:
+            # Poller 1: outage starts, one over-threshold error before swap.
+            simulate_poller_lifetime(
+                [POLL_ERROR_ALERT_AFTER + 5], mock_alert,
+            )
+            # Poller_health swap (stall detected). Fresh poller starts, but
+            # the DAEMON's latch is still set; new poller reports outage.
+            simulate_poller_lifetime(
+                [POLL_ERROR_ALERT_AFTER + 30, POLL_ERROR_ALERT_AFTER + 60],
+                mock_alert,
+            )
+            # Poller_health swap again. Third fresh poller, still in outage.
+            simulate_poller_lifetime(
+                [POLL_ERROR_ALERT_AFTER + 90, POLL_ERROR_ALERT_AFTER + 120],
+                mock_alert,
+            )
+
+            assert mock_alert.call_count == 1, (
+                "F7: an outage spanning multiple poller swaps must yield "
+                "exactly ONE iMessage alert, got %d" % mock_alert.call_count
+            )
+
+    def test_replace_poller_seeds_outage_start_from_daemon(self):
+        """poller_health.replace_poller_in_place must pass the daemon's
+        current outage-start anchor into the fresh poller so
+        ``outage_seconds`` in the very first on_network_error reflects the
+        cross-swap TRUE duration, not a reset-to-now."""
+        from landline.config import POLL_STALE_ALERT_THRESHOLD_SECONDS
+        import threading as _threading
+
+        daemon, _ = _make_daemon()
+        # Simulate a mid-outage anchor set by the previous poller.
+        outage_started_at = time.time() - 100.0
+        daemon._network_outage_start_at = outage_started_at
+
+        old_poller = MagicMock()
+        old_poller.last_successful_poll.return_value = (
+            time.time() - POLL_STALE_ALERT_THRESHOLD_SECONDS - 1
+        )
+        old_poller._last_processed_update_id = 0
+        old_poller._last_processed_update_id_lock = _threading.Lock()
+        old_poller.snapshot_dedup_ids.return_value = []
+        old_poller.drain.return_value = []
+        daemon._background_poller = old_poller
+
+        new_instance = MagicMock()
+        with patch(
+            "landline.orchestrator.BackgroundPoller", return_value=new_instance,
+        ) as MockPoller:
+            daemon._check_poller_liveness()
+
+        _, kwargs = MockPoller.call_args
+        assert kwargs["initial_network_failure_start_at"] == outage_started_at, (
+            "Fresh poller must inherit the daemon's outage-start anchor; "
+            "got %r vs %r" % (
+                kwargs["initial_network_failure_start_at"], outage_started_at,
+            )
+        )
+        assert kwargs["on_network_error"] == daemon._on_poller_network_error
+        assert kwargs["on_network_recovered"] == daemon._on_poller_network_recovered
+
+    def test_defensive_min_interval_floor_re_arms_alert(self):
+        """Defensive backstop: if the latch is stuck-set (recovery reset
+        path missed), NETWORK_ALERT_MIN_INTERVAL_SECONDS caps the alert
+        cadence — after the floor elapses, an alert can fire again."""
+        from landline.config import (
+            NETWORK_ALERT_MIN_INTERVAL_SECONDS, POLL_ERROR_ALERT_AFTER,
+        )
+
+        daemon, _ = _make_daemon()
+        with patch("landline.orchestrator.send_network_alert") as mock_alert:
+            # Fire alert.
+            daemon._on_poller_network_error(POLL_ERROR_ALERT_AFTER + 1)
+            assert mock_alert.call_count == 1
+            # Simulate the floor having elapsed WITHOUT a recovery reset —
+            # backdate the latch.
+            daemon._network_alert_sent_at = (
+                time.time() - NETWORK_ALERT_MIN_INTERVAL_SECONDS - 1
+            )
+            daemon._on_poller_network_error(POLL_ERROR_ALERT_AFTER + 60)
+            assert mock_alert.call_count == 2
+
+
+class TestMediaCacheSweeperThread:
+    """F5: the background media-cache sweeper runs sweep_media_caches on a
+    fixed interval. Startup-only sweep let caches accumulate for the
+    daemon's multi-week life; this thread enforces 24h retention."""
+
+    def test_media_sweep_loop_invokes_sweep_at_interval(self):
+        """Drive the sweep loop directly with a compressed interval and a
+        controllable stop event. Confirm sweep_media_caches is called at
+        least twice (initial + after wait) and the loop exits promptly on
+        stop.set()."""
+        daemon, _ = _make_daemon()
+        # Reset the stop event to a fresh one so a prior test can't leak
+        # a set state.
+        import threading as _threading
+        daemon._media_sweep_stop = _threading.Event()
+        call_count = {"n": 0}
+
+        def counting_sweep(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] >= 3:
+                # Signal stop after 3 sweeps so the test terminates.
+                daemon._media_sweep_stop.set()
+            return 0
+
+        # Tiny interval so the test completes fast.
+        with patch("landline.orchestrator.sweep_media_caches",
+                   side_effect=counting_sweep), \
+             patch("landline.orchestrator.MEDIA_SWEEP_INTERVAL_SECONDS",
+                   0.01):
+            daemon._media_sweep_loop()
+
+        assert call_count["n"] >= 2, (
+            "Sweeper must invoke sweep_media_caches on the interval, "
+            "got %d call(s)" % call_count["n"]
+        )
+
+    def test_media_sweep_loop_swallows_exceptions_and_continues(self):
+        """A raising sweep_media_caches must NOT kill the loop — the
+        exception is logged and the next tick runs."""
+        daemon, _ = _make_daemon()
+        import threading as _threading
+        daemon._media_sweep_stop = _threading.Event()
+        call_count = {"n": 0}
+
+        def flaky_sweep(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("simulated FS error")
+            daemon._media_sweep_stop.set()
+            return 0
+
+        with patch("landline.orchestrator.sweep_media_caches",
+                   side_effect=flaky_sweep), \
+             patch("landline.orchestrator.MEDIA_SWEEP_INTERVAL_SECONDS",
+                   0.01), \
+             patch("landline.orchestrator.log") as mock_log:
+            daemon._media_sweep_loop()
+
+        # Second call ran despite the first raising.
+        assert call_count["n"] == 2
+        # Error was logged.
+        assert any(
+            "Periodic media cache sweep raised" in str(c.args[0])
+            for c in mock_log.call_args_list
+        )
+
+    def test_media_sweep_thread_started_in_run(self):
+        """run() must spawn the sweep thread so a long-lived daemon
+        actually enforces retention past the startup sweep."""
+        daemon, _ = _make_daemon()
+        started = {"sweep": False}
+
+        real_thread_ctor = __import__("threading").Thread
+
+        def spy_thread(**kwargs):
+            if kwargs.get("name") == "media-cache-sweeper":
+                started["sweep"] = True
+            return real_thread_ctor(**kwargs)
+
+        class FakePoller:
+            def __init__(self_inner, **_kw):
+                pass
+
+            def start(self_inner):
+                pass
+
+            def signal_stop(self_inner):
+                pass
+
+            def stop(self_inner):
+                pass
+
+            def drain(self_inner, block_timeout_seconds=None):
+                daemon.running = False
+                return []
+
+            def has_pending(self_inner):
+                return False
+
+            def advance_processed_cursor(self_inner, uid):
+                pass
+
+            def last_successful_poll(self_inner):
+                return time.time()
+
+        with patch("landline.orchestrator.BackgroundPoller", FakePoller), \
+             patch("landline.orchestrator.threading.Thread",
+                   side_effect=spy_thread), \
+             patch("landline.orchestrator.sweep_media_caches"), \
+             patch("landline.orchestrator.save_state"), \
+             patch("landline.orchestrator.time.sleep"):
+            # Stop the sweep immediately so the daemon thread exits before
+            # the test finishes.
+            daemon._media_sweep_stop.set()
+            daemon.run()
+
+        assert started["sweep"], (
+            "run() must start a thread named 'media-cache-sweeper' — "
+            "the sweep is otherwise startup-only and caches grow "
+            "unbounded over the daemon's multi-week life."
+        )
+
+
+class TestRestartContinuationDoomLoopCap:
+    """F10 fix 2: a poisoned trigger (payload that reliably wedges dispatch)
+    must NOT loop forever across daemon restarts. A persisted failure
+    counter unlinks the trigger after RESTART_CONTINUATION_MAX_ATTEMPTS
+    consecutive failures and logs LOUDLY so the operator can see it."""
+
+    def test_failure_increments_persisted_counter(self, tmp_path):
+        """A single dispatch failure below the cap increments the counter
+        and PRESERVES the trigger for the next restart."""
+        daemon, _ = _make_daemon()
+        daemon._lock_manager._lock_state = "unlocked"
+        daemon._lock_manager._state["unlock_timestamp"] = time.time()
+        (tmp_path / "cache").mkdir()
+        trigger = tmp_path / "cache" / "restart-continuation.txt"
+        trigger.write_text("resume")
+
+        def boom(*a, **kw):
+            raise RuntimeError("wedge")
+
+        with patch("landline.orchestrator.WORKSPACE", tmp_path), \
+             patch("landline.orchestrator.save_state"), \
+             patch.object(daemon, "_inject_and_dispatch", side_effect=boom):
+            with pytest.raises(RuntimeError, match="wedge"):
+                daemon._handle_restart_continuation()
+
+        assert daemon.state.get(
+            "restart_continuation_failure_count", 0
+        ) == 1
+        # Trigger PRESERVED — count is below cap.
+        assert trigger.exists()
+
+    def test_max_attempts_unlinks_trigger_and_resets_counter(self, tmp_path):
+        """At RESTART_CONTINUATION_MAX_ATTEMPTS failures, the trigger is
+        unlinked (breaking the doom-loop) and the counter is reset so a
+        legitimate future restart-continuation gets a fresh budget."""
+        from landline.config import RESTART_CONTINUATION_MAX_ATTEMPTS
+
+        daemon, _ = _make_daemon()
+        daemon._lock_manager._lock_state = "unlocked"
+        daemon._lock_manager._state["unlock_timestamp"] = time.time()
+        (tmp_path / "cache").mkdir()
+        trigger = tmp_path / "cache" / "restart-continuation.txt"
+        trigger.write_text("poisoned payload")
+        # Pre-seed the counter at (MAX - 1) so the NEXT failure trips it.
+        daemon.state["restart_continuation_failure_count"] = (
+            RESTART_CONTINUATION_MAX_ATTEMPTS - 1
+        )
+
+        def boom(*a, **kw):
+            raise RuntimeError("wedge")
+
+        with patch("landline.orchestrator.WORKSPACE", tmp_path), \
+             patch("landline.orchestrator.save_state"), \
+             patch.object(daemon, "_inject_and_dispatch", side_effect=boom), \
+             patch("landline.orchestrator.restart.log") as mock_log:
+            with pytest.raises(RuntimeError, match="wedge"):
+                daemon._handle_restart_continuation()
+
+        # Trigger UNLINKED — doom loop broken.
+        assert not trigger.exists(), (
+            "F10 fix 2: after %d failures the poisoned trigger must be "
+            "unlinked so the next restart doesn't wedge again"
+            % RESTART_CONTINUATION_MAX_ATTEMPTS
+        )
+        # Counter reset — a legitimate future continuation gets a full budget.
+        assert daemon.state.get(
+            "restart_continuation_failure_count", 0
+        ) == 0
+        # LOUD log line fired.
+        loud_lines = [
+            str(c.args[0]) for c in mock_log.call_args_list
+            if "LOUD" in str(c.args[0])
+        ]
+        assert len(loud_lines) >= 1, (
+            "F10 fix 2: the max-attempts path must LOG LOUDLY so the "
+            "operator can see a poisoned trigger was dropped"
+        )
+
+    def test_successful_dispatch_resets_counter(self, tmp_path):
+        """A successful dispatch after a run of failures clears the counter
+        so the next restart-continuation cycle starts fresh."""
+        daemon, mocks = _make_daemon()
+        daemon._lock_manager._lock_state = "unlocked"
+        daemon._lock_manager._state["unlock_timestamp"] = time.time()
+        (tmp_path / "cache").mkdir()
+        trigger = tmp_path / "cache" / "restart-continuation.txt"
+        trigger.write_text("resume")
+        daemon.state["restart_continuation_failure_count"] = 1
+
+        with patch("landline.orchestrator.WORKSPACE", tmp_path), \
+             patch("landline.orchestrator.save_state"), \
+             patch("landline.orchestrator.log_conversation"), \
+             patch("landline.orchestrator.drain_inject_queue",
+                   return_value=("", [])), \
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent",
+                   return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
+                   return_value=""):
+            daemon._handle_restart_continuation()
+
+        assert daemon.state.get(
+            "restart_continuation_failure_count", 0
+        ) == 0
+        assert not trigger.exists()

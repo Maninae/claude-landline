@@ -272,10 +272,47 @@ ARCHIVE_EXTRACTOR = _cfg("archive_extractor", None)
 # Poll / Claude / typing timing
 # ---------------------------------------------------------------------------
 POLL_TIMEOUT = 30
+# Any-event pipe-liveness cap: kill the dispatched turn if the Claude stdout
+# pipe goes TOTALLY silent (no JSON events at all) for this long.
 CLAUDE_TIMEOUT = 600
 TYPING_INTERVAL = 4
 RATE_LIMIT_SECONDS = 1
 STARTUP_DELAY = 3
+
+# ---------------------------------------------------------------------------
+# Hang-class hardening (Sep 2026 robustness audit — F1/F2/F3/F11)
+# ---------------------------------------------------------------------------
+# The 5.5h Blender-MCP incident: a dispatched turn blocked inside a tool call
+# and produced no output for hours, yet CLAUDE_TIMEOUT never fired because
+# background/heartbeat events on the same pipe kept resetting its clock. The
+# fix is an OWNED-progress clock: it only counts the dispatched turn's OWN
+# assistant text / tool_use / tool_result, so a stuck turn is caught even
+# while other blocks chatter.
+#
+# DELIBERATELY GENEROUS. The daemon cannot distinguish a slow-but-working
+# foreground tool (a long build, a deep synchronous subagent) from a true
+# hang, so this must NOT be aggressive enough to clip legitimate long turns.
+# 60 min bounds the worst-case hang far below 5.5h while sparing real work
+# (raised from 30m per the Sep-2026 review N1: a single silent foreground tool
+# call — a long build, a deep synchronous subagent, a slow MCP call — emits its
+# tool_use then nothing until its tool_result, so a too-tight cap would SIGKILL
+# it; 60m keeps that essentially impossible while still killing a true hang).
+# The escalating notices + always-responsive /pause cover the ambiguous middle.
+# An actively-progressing turn (owned events < this apart) runs unbounded —
+# that is correct, it is making progress.
+CLAUDE_OWNED_SILENCE_TIMEOUT_SECONDS = 3600
+# Bounded write to Claude's stdin. A full pipe (Claude stopped draining) must
+# never freeze the main loop before the watchdog is even armed (F3).
+CLAUDE_STDIN_WRITE_TIMEOUT_SECONDS = 30
+# Poll cadence for the dispatch thread's handle.done wait loop. The loop also
+# re-checks watchdog liveness each tick so a dead watchdog can't wedge the
+# dispatcher forever (F2) — there is intentionally NO absolute wall-clock turn
+# ceiling that could kill an actively-progressing turn.
+CLAUDE_DISPATCH_WAIT_POLL_SECONDS = 5
+# Escalating "(still working…)" notice schedule (seconds since dispatch). Gives
+# the operator a reason to /pause a suspected hang instead of silence; the last
+# interval repeats until the turn completes (F11).
+STILL_WORKING_NOTICE_SCHEDULE_SECONDS = (60, 300, 900)
 
 # ---------------------------------------------------------------------------
 # Unlock / lock state machine
@@ -308,6 +345,13 @@ LOG_MAX_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 5
 FATAL_CRASH_PAUSE_SECONDS = 60
 
+# A poisoned continuation trigger (a message that reliably wedges the startup
+# dispatch) must not induce a permanent restart doom loop. After this many
+# consecutive continuation-dispatch failures the trigger is unlinked with a
+# loud log (F10). 3 (not 2) tolerates a couple of transient spawn failures
+# before discarding the operator's continuation instruction (review N4).
+RESTART_CONTINUATION_MAX_ATTEMPTS = 3
+
 # ---------------------------------------------------------------------------
 # Poller backoff & retry
 # ---------------------------------------------------------------------------
@@ -316,6 +360,11 @@ POLL_ERROR_BACKOFF_MAX = 300
 POLL_ERROR_ALERT_AFTER = 300
 POLL_ERROR_LOG_EVERY_N = 12
 POLL_API_ERROR_BACKOFF_SECONDS = 2
+# Upper clamp on a server-supplied 429 Retry-After so an arbitrarily-large (or
+# hostile) value can't wedge receive for the full outage (F6). Mirrors
+# SEND_RETRY_AFTER_CAP on the send path — we still back off, we just never hand
+# our poll cadence to an unbounded server value.
+POLL_RETRY_AFTER_CAP_SECONDS = 300
 
 # ---------------------------------------------------------------------------
 # Outbound Telegram send retry
@@ -417,6 +466,11 @@ MEDIA_CACHE_RETENTION_HOURS = {
 # 0700 for media cache dirs (workspace-wide "no umask, chmod each dir" invariant).
 MEDIA_CACHE_DIR_MODE = 0o700
 
+# The startup sweep alone lets media caches grow for the daemon's multi-week
+# life (F5). A background sweeper re-runs sweep_media_caches on this interval so
+# 24h retention is actually enforced, not just applied once at boot.
+MEDIA_SWEEP_INTERVAL_SECONDS = 3600
+
 # Canonical authority for the inject-queue filename timestamp. Consumer:
 # landline/inject.py parses via strptime(stem[:15], INJECT_TIMESTAMP_FORMAT).
 # Producer (out-of-tree cron): keeps the literal (not an import) to stay
@@ -509,6 +563,10 @@ CLAUDE_AUTH_ERROR_MARKERS = (
 )
 # 6h defensive floor if the latch-reset path ever breaks (latch is primary).
 CLAUDE_AUTH_ALERT_MIN_INTERVAL_SECONDS = 6 * 3600
+# Same once-per-incident floor for the network-outage iMessage alert. The latch
+# lives on the daemon so it survives poller swaps (F7); this floor is the
+# defensive backstop if the reset path ever breaks.
+NETWORK_ALERT_MIN_INTERVAL_SECONDS = 6 * 3600
 
 # ---------------------------------------------------------------------------
 # Poller staleness detection + in-process replacement

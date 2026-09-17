@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from landline import config
-from landline.config import AGENT_NAME, CONTEXT_WARN_THRESHOLDS, RATE_LIMIT_SECONDS
+from landline.config import (
+    AGENT_NAME,
+    CONTEXT_WARN_THRESHOLDS,
+    RATE_LIMIT_SECONDS,
+    STILL_WORKING_NOTICE_SCHEDULE_SECONDS,
+)
 from landline.runtime.inject import commit_inject_queue
 from landline.runtime.logging import log
 from landline.runtime.state import (
@@ -638,23 +643,107 @@ class ClaudeDispatcher:
         except Exception as alert_error:
             log(f"Auth-expiry alert failed to dispatch: {alert_error}")
 
-    def _start_response_watchdog(self, chat_id: str) -> threading.Timer:
-        """Fire a 'still working' message after 60s of no response."""
-        def _send_still_working() -> None:
-            try:
-                # Fires mid-turn when bubbles may already be queued — route
-                # via ordered queue so it doesn't race ahead. Direct fallback.
-                from landline.claude import try_enqueue_or_send
-                token = self._token
-                try_enqueue_or_send(
-                    chat_id,
-                    html=italic("(Still working on your message...)"),
-                    direct_fn=lambda body: send_html(token, chat_id, body),
-                )
-            except Exception:
-                pass
+    def _start_response_watchdog(self, chat_id: str) -> "_StillWorkingNotifier":
+        """Fire escalating "still working…" notices on the schedule in
+        ``STILL_WORKING_NOTICE_SCHEDULE_SECONDS`` (F11).
 
-        watchdog = threading.Timer(60, _send_still_working)
-        watchdog.daemon = True
-        watchdog.start()
-        return watchdog
+        The last interval repeats until ``cancel()`` is called on turn
+        completion — the previous one-shot 60s Timer left long hangs
+        completely silent for the operator with no cue to send ``/pause``.
+        """
+        notifier = _StillWorkingNotifier(
+            chat_id=chat_id,
+            token=self._token,
+            schedule=STILL_WORKING_NOTICE_SCHEDULE_SECONDS,
+        )
+        notifier.start()
+        return notifier
+
+
+# Escalating messages, one per position in the schedule. The last entry is
+# reused if the schedule keeps repeating (see ``_StillWorkingNotifier._run``).
+_STILL_WORKING_MESSAGES = (
+    "(Still working on your message...)",
+    "(This is taking longer than usual — send /pause to abort.)",
+    "(Still going, silent for a while — send /pause to recover.)",
+)
+
+
+class _StillWorkingNotifier:
+    """Fire escalating chat notices on a schedule of elapsed seconds.
+
+    Drop-in replacement for the old ``threading.Timer`` — same ``cancel()``
+    contract, but the helper thread walks the whole schedule and keeps
+    repeating the last interval until cancelled. The previous one-shot
+    Timer left multi-hour hangs completely silent for the operator.
+    """
+
+    def __init__(self, chat_id: str, token: str,
+                 schedule: Tuple[float, ...]) -> None:
+        self._chat_id = chat_id
+        self._token = token
+        # Copy so a mid-turn config mutation can't reshape a running schedule.
+        self._schedule: Tuple[float, ...] = tuple(schedule)
+        self._done = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="claude-still-working",
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def cancel(self) -> None:
+        self._done.set()
+
+    def _run(self) -> None:
+        try:
+            schedule = self._schedule
+            if not schedule:
+                return
+            fired = 0
+            prev_offset = 0.0
+            # Walk absolute-elapsed offsets in the schedule.
+            for absolute_offset in schedule:
+                delay = max(0.0, absolute_offset - prev_offset)
+                if self._done.wait(delay):
+                    return
+                self._fire(_STILL_WORKING_MESSAGES[
+                    min(fired, len(_STILL_WORKING_MESSAGES) - 1)
+                ])
+                fired += 1
+                prev_offset = absolute_offset
+            # Repeat the last interval indefinitely with the last message
+            # until the caller cancels. A single-entry schedule keeps
+            # repeating at that same interval.
+            if len(schedule) >= 2:
+                repeat_delay = max(0.0, schedule[-1] - schedule[-2])
+            else:
+                repeat_delay = max(0.0, schedule[-1])
+            if repeat_delay <= 0.0:
+                # Degenerate schedule (e.g. (0.0,)) — do not busy-spin.
+                return
+            while not self._done.is_set():
+                if self._done.wait(repeat_delay):
+                    return
+                self._fire(_STILL_WORKING_MESSAGES[-1])
+        except Exception as notifier_error:
+            log(
+                "still-working notifier crashed (not fatal to turn): "
+                f"{notifier_error}"
+            )
+
+    def _fire(self, message: str) -> None:
+        try:
+            # Fires mid-turn when bubbles may already be queued — route via
+            # ordered queue so it doesn't race ahead. Direct fallback when
+            # no live sender exists.
+            from landline.claude import try_enqueue_or_send
+            token = self._token
+            chat_id = self._chat_id
+            try_enqueue_or_send(
+                chat_id,
+                html=italic(message),
+                direct_fn=lambda body: send_html(token, chat_id, body),
+            )
+        except Exception:
+            pass

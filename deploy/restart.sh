@@ -70,9 +70,9 @@ fi
 mkdir -p "$LANDLINE_WORKSPACE/cache"
 if [ -n "$CONTINUATION_MSG" ]; then
     echo "Writing continuation trigger..."
-    echo "$CONTINUATION_MSG" > "$CONTINUATION_FILE"
+    printf '%s\n' "$CONTINUATION_MSG" > "$CONTINUATION_FILE.tmp" && mv "$CONTINUATION_FILE.tmp" "$CONTINUATION_FILE"
 else
-    echo "[System] The Telegram daemon was just restarted. Continue from where you left off." > "$CONTINUATION_FILE"
+    printf '%s\n' "[System] The Telegram daemon was just restarted. Continue from where you left off." > "$CONTINUATION_FILE.tmp" && mv "$CONTINUATION_FILE.tmp" "$CONTINUATION_FILE"
 fi
 
 echo "Restarting daemon ($LANDLINE_LABEL)..."

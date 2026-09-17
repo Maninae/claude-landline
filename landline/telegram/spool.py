@@ -83,14 +83,63 @@ def ensure_spool_dir() -> Path:
     return SPOOL_DIR
 
 
+def _enforce_write_time_cap() -> None:
+    """Before writing a new file, drop oldest pending files if at/over cap.
+
+    Prevents a fast-streaming turn during a Telegram outage from accumulating
+    thousands of files between the 60s replay passes (each replay pass is
+    what previously enforced ``SPOOL_MAX_FILES``). Unbounded growth here
+    would starve the atomic state-save + fill the disk.
+
+    Discipline: unlink OLDEST files first so the newest reply always fits.
+    Best-effort — silent on the individual unlink FileNotFoundError (the
+    replayer may have already promoted the file to inflight between our
+    listdir and our unlink); emit ONE health log line on any actual drop
+    so silent capacity failures stay visible.
+
+    Persist-first ordering is untouched: this drops OLD, already-persisted
+    files whose in-band retries already failed — it does NOT skip
+    persisting the new payload. That still happens on the next line.
+    """
+    pending = _list_pending_sorted()
+    if len(pending) < SPOOL_MAX_FILES:
+        return
+    # Leave room for the caller's new file: after we return, pending count
+    # must be at most SPOOL_MAX_FILES - 1.
+    excess = len(pending) - (SPOOL_MAX_FILES - 1)
+    dropped = 0
+    for _created_ns, path in pending[:excess]:
+        try:
+            os.unlink(str(path))
+            dropped += 1
+        except FileNotFoundError:
+            # Replayer promoted between listdir and unlink — fine.
+            pass
+        except OSError as e:
+            log("outbound_spool: write-cap unlink failed for %s: %r" %
+                (path.name, e))
+    if dropped:
+        log(
+            "outbound_spool: write-time cap enforced; dropped %d oldest "
+            "pending file(s) (cap=%d)" % (dropped, SPOOL_MAX_FILES)
+        )
+
+
 def persist(chat_id: str, chunk: str, html_mode: bool, label: str) -> str:
     """Persist an outbound chunk. Returns spool_id (absolute path).
 
     Two-phase: pending 0o600 + fsync, then rename to ``inflight-<pid>`` so
     the replayer won't see it while send-path is retrying. On I/O failure
     the caller degrades to best-effort (un-persisted send).
+
+    Enforces ``SPOOL_MAX_FILES`` at write time (F18): a Telegram outage during
+    a fast turn could otherwise accumulate thousands of files between the
+    60s replay passes and starve the state-save. Drops the oldest pending
+    files to make room; persist-first for the caller's payload is
+    unchanged.
     """
     ensure_spool_dir()
+    _enforce_write_time_cap()
     now_ns = time.time_ns()
     uid = uuid.uuid4().hex[:8]
     payload = {

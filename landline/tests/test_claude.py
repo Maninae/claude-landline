@@ -1975,3 +1975,319 @@ class TestClaudeStreamResultClusterTwoDefaults:
         from landline.claude.dispatch import looks_like_pruned_resume
         from landline.claude.types import ClaudeStreamResult
         assert looks_like_pruned_resume(ClaudeStreamResult()) is False
+
+
+# ---------------------------------------------------------------------------
+# Sep 2026 hang-hardening — F1 / F2 / F3 / F4
+# ---------------------------------------------------------------------------
+
+
+class TestF1OwnedSilenceWatchdog:
+    """The Blender-MCP hang: a tool call blocks with no timeout; background
+    heartbeats keep the any-event pipe clock hot; nothing owned arrives; the
+    daemon goes silent for hours. F1 adds an OWNED-progress clock and kills
+    the process when that clock exceeds CLAUDE_OWNED_SILENCE_TIMEOUT_SECONDS.
+    """
+
+    def test_owned_silence_kills_while_heartbeats_keep_any_event_alive(self):
+        """Feed background/heartbeat events forever (no init, no assistant
+        text, no tool_use, no tool_result) — the any-event clock stays hot
+        but the owned clock never bumps. Set an aggressive owned-silence
+        cap via patch and confirm the process gets killed."""
+        from landline.tests.test_stream_pump import _FakeProc
+        import landline.claude.streaming as streaming_mod
+
+        proc = _FakeProc()
+        proc.terminate = MagicMock()
+        proc.kill = MagicMock()
+        proc.wait = MagicMock()
+
+        fake_pc = MagicMock()
+        fake_pc.ensure_alive.return_value = proc
+        fake_pc.session_id = "sess-1"
+        fake_pc.get_stderr_tail.return_value = ""
+
+        kill_called = threading.Event()
+
+        def _kill_side_effect():
+            kill_called.set()
+            proc.stdout.close()
+
+        fake_pc.kill.side_effect = _kill_side_effect
+
+        def _feed_heartbeats(_msg):
+            def _pump():
+                # Feed background chatter until the watchdog kills us.
+                for _ in range(200):
+                    if kill_called.is_set():
+                        break
+                    proc.stdout.feed_event({
+                        "type": "system",
+                        "subtype": "task_notification",
+                        "task_id": "bg",
+                        "status": "running",
+                    })
+                    time.sleep(0.005)
+            threading.Thread(target=_pump, daemon=True).start()
+
+        fake_pc.send_message.side_effect = _feed_heartbeats
+
+        try:
+            with patch("landline.claude._get_persistent_claude",
+                       return_value=fake_pc), \
+                 patch("landline.claude._get_or_create_sender",
+                       return_value=MagicMock()), \
+                 patch.object(streaming_mod,
+                              "CLAUDE_OWNED_SILENCE_TIMEOUT_SECONDS", 0.15), \
+                 patch.object(streaming_mod, "CLAUDE_TIMEOUT", 60):
+                # Any-event clock cap is 60s (far away); owned-silence cap
+                # is 150ms so the watchdog must fire on owned-silence.
+                result = run_claude_streaming(
+                    token="tok", chat_id="chatOS", message="hi",
+                    session_id="sess-1", is_new=False,
+                    send_response_fn=MagicMock(),
+                    send_typing_fn=MagicMock(),
+                )
+        finally:
+            proc.stdout.close()
+
+        assert kill_called.wait(2.0), (
+            "watchdog did not fire on owned-silence while heartbeats "
+            "kept the any-event clock hot"
+        )
+        # The turn completed (never hangs); no valid content.
+        assert result.streamed_text == ""
+
+    def test_owned_progress_prevents_kill_past_owned_cap(self):
+        """A turn emitting steady owned events at a rate below the
+        owned-silence cap is NOT killed, even when total elapsed vastly
+        exceeds the cap. This is the "generous by design" side of F1 —
+        no absolute wall-clock ceiling on a progressing turn."""
+        from landline.tests.test_stream_pump import _FakeProc, _init_event
+        import landline.claude.streaming as streaming_mod
+
+        proc = _FakeProc()
+        proc.terminate = MagicMock()
+        proc.kill = MagicMock()
+
+        fake_pc = MagicMock()
+        fake_pc.ensure_alive.return_value = proc
+        fake_pc.session_id = "sess-1"
+        fake_pc.get_stderr_tail.return_value = ""
+        kill_called = threading.Event()
+        fake_pc.kill.side_effect = lambda: kill_called.set()
+
+        def _feed_progressing(_msg):
+            def _pump():
+                proc.stdout.feed_event(_init_event("sess-1"))
+                # 10 assistant deltas at 30ms apart = ~300ms of progress.
+                # Owned cap set to 0.2s below; gap between deltas is
+                # 30ms so the owned clock never crosses the cap.
+                for i in range(10):
+                    proc.stdout.feed_event({
+                        "type": "assistant",
+                        "parent_tool_use_id": None,
+                        "message": {"id": "m1", "content": [
+                            {"type": "text", "text": "chunk " + str(i)},
+                        ]},
+                    })
+                    time.sleep(0.03)
+                proc.stdout.feed_event({
+                    "type": "result", "subtype": "success",
+                    "result": "chunk 9", "session_id": "sess-1",
+                })
+            threading.Thread(target=_pump, daemon=True).start()
+
+        fake_pc.send_message.side_effect = _feed_progressing
+
+        try:
+            with patch("landline.claude._get_persistent_claude",
+                       return_value=fake_pc), \
+                 patch("landline.claude._get_or_create_sender",
+                       return_value=MagicMock()), \
+                 patch.object(streaming_mod, "CLAUDE_TIMEOUT", 60), \
+                 patch.object(streaming_mod,
+                              "CLAUDE_OWNED_SILENCE_TIMEOUT_SECONDS", 0.2):
+                # Owned cap = 0.2s. Deltas arrive every 30ms — owned
+                # clock keeps bumping. Total turn = ~300ms >> 0.2s cap,
+                # but no kill because owned events keep resetting it.
+                # If we accidentally reintroduced an absolute ceiling
+                # on turn length, this test would fail.
+                result = run_claude_streaming(
+                    token="tok", chat_id="chatOP", message="hi",
+                    session_id="sess-1", is_new=False,
+                    send_response_fn=MagicMock(),
+                    send_typing_fn=MagicMock(),
+                )
+        finally:
+            proc.stdout.close()
+
+        assert not kill_called.is_set(), (
+            "watchdog killed a turn that was actively making owned "
+            "progress — F1 clip regression"
+        )
+        # The full assistant stream came through.
+        assert "chunk 9" in result.streamed_text
+
+
+class TestF2WatchdogSafety:
+    """Watchdog must never silently die; dispatch wait must never block
+    forever if the watchdog thread is gone."""
+
+    def test_dispatch_force_completes_when_watchdog_thread_dies(self):
+        """Simulate a watchdog that dies before the pump completes the
+        handle. The dispatch wait's poll loop must detect
+        wd_thread.is_alive() == False and force-complete the handle so
+        the caller returns instead of blocking forever."""
+        from landline.tests.test_stream_pump import _FakeProc
+        import landline.claude.streaming as streaming_mod
+
+        # A stdout that never yields events — the pump will block in its
+        # for-loop until we close it.
+        proc = _FakeProc()
+        proc.terminate = MagicMock()
+
+        fake_pc = MagicMock()
+        fake_pc.ensure_alive.return_value = proc
+        fake_pc.session_id = "sess-1"
+        fake_pc.get_stderr_tail.return_value = ""
+
+        kill_called = threading.Event()
+        fake_pc.kill.side_effect = lambda: kill_called.set()
+
+        # Kill the watchdog thread the moment it starts by patching
+        # threading.Thread's start to raise ONLY for the watchdog. We
+        # simulate the dead-watchdog scenario via a Thread subclass.
+        real_thread_cls = threading.Thread
+        dead_watchdog = threading.Event()
+
+        class _WatchdogDiesImmediately(real_thread_cls):
+            """Thread that appears to start but exits immediately without
+            running its target — models a watchdog whose body raised in
+            a very early frame (defense against F2a's guard)."""
+
+            def start(self):
+                # Fake a dead thread: mark done=True without ever running.
+                # This is the DEAD-WATCHDOG regression: the dispatch
+                # wait must detect is_alive() == False and force-complete.
+                self._started.set()
+                dead_watchdog.set()
+
+            def is_alive(self):
+                return False
+
+            def join(self, timeout=None):
+                return
+
+        thread_calls = {"count": 0}
+
+        def _thread_factory(*args, **kwargs):
+            # First created Thread is the watchdog (see streaming.py order).
+            # Subsequent ones (typing loop, pause waker) get a real Thread.
+            name = kwargs.get("name", "")
+            target = kwargs.get("target", None)
+            target_name = getattr(target, "__name__", "")
+            thread_calls["count"] += 1
+            if target_name == "watchdog":
+                return _WatchdogDiesImmediately(*args, **kwargs)
+            return real_thread_cls(*args, **kwargs)
+
+        try:
+            with patch("landline.claude._get_persistent_claude",
+                       return_value=fake_pc), \
+                 patch("landline.claude._get_or_create_sender",
+                       return_value=MagicMock()), \
+                 patch.object(streaming_mod, "CLAUDE_DISPATCH_WAIT_POLL_SECONDS",
+                              0.05), \
+                 patch("landline.claude.streaming.threading.Thread",
+                       side_effect=_thread_factory):
+                start = time.time()
+                result = run_claude_streaming(
+                    token="tok", chat_id="chatWD", message="hi",
+                    session_id="sess-1", is_new=False,
+                    send_response_fn=MagicMock(),
+                    send_typing_fn=MagicMock(),
+                )
+                elapsed = time.time() - start
+        finally:
+            proc.stdout.close()
+
+        assert elapsed < 2.0, (
+            "dispatch wait blocked forever when watchdog died — F2b regression "
+            "(elapsed %.2fs)" % elapsed
+        )
+        assert kill_called.is_set(), (
+            "F2b must call pc.kill() on watchdog death"
+        )
+        # The failure surfaces as an error on the result.
+        assert result.error is not None
+        assert "watchdog" in result.error.lower()
+
+
+class TestF3StdinWriteTimeout:
+    """A full pipe (Claude stopped draining stdin) must not freeze the
+    main loop indefinitely. F3 caps the write on a helper thread."""
+
+    def test_send_message_times_out_and_kills_process(self):
+        pc = PersistentClaude()
+        # Fake a live process whose stdin.write blocks forever until we
+        # release it.
+        release = threading.Event()
+
+        class _BlockingStdin:
+            def write(self, _payload):
+                # Block until the test releases us (or forever if kill
+                # closed the fd — but we simulate a truly wedged pipe).
+                release.wait(5.0)
+
+            def flush(self):
+                pass
+
+        mock_proc = MagicMock()
+        mock_proc.stdin = _BlockingStdin()
+        mock_proc.poll.return_value = None
+        pc._proc = mock_proc
+
+        killed = threading.Event()
+        pc.kill = MagicMock(side_effect=lambda: (killed.set(),
+                                                 release.set()))
+
+        with patch(
+            "landline.claude.persistent.CLAUDE_STDIN_WRITE_TIMEOUT_SECONDS",
+            0.1,
+        ):
+            start = time.time()
+            with pytest.raises(RuntimeError, match="stdin write timed out"):
+                pc.send_message("hi")
+            elapsed = time.time() - start
+
+        assert elapsed < 1.0, (
+            "send_message did not honor the stdin-write timeout "
+            "(elapsed %.2fs)" % elapsed
+        )
+        assert killed.is_set(), "F3 must call pc.kill() on stdin-write timeout"
+
+    def test_send_message_clean_write_still_works(self):
+        """Sanity: a normal write still returns and does not spuriously
+        kill the process."""
+        pc = PersistentClaude()
+        writes = []
+
+        class _CaptureStdin:
+            def write(self, payload):
+                writes.append(payload)
+
+            def flush(self):
+                writes.append("<flush>")
+
+        mock_proc = MagicMock()
+        mock_proc.stdin = _CaptureStdin()
+        mock_proc.poll.return_value = None
+        pc._proc = mock_proc
+        pc.kill = MagicMock()
+
+        pc.send_message("hello")
+
+        assert writes[-1] == "<flush>"
+        assert any("hello" in w for w in writes if isinstance(w, str))
+        pc.kill.assert_not_called()

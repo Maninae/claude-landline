@@ -1589,3 +1589,125 @@ class TestSendResponseHtmlFailureRaceWithReplayer:
             "send_response's discard and double-deliver the HTML variant. "
             "Found pending: %s" % pending_snapshots["between"]
         )
+
+
+class TestSendResponseSpoolsAllChunksOnMidStreamFailure:
+    """F19: on a permanent mid-stream chunk failure, send_response used to
+    ``return`` and drop chunks i+1..N entirely — those later chunks never
+    reached ``_send_with_retry_tracked``, so they were never persisted to
+    the spool. That silently defeated at-least-once for the tail of a
+    multi-chunk message.
+
+    Fix: fall through with ``continue`` instead. Every subsequent chunk
+    still calls ``_send_with_retry_tracked``, which persists BEFORE
+    attempting the send. The chunk's HTML and plain-fallback attempts still
+    exhaust their retries against the failing network, but the plain-text
+    persist file lands as ``pending`` (via ``mark_failed``) and the
+    background replayer + startup pass will deliver it once Telegram is
+    reachable again.
+    """
+
+    def test_chunks_after_permanent_failure_still_persisted_as_pending(
+        self, tmp_path,
+    ):
+        """Three chunks (a/b/c). First succeeds. Second and third both
+        exhaust HTML + plain-fallback retries against a persistent 500.
+        The spool must contain a ``pending`` plain-text file for BOTH
+        chunks 2 AND 3 — the pre-F19 ``return`` would have dropped chunk 3
+        entirely (no spool file, no replay possible)."""
+        import landline.telegram.spool as spool_mod
+        from landline.telegram.transport import send_response
+        from landline.config import SPOOL_DIR
+
+        # SPOOL_DIR is redirected to tmp by the autouse fixture.
+        assert str(SPOOL_DIR).startswith(str(tmp_path))
+
+        # Three chunks: chunk_text(4000) will split ~3900-char blocks.
+        text = ("a" * 3900) + "\n\n" + ("b" * 3900) + "\n\n" + ("c" * 3900)
+
+        def fake_send_chunk(token, chat_id, chunk, html_mode):
+            # Chunk 1 (a*) succeeds regardless of mode; everything else 500s
+            # so both HTML and the plain-text fallback exhaust their retries.
+            if chunk.startswith("a"):
+                return (True, None, 0)
+            return (False, 500, 0)
+
+        with patch(
+            "landline.telegram.transport._send_chunk",
+            side_effect=fake_send_chunk,
+        ), patch("time.sleep"):
+            send_response("token", "42", text)
+
+        # Read the payload of every spool file and look for the plain-text
+        # variants of both later chunks. The HTML variants are discarded by
+        # send_response before the plain fallback; the plain-text variants
+        # end up ``pending`` via mark_failed on the fallback's terminal 500.
+        entries = [
+            p for p in SPOOL_DIR.iterdir()
+            if spool_mod._parse_spool_filename(p.name) is not None
+        ]
+        payloads = []
+        for entry in entries:
+            data = json.loads(entry.read_bytes().decode())
+            state = spool_mod._parse_spool_filename(entry.name)[2]
+            payloads.append((state, data.get("chunk", ""), data.get("html_mode")))
+
+        # The plain-text fallback for chunk 2 (b*) must be a pending spool
+        # file. This test passes pre-F19 too (chunk 2 IS the one that
+        # triggers the mid-stream failure branch).
+        assert any(
+            state == "pending" and chunk.startswith("b") and not html_mode
+            for (state, chunk, html_mode) in payloads
+        ), (
+            "no pending plain-text spool file for chunk 2 (b*): %r"
+            % payloads
+        )
+        # THE F19 INVARIANT: chunk 3 (c*) must ALSO be persisted as pending.
+        # Pre-F19 the ``return`` bypassed persist for this chunk entirely,
+        # so no spool file would exist and the replayer would have nothing
+        # to deliver on the next pass.
+        assert any(
+            state == "pending" and chunk.startswith("c") and not html_mode
+            for (state, chunk, html_mode) in payloads
+        ), (
+            "chunk 3 (c*) was NOT persisted to the spool — F19 reverted; "
+            "send_response returned on chunk 2's failure and never reached "
+            "chunk 3's persist-first call. Payloads: %r" % payloads
+        )
+
+    def test_mid_stream_failure_logs_still_emitted_after_continue(
+        self, tmp_path,
+    ):
+        """Continuation after the mid-stream failure must not silence the
+        truncation log — observability of partial delivery is preserved.
+        The existing chunk-index/total log line must still appear."""
+        from landline.telegram.transport import send_response
+        from landline.config import SPOOL_DIR
+
+        assert str(SPOOL_DIR).startswith(str(tmp_path))
+
+        text = ("a" * 3900) + "\n\n" + ("b" * 3900) + "\n\n" + ("c" * 3900)
+        logged: list = []
+
+        def fake_send_chunk(token, chat_id, chunk, html_mode):
+            if chunk.startswith("a"):
+                return (True, None, 0)
+            return (False, 500, 0)
+
+        with patch(
+            "landline.telegram.transport._send_chunk",
+            side_effect=fake_send_chunk,
+        ), patch("time.sleep"), patch(
+            "landline.telegram.transport.log",
+            side_effect=lambda msg: logged.append(msg),
+        ):
+            send_response("token", "42", text)
+
+        mid_stream = [m for m in logged if "aborted mid-stream" in m]
+        assert mid_stream, (
+            "expected aborted-mid-stream log lines to still be emitted "
+            "after F19 (continue) — none found in %r" % logged
+        )
+        assert any("/3" in m for m in mid_stream), (
+            "expected the chunk index/total in the log; got %r" % mid_stream
+        )
