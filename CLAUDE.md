@@ -230,6 +230,18 @@ When a new message arrives and interrupts Claude (SIGINT), the empty
 result is NOT a Claude failure. Without this check, fast typing
 triggers exponential backoff lockout.
 
+### Every failed turn tells the user, once
+
+A non-shutdown, non-interrupted failed turn always earns exactly one
+in-band line: the threshold "Claude is unavailable" alert on the turn
+it fires, else the silence-watchdog freeze notice, else the resend
+notice (skipped when streaming already sent its own empty/no-response
+line via `result.failure_notice_sent`). Strings + precedence live in
+`claude/failure_notices.py`; the watchdog must stamp
+`killed_by_silence_watchdog` BEFORE `pc.kill()`. A watchdog kill also
+fires the `claude-silence-kill` iMessage (1 h floor). See
+[ARCHITECTURE → Failed-turn notices](docs/ARCHITECTURE.md#failed-turn-notices--one-line-per-failed-turn).
+
 ### Never `os.umask`
 
 Process-wide, races concurrent file creation across the poller /
@@ -345,7 +357,7 @@ Before ANY change, run the full suite and verify it passes:
 cd claude-landline && /usr/bin/python3 -m pytest landline/tests/ -q
 ```
 
-The suite is 1 079 tests covering unit / integration / regression paths
+The suite is 1 319 tests covering unit / integration / regression paths
 for every subsystem, including the desync-regression tests that make
 `StreamPump` load-bearing. Test isolation (autouse fixtures that
 redirect the workspace, log path, Keychain, and network) is itself
