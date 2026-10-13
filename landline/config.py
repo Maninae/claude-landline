@@ -563,6 +563,11 @@ CLAUDE_AUTH_ERROR_MARKERS = (
 )
 # 6h defensive floor if the latch-reset path ever breaks (latch is primary).
 CLAUDE_AUTH_ALERT_MIN_INTERVAL_SECONDS = 6 * 3600
+# Out-of-band iMessage when the silence watchdog kills a frozen Claude. Each
+# kill already costs the user CLAUDE_TIMEOUT of waiting, so one alert per hour
+# is plenty for the operator to notice a struggling Mac without a kill storm
+# (4 kills in 2 days during the Oct-2026 tccd wedge) paging them every time.
+CLAUDE_SILENCE_KILL_ALERT_MIN_INTERVAL_SECONDS = 3600
 # Same once-per-incident floor for the network-outage iMessage alert. The latch
 # lives on the daemon so it survives poller swaps (F7); this floor is the
 # defensive backstop if the reset path ever breaks.

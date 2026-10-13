@@ -2674,3 +2674,330 @@ class TestPreExistingPauseReAnchor:
         # No spurious interrupt.
         assert interrupt_observations == [False]
         assert pf.is_set() is False
+
+
+class TestFailedTurnUserNotice:
+    """Every non-shutdown, non-interrupted failed turn tells the user, once.
+
+    Regression against the Oct-2026 tccd wedge: the silence watchdog killed
+    a frozen Claude (exit -9) and the user saw "(Still working...)" notices
+    and then nothing, forever, four times in two days. These tests pin the
+    per-turn notice policy documented on ``_record_outcome``.
+    """
+
+    _FINALIZE_PATCHES = (
+        "landline.claude.dispatch.save_state",
+        "landline.claude.dispatch.log_conversation",
+    )
+
+    def _make_dispatcher(self, failure_tracker=None, run_claude_fn=None,
+                         send_response_fn=None):
+        ft = failure_tracker or ClaudeFailureTracker()
+        return ClaudeDispatcher(
+            token="fake-token",
+            state={"session_id": "sess-1", "turn_count": 0},
+            failure_tracker=ft,
+            shutdown_hook=MagicMock(),
+            run_claude_fn=run_claude_fn or MagicMock(),
+            send_response_fn=send_response_fn or MagicMock(),
+            send_typing_fn=MagicMock(),
+            pause_flag=PauseFlag(),
+        )
+
+    @staticmethod
+    def _silence_kill_result(seconds=600):
+        r = ClaudeStreamResult()
+        r.exit_code = -9
+        r.killed_by_silence_watchdog = True
+        r.silence_timeout_seconds = seconds
+        return r
+
+    @staticmethod
+    def _generic_failure_result(notice_sent=False, exit_code=1):
+        r = ClaudeStreamResult()
+        r.exit_code = exit_code
+        r.failure_notice_sent = notice_sent
+        return r
+
+    @staticmethod
+    def _notice_texts(helper_mock):
+        return [c.kwargs.get("text") for c in helper_mock.call_args_list]
+
+    # ----- silence-kill freeze notice -----
+
+    def test_silence_kill_sends_freeze_notice_with_minutes_from_cap(self):
+        send_response = MagicMock()
+        d = self._make_dispatcher(send_response_fn=send_response)
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock):
+            d._record_outcome(self._silence_kill_result(seconds=600), "123")
+        texts = self._notice_texts(helper_mock)
+        assert len(texts) == 1
+        assert "10 minutes" in texts[0]
+        assert "resend" in texts[0].lower()
+        assert "—" not in texts[0]
+        assert callable(helper_mock.call_args.kwargs.get("direct_fn"))
+        # Not the 10th failure: the direct-send threshold alert stays quiet.
+        send_response.assert_not_called()
+
+    def test_silence_kill_minutes_follow_the_cap_that_fired(self):
+        """The owned-progress cap (3600s) reports 60 minutes, not the
+        any-event CLAUDE_TIMEOUT's 10."""
+        d = self._make_dispatcher()
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock):
+            d._record_outcome(self._silence_kill_result(seconds=3600), "123")
+        assert "60 minutes" in self._notice_texts(helper_mock)[0]
+
+    def test_silence_kill_minutes_fall_back_to_config_timeout(self):
+        d = self._make_dispatcher()
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock), \
+             patch.object(daemon_config, "CLAUDE_TIMEOUT", 120):
+            d._record_outcome(self._silence_kill_result(seconds=None), "123")
+        assert "2 minutes" in self._notice_texts(helper_mock)[0]
+
+    def test_silence_kill_notice_fires_on_every_kill(self):
+        """Each kill is a message the user waited ten minutes on; none may
+        be silent, even deep into a streak."""
+        d = self._make_dispatcher()
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock), \
+             patch("landline.runtime.notifications.send_health_alert",
+                   return_value=True):
+            for _ in range(3):
+                d._record_outcome(self._silence_kill_result(), "123")
+        assert helper_mock.call_count == 3
+
+    def test_silence_kill_does_not_trigger_fresh_session_retry(self):
+        """A watchdog kill on an existing session is exit -9, which must NOT
+        match the stale-session shape: retrying would wipe the conversation
+        on top of dropping the message. One Claude call, one notice."""
+        run_mock = MagicMock(return_value=self._silence_kill_result())
+        d = self._make_dispatcher(run_claude_fn=run_mock)
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock), \
+             patch("landline.runtime.notifications.send_health_alert",
+                   return_value=True), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
+                   return_value=""), \
+             patch(self._FINALIZE_PATCHES[0]), patch(self._FINALIZE_PATCHES[1]):
+            d.send_to_claude("hello", "123")
+        assert run_mock.call_count == 1
+        assert len(self._notice_texts(helper_mock)) == 1
+        assert "10 minutes" in self._notice_texts(helper_mock)[0]
+
+    # ----- generic failures -----
+
+    def test_generic_failure_sends_resend_notice(self):
+        d = self._make_dispatcher()
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock):
+            d._record_outcome(self._generic_failure_result(), "123")
+        texts = self._notice_texts(helper_mock)
+        assert len(texts) == 1
+        assert "resend" in texts[0].lower()
+        assert "—" not in texts[0]
+
+    def test_generic_failure_skips_notice_when_streaming_already_sent_one(self):
+        """Streaming's "(Claude returned no response ...)" counts as the
+        turn's one line; the dispatcher adds nothing."""
+        d = self._make_dispatcher()
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock):
+            d._record_outcome(self._generic_failure_result(notice_sent=True), "123")
+        helper_mock.assert_not_called()
+
+    def test_invocation_exception_result_gets_notice(self):
+        """``_invoke_claude_call``'s synthesized failure (error set, no exit
+        code) is still a dropped message."""
+        d = self._make_dispatcher()
+        r = ClaudeStreamResult()
+        r.error = "invocation exception: boom"
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock):
+            d._record_outcome(r, "123")
+        assert helper_mock.call_count == 1
+
+    def test_every_failed_turn_in_a_streak_gets_a_notice(self):
+        """Per-turn, not first-of-streak: failures 2..9 that slip between
+        backoff windows would otherwise be silent drops again."""
+        d = self._make_dispatcher()
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock):
+            for _ in range(4):
+                d._record_outcome(self._generic_failure_result(), "123")
+        assert helper_mock.call_count == 4
+
+    # ----- exclusions -----
+
+    def test_interrupted_turn_sends_nothing(self):
+        d = self._make_dispatcher()
+        r = ClaudeStreamResult()
+        r.interrupted = True
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock):
+            d._record_outcome(r, "123")
+        helper_mock.assert_not_called()
+
+    @pytest.mark.parametrize("exit_code", [143, 130, -15, -2])
+    def test_shutdown_exit_sends_nothing(self, exit_code):
+        d = self._make_dispatcher()
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock):
+            d._record_outcome(self._generic_failure_result(exit_code=exit_code), "123")
+        helper_mock.assert_not_called()
+
+    def test_success_sends_nothing(self):
+        d = self._make_dispatcher()
+        r = ClaudeStreamResult()
+        r.streamed_text = "fine"
+        r.final_result = "fine"
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock):
+            d._record_outcome(r, "123")
+        helper_mock.assert_not_called()
+
+    # ----- interaction with the threshold alert -----
+
+    def test_threshold_turn_sends_only_the_unavailable_alert(self):
+        """On the turn the streak alert fires, that alert IS the line: no
+        per-turn notice on top (one line per failed turn)."""
+        send_response = MagicMock()
+        ft = ClaudeFailureTracker(alert_threshold=2, backoff_threshold=99)
+        d = self._make_dispatcher(failure_tracker=ft, send_response_fn=send_response)
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock), \
+             patch("landline.runtime.notifications.send_health_alert",
+                   return_value=True):
+            d._record_outcome(self._generic_failure_result(), "123")
+            assert helper_mock.call_count == 1
+            send_response.assert_not_called()
+            # Second failure hits alert_threshold=2.
+            d._record_outcome(self._silence_kill_result(), "123")
+        assert helper_mock.call_count == 1, "per-turn notice must yield to the alert"
+        assert send_response.call_count == 1
+        assert "unavailable" in send_response.call_args.args[2]
+
+    def test_notice_failure_never_breaks_finalize(self):
+        d = self._make_dispatcher()
+        with patch("landline.claude.try_enqueue_or_send",
+                   MagicMock(side_effect=RuntimeError("telegram down"))):
+            d._record_outcome(self._generic_failure_result(), "123")
+        assert d._failure_tracker.consecutive_failure_count == 1
+
+    # ----- still-working notifier ordering -----
+
+    def test_still_working_notifier_cancelled_before_failure_notice(self):
+        """The failure notice must land after the notifier is cancelled so
+        no "(Still working...)" can follow "please resend"."""
+        events = []
+
+        class _RecordingNotifier:
+            def __init__(self, chat_id, token, schedule):
+                pass
+
+            def start(self):
+                events.append("start")
+
+            def cancel(self):
+                events.append("cancel")
+
+        def _record_notice(chat_id, **kwargs):
+            events.append("notice")
+
+        run_mock = MagicMock(return_value=self._silence_kill_result())
+        d = self._make_dispatcher(run_claude_fn=run_mock)
+        with patch("landline.claude.dispatch._StillWorkingNotifier", _RecordingNotifier), \
+             patch("landline.claude.try_enqueue_or_send", side_effect=_record_notice), \
+             patch("landline.runtime.notifications.send_health_alert",
+                   return_value=True), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history",
+                   return_value=""), \
+             patch(self._FINALIZE_PATCHES[0]), patch(self._FINALIZE_PATCHES[1]):
+            d.send_to_claude("hello", "123")
+        assert events == ["start", "cancel", "notice"]
+
+
+class TestSilenceKillHealthAlert:
+    """Out-of-band ``claude-silence-kill`` iMessage: the operator must learn
+    about a frozen Claude even if the chat path is impaired, but a kill
+    storm must not page them every ten minutes."""
+
+    def _make_dispatcher(self):
+        return ClaudeDispatcher(
+            token="fake-token",
+            state={"session_id": "sess-1", "turn_count": 0},
+            failure_tracker=ClaudeFailureTracker(),
+            shutdown_hook=MagicMock(),
+            run_claude_fn=MagicMock(),
+            send_response_fn=MagicMock(),
+            send_typing_fn=MagicMock(),
+            pause_flag=PauseFlag(),
+        )
+
+    @staticmethod
+    def _silence_kill_result(seconds=600):
+        r = ClaudeStreamResult()
+        r.exit_code = -9
+        r.killed_by_silence_watchdog = True
+        r.silence_timeout_seconds = seconds
+        return r
+
+    def test_fires_once_with_subject_and_floor(self):
+        d = self._make_dispatcher()
+        with patch("landline.claude.try_enqueue_or_send", MagicMock()), \
+             patch("landline.runtime.notifications.send_health_alert",
+                   return_value=True) as mock_alert:
+            d._record_outcome(self._silence_kill_result(), "123")
+            d._record_outcome(self._silence_kill_result(), "123")
+        assert mock_alert.call_count == 1
+        kwargs = mock_alert.call_args.kwargs
+        assert kwargs["subject"] == "claude-silence-kill"
+        assert "10 min" in kwargs["body"]
+        assert "—" not in kwargs["body"]
+        assert d._last_silence_kill_alert_at > 0.0
+
+    def test_refires_after_the_floor_elapses(self):
+        d = self._make_dispatcher()
+        with patch("landline.claude.try_enqueue_or_send", MagicMock()), \
+             patch("landline.runtime.notifications.send_health_alert",
+                   return_value=True) as mock_alert:
+            d._record_outcome(self._silence_kill_result(), "123")
+            d._last_silence_kill_alert_at -= (
+                daemon_config.CLAUDE_SILENCE_KILL_ALERT_MIN_INTERVAL_SECONDS + 1
+            )
+            d._record_outcome(self._silence_kill_result(), "123")
+        assert mock_alert.call_count == 2
+
+    def test_floor_not_armed_when_alert_did_not_start(self):
+        """No owner handle -> send_health_alert returns False -> the floor
+        must stay unarmed so the next kill tries again."""
+        d = self._make_dispatcher()
+        with patch("landline.claude.try_enqueue_or_send", MagicMock()), \
+             patch("landline.runtime.notifications.send_health_alert",
+                   return_value=False) as mock_alert:
+            d._record_outcome(self._silence_kill_result(), "123")
+            assert d._last_silence_kill_alert_at == 0.0
+            d._record_outcome(self._silence_kill_result(), "123")
+        assert mock_alert.call_count == 2
+
+    def test_generic_failure_does_not_fire_it(self):
+        d = self._make_dispatcher()
+        r = ClaudeStreamResult()
+        r.exit_code = 1
+        with patch("landline.claude.try_enqueue_or_send", MagicMock()), \
+             patch("landline.runtime.notifications.send_health_alert",
+                   return_value=True) as mock_alert:
+            d._record_outcome(r, "123")
+        mock_alert.assert_not_called()
+
+    def test_alert_exception_never_breaks_finalize(self):
+        d = self._make_dispatcher()
+        with patch("landline.claude.try_enqueue_or_send", MagicMock()), \
+             patch("landline.runtime.notifications.send_health_alert",
+                   side_effect=RuntimeError("osascript exploded")):
+            d._record_outcome(self._silence_kill_result(), "123")
+        assert d._failure_tracker.consecutive_failure_count == 1

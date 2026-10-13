@@ -20,6 +20,11 @@ from landline.config import (
     RATE_LIMIT_SECONDS,
     STILL_WORKING_NOTICE_SCHEDULE_SECONDS,
 )
+from landline.claude.failure_notices import (
+    SILENCE_KILL_ALERT_SUBJECT,
+    failed_turn_notice_text,
+    silence_kill_alert_body,
+)
 from landline.runtime.inject import commit_inject_queue
 from landline.runtime.logging import log
 from landline.runtime.state import (
@@ -86,6 +91,9 @@ class ClaudeDispatcher:
         # the next successful stream. Single-writer (_record_outcome) — no lock.
         self._auth_alert_sent: bool = False
         self._last_auth_alert_at: float = 0.0
+        # Rate floor for the out-of-band "claude-silence-kill" iMessage; the
+        # in-band freeze notice to the user is per-turn and not latched.
+        self._last_silence_kill_alert_at: float = 0.0
         # Per-call scratch for the message_ids that earned 👀 at classify time;
         # _finalize_response fires 👌 on the same ids on a successful turn.
         self._pending_ack_message_ids: List[int] = []
@@ -561,7 +569,23 @@ class ClaudeDispatcher:
             return failure_result
 
     def _record_outcome(self, result: ClaudeStreamResult, chat_id: str) -> None:
-        """Update the failure tracker based on the Claude call result."""
+        """Update the failure tracker and tell the user about a failed turn.
+
+        Failure-notice policy (one in-band line per failed turn, at most):
+        - Threshold turn (``should_send_alert_now``): the existing "Claude is
+          unavailable" alert is the line; no per-turn notice on top of it.
+        - Silence-watchdog kill: the freeze notice, every time.
+        - Any other failure: the short resend notice, unless streaming
+          already enqueued its own empty/no-response line for this turn.
+        - Interrupted turns and shutdown exits get nothing (not failures).
+        - A silence kill ALSO fires the out-of-band ``claude-silence-kill``
+          health alert, floored to once per
+          ``CLAUDE_SILENCE_KILL_ALERT_MIN_INTERVAL_SECONDS``.
+
+        Runs after ``_invoke_with_stale_retry``'s ``finally`` has cancelled
+        the still-working notifier, so no "(Still working...)" can land
+        after the failure notice.
+        """
         if result.interrupted:
             return
         if is_result_successful(result):
@@ -597,6 +621,11 @@ class ClaudeDispatcher:
                 )
             except Exception as alert_error:
                 log(f"Failed to send Claude-unavailable alert: {alert_error}")
+        else:
+            self._notify_user_of_failed_turn(result, chat_id)
+
+        if result.killed_by_silence_watchdog:
+            self._maybe_send_silence_kill_alert(result)
 
         # Auth-expiry alert runs AFTER record_failure so the streak reflects
         # this turn. Decoupled from the in-band "Claude unavailable" (10th
@@ -605,6 +634,60 @@ class ClaudeDispatcher:
         # See docs/ARCHITECTURE.md "June 2026 auth-expiry outage".
         if _stderr_looks_like_auth_failure(result.stderr_tail):
             self._maybe_send_auth_expiry_alert()
+
+    def _notify_user_of_failed_turn(
+        self, result: ClaudeStreamResult, chat_id: str,
+    ) -> None:
+        """Enqueue the per-turn failure line chosen by ``failed_turn_notice_text``.
+
+        Ordered behind any bubbles the turn did stream; direct-send fallback
+        when no live sender exists. Never raises into finalize.
+        """
+        notice = failed_turn_notice_text(result)
+        if notice is None:
+            return
+        try:
+            from landline.claude import try_enqueue_or_send
+            token = self._token
+            send_response = self._send_response
+            try_enqueue_or_send(
+                chat_id,
+                text=notice,
+                direct_fn=lambda body: send_response(token, chat_id, body),
+            )
+            if result.killed_by_silence_watchdog:
+                log("Sent silence-kill freeze notice to user")
+        except Exception as notice_error:
+            log(f"Failed to send failed-turn notice: {notice_error}")
+
+    def _maybe_send_silence_kill_alert(self, result: ClaudeStreamResult) -> None:
+        """Fire the out-of-band ``claude-silence-kill`` iMessage, at most once
+        per ``CLAUDE_SILENCE_KILL_ALERT_MIN_INTERVAL_SECONDS``.
+
+        - Time floor only (no success-reset latch): a kill is a discrete
+          event, and the floor alone bounds the rate. The floor timestamp is
+          set only when the alert thread actually started.
+        - Fire-and-forget via ``send_health_alert`` (daemon thread).
+        """
+        now = time.time()
+        if (
+            self._last_silence_kill_alert_at > 0.0
+            and now - self._last_silence_kill_alert_at
+            < config.CLAUDE_SILENCE_KILL_ALERT_MIN_INTERVAL_SECONDS
+        ):
+            return
+        try:
+            from landline.runtime.notifications import send_health_alert
+            import socket as _socket
+            started = send_health_alert(
+                subject=SILENCE_KILL_ALERT_SUBJECT,
+                body=silence_kill_alert_body(result, _socket.gethostname()),
+            )
+            if started:
+                self._last_silence_kill_alert_at = time.time()
+                log("Silence-kill health alert dispatched")
+        except Exception as alert_error:
+            log(f"Silence-kill alert failed to dispatch: {alert_error}")
 
     def _maybe_send_auth_expiry_alert(self) -> None:
         """Fire the one-shot iMessage auth-expiry alert.
