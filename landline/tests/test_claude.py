@@ -2499,3 +2499,176 @@ class TestF23StreamSenderDropAfterClose:
         assert tally_lines_quiet == [], (
             "zero-drop close must stay quiet; got %r" % tally_lines_quiet
         )
+
+
+class TestSilenceWatchdogKillStamps:
+    """Oct-2026 tccd wedge: a root `tccd` hang blocked Claude in a kernel
+    `openat()`, the any-event silence watchdog killed it (exit -9), and the
+    user heard nothing because the generic no-response line was suppressed
+    on an existing session. The result must now carry a clear
+    silence-kill stamp so the dispatcher can send the freeze notice, and
+    streaming must NOT also send its generic line for that turn.
+    """
+
+    def _run_until_killed(self, *, any_event_cap, owned_cap, is_new,
+                          feed_heartbeats=False, helper_mock=None):
+        from landline.tests.test_stream_pump import _FakeProc
+        import landline.claude.streaming as streaming_mod
+
+        proc = _FakeProc()
+        fake_pc = MagicMock()
+        fake_pc.ensure_alive.return_value = proc
+        fake_pc.session_id = "sess-1"
+        fake_pc.get_stderr_tail.return_value = ""
+
+        kill_called = threading.Event()
+
+        def _kill_side_effect():
+            kill_called.set()
+            # SIGKILL from pc.kill() -> exit -9 like production.
+            proc._returncode = -9
+            proc.returncode = -9
+            proc.stdout.close()
+
+        fake_pc.kill.side_effect = _kill_side_effect
+
+        if feed_heartbeats:
+            def _feed(_msg):
+                def _pump():
+                    for _ in range(200):
+                        if kill_called.is_set():
+                            break
+                        proc.stdout.feed_event({
+                            "type": "system",
+                            "subtype": "task_notification",
+                            "task_id": "bg",
+                            "status": "running",
+                        })
+                        time.sleep(0.005)
+                threading.Thread(target=_pump, daemon=True).start()
+            fake_pc.send_message.side_effect = _feed
+
+        helper_mock = helper_mock if helper_mock is not None else MagicMock()
+        try:
+            with patch("landline.claude._get_persistent_claude",
+                       return_value=fake_pc), \
+                 patch("landline.claude._get_or_create_sender",
+                       return_value=MagicMock()), \
+                 patch("landline.claude.try_enqueue_or_send", helper_mock), \
+                 patch.object(streaming_mod, "CLAUDE_TIMEOUT", any_event_cap), \
+                 patch.object(streaming_mod,
+                              "CLAUDE_OWNED_SILENCE_TIMEOUT_SECONDS", owned_cap):
+                result = run_claude_streaming(
+                    token="tok", chat_id="chatKill", message="hi",
+                    session_id=None if is_new else "sess-1", is_new=is_new,
+                    send_response_fn=MagicMock(), send_typing_fn=MagicMock(),
+                )
+        finally:
+            proc.stdout.close()
+        assert kill_called.wait(2.0), "watchdog never killed the process"
+        return result, helper_mock
+
+    def test_any_event_silence_kill_is_stamped_on_result(self):
+        """No events at all -> any-event cap fires. The result records the
+        kill and WHICH cap tripped (so the notice can say the minutes)."""
+        result, _ = self._run_until_killed(
+            any_event_cap=0.15, owned_cap=60, is_new=False,
+        )
+        assert result.killed_by_silence_watchdog is True
+        assert result.silence_timeout_seconds == 0.15
+        assert result.exit_code == -9
+        assert result.has_content is False
+
+    def test_owned_silence_kill_is_stamped_with_owned_cap(self):
+        """Heartbeats keep the any-event clock hot; the owned-progress cap
+        fires instead and is the cap recorded on the result."""
+        result, _ = self._run_until_killed(
+            any_event_cap=60, owned_cap=0.15, is_new=False, feed_heartbeats=True,
+        )
+        assert result.killed_by_silence_watchdog is True
+        assert result.silence_timeout_seconds == 0.15
+
+    def test_silence_kill_suppresses_generic_no_response_line(self):
+        """Even on a NEW session (where the generic "(Claude returned no
+        response ...)" line would normally fire), a silence kill sends
+        nothing from streaming: the dispatcher owns that turn's single
+        freeze notice. ``failure_notice_sent`` stays False accordingly."""
+        result, helper_mock = self._run_until_killed(
+            any_event_cap=0.15, owned_cap=60, is_new=True,
+        )
+        assert result.killed_by_silence_watchdog is True
+        assert helper_mock.call_count == 0
+        assert result.failure_notice_sent is False
+
+    def test_plain_failure_stamps_nothing(self):
+        """A non-watchdog failure (process already dead, exit 1) must not
+        look like a silence kill."""
+        fake_proc = MagicMock()
+        fake_proc.stdout = iter([])
+        fake_proc.stderr = iter([])
+        fake_proc.poll.return_value = 1
+        fake_proc.returncode = 1
+        fake_pc = MagicMock()
+        fake_pc.ensure_alive.return_value = fake_proc
+        fake_pc.session_id = "sess-1"
+        fake_pc.get_stderr_tail.return_value = ""
+        with patch("landline.claude._get_persistent_claude", return_value=fake_pc), \
+             patch("landline.claude._get_or_create_sender", return_value=MagicMock()), \
+             patch("landline.claude.try_enqueue_or_send", MagicMock()):
+            result = run_claude_streaming(
+                token="tok", chat_id="chatPlain", message="hi",
+                session_id="sess-1", is_new=False,
+                send_response_fn=MagicMock(), send_typing_fn=MagicMock(),
+            )
+        assert result.killed_by_silence_watchdog is False
+        assert result.silence_timeout_seconds is None
+
+
+class TestStreamingFailureNoticeSentFlag:
+    """``failure_notice_sent`` mirrors whether streaming enqueued its own
+    in-band line for a failed turn; the dispatcher reads it to avoid a
+    second line for the same turn."""
+
+    def _fake_pc(self, returncode):
+        fake_proc = MagicMock()
+        fake_proc.stdout = iter([])
+        fake_proc.stderr = iter([])
+        fake_proc.poll.return_value = returncode
+        fake_proc.returncode = returncode
+        fake_pc = MagicMock()
+        fake_pc.ensure_alive.return_value = fake_proc
+        fake_pc.session_id = "sess-1"
+        fake_pc.get_stderr_tail.return_value = ""
+        return fake_pc
+
+    def _run(self, returncode, is_new):
+        helper_mock = MagicMock()
+        with patch("landline.claude._get_persistent_claude",
+                   return_value=self._fake_pc(returncode)), \
+             patch("landline.claude._get_or_create_sender", return_value=MagicMock()), \
+             patch("landline.claude.try_enqueue_or_send", helper_mock):
+            result = run_claude_streaming(
+                token="tok", chat_id="chatFlag", message="hi",
+                session_id=None if is_new else "sess-1", is_new=is_new,
+                # Mirrors the dispatcher: suppress on existing sessions only.
+                suppress_empty_response_notice=(not is_new),
+                send_response_fn=MagicMock(), send_typing_fn=MagicMock(),
+            )
+        return result, helper_mock
+
+    def test_set_when_no_response_line_sent(self):
+        result, helper_mock = self._run(returncode=1, is_new=True)
+        assert helper_mock.call_count == 1
+        assert result.failure_notice_sent is True
+
+    def test_set_when_empty_response_line_sent(self):
+        result, helper_mock = self._run(returncode=0, is_new=True)
+        assert helper_mock.call_count == 1
+        assert result.failure_notice_sent is True
+
+    def test_unset_when_notice_suppressed(self):
+        """Existing session: streaming stays quiet, so the dispatcher must
+        speak. The flag says so."""
+        result, helper_mock = self._run(returncode=1, is_new=False)
+        assert helper_mock.call_count == 0
+        assert result.failure_notice_sent is False

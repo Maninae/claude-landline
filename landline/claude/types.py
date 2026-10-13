@@ -39,6 +39,17 @@ class ClaudeStreamResult:
         self.result_is_error: bool = False
         self.result_subtype: Optional[str] = None
         self.saw_init: bool = False
+        # Set by the streaming watchdog when IT killed the process for
+        # silence (any-event or owned-progress cap). `silence_timeout_seconds`
+        # is the cap that fired, so the dispatcher's user notice can say how
+        # long the freeze was without re-deriving which clock tripped.
+        self.killed_by_silence_watchdog: bool = False
+        self.silence_timeout_seconds: Optional[float] = None
+        # True once streaming has already enqueued an in-band notice about
+        # this failed turn ("(Empty response from Claude.)" / "(Claude
+        # returned no response ...)"). The dispatcher's per-turn failure
+        # notice checks this so the user never gets two lines for one turn.
+        self.failure_notice_sent: bool = False
 
     @property
     def has_content(self) -> bool:

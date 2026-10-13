@@ -223,6 +223,10 @@ def run_claude_streaming(
                 # owned-silent turn behind a chatty stream.
                 if (now - last_active[0]) >= CLAUDE_TIMEOUT:
                     log(f"Claude silent for {CLAUDE_TIMEOUT}s, killing process")
+                    # Stamp BEFORE the kill so the dispatcher can tell this
+                    # apart from any other exit -9 and send the freeze notice.
+                    result.killed_by_silence_watchdog = True
+                    result.silence_timeout_seconds = CLAUDE_TIMEOUT
                     try:
                         pc.kill()
                     except Exception as kill_err:
@@ -242,6 +246,8 @@ def run_claude_streaming(
                         f"(pipe last-active {now - last_active[0]:.1f}s ago) "
                         f"— killing process"
                     )
+                    result.killed_by_silence_watchdog = True
+                    result.silence_timeout_seconds = CLAUDE_OWNED_SILENCE_TIMEOUT_SECONDS
                     try:
                         pc.kill()
                     except Exception as kill_err:
@@ -422,7 +428,13 @@ def run_claude_streaming(
             if result.exit_code and result.exit_code != 0:
                 tail = result.stderr_tail[-500:] if result.stderr_tail else ""
                 log(f"Claude exit {result.exit_code}: {tail}")
-                if not suppress_empty_response_notice:
+                # A silence-watchdog kill gets the dispatcher's specific
+                # freeze notice instead of this generic line (one notice per
+                # failed turn — see dispatch._record_outcome).
+                if (
+                    not suppress_empty_response_notice
+                    and not result.killed_by_silence_watchdog
+                ):
                     # Route through the chat queue so the notice lands AFTER
                     # any bubbles still draining. Direct-send fallback when
                     # no live sender exists yet.
@@ -431,6 +443,7 @@ def run_claude_streaming(
                         text=f"(Claude returned no response — exit {result.exit_code}.)",
                         direct_fn=lambda body: send_response(token, chat_id, body),
                     )
+                    result.failure_notice_sent = True
             else:
                 if not suppress_empty_response_notice:
                     _claude_facade.try_enqueue_or_send(
@@ -438,6 +451,7 @@ def run_claude_streaming(
                         text="(Empty response from Claude.)",
                         direct_fn=lambda body: send_response(token, chat_id, body),
                     )
+                    result.failure_notice_sent = True
 
     if shutdown_hook is not None:
         shutdown_hook.clear()
