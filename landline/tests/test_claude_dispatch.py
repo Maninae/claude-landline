@@ -2907,6 +2907,84 @@ class TestFailedTurnUserNotice:
         helper_mock.assert_not_called()
         mock_alert.assert_not_called()
 
+    # ----- repeated kills on one session -> /new hint -----
+
+    def _record_kill(self, d, helper_mock, streamed_text=""):
+        r = self._silence_kill_result()
+        r.streamed_text = streamed_text
+        with patch("landline.claude.try_enqueue_or_send", helper_mock), \
+             patch("landline.runtime.notifications.send_health_alert",
+                   return_value=True):
+            d._record_outcome(r, "123")
+
+    def test_second_consecutive_kill_on_same_session_adds_new_hint(self):
+        from landline.claude.failure_notices import REPEATED_FREEZE_HINT
+        from landline.claude import _get_persistent_claude
+        _get_persistent_claude().set_session_id("sess-A")
+        d = self._make_dispatcher()
+        helper_mock = MagicMock()
+        self._record_kill(d, helper_mock)
+        self._record_kill(d, helper_mock)
+        first, second = self._notice_texts(helper_mock)
+        assert not first.endswith(REPEATED_FREEZE_HINT)
+        assert second.endswith(REPEATED_FREEZE_HINT)
+        assert "/new" in second
+        assert "\u2014" not in second
+
+    def test_hint_also_on_repeated_partial_freeze(self):
+        from landline.claude.failure_notices import REPEATED_FREEZE_HINT
+        from landline.claude import _get_persistent_claude
+        _get_persistent_claude().set_session_id("sess-A")
+        d = self._make_dispatcher()
+        helper_mock = MagicMock()
+        self._record_kill(d, helper_mock)
+        self._record_kill(d, helper_mock, streamed_text="half an answer")
+        assert self._notice_texts(helper_mock)[1].endswith(REPEATED_FREEZE_HINT)
+
+    def test_non_kill_outcome_resets_the_streak(self):
+        from landline.claude.failure_notices import REPEATED_FREEZE_HINT
+        from landline.claude import _get_persistent_claude
+        _get_persistent_claude().set_session_id("sess-A")
+        d = self._make_dispatcher()
+        helper_mock = MagicMock()
+        self._record_kill(d, helper_mock)
+        with patch("landline.claude.try_enqueue_or_send", helper_mock):
+            d._record_outcome(self._generic_failure_result(), "123")
+        self._record_kill(d, helper_mock)
+        assert not any(t.endswith(REPEATED_FREEZE_HINT)
+                       for t in self._notice_texts(helper_mock))
+
+    def test_session_change_resets_the_streak(self):
+        """/new clears pc's session id and the next spawn assigns another;
+        a kill on the fresh session is the FIRST of its streak."""
+        from landline.claude.failure_notices import REPEATED_FREEZE_HINT
+        from landline.claude import _get_persistent_claude
+        pc = _get_persistent_claude()
+        pc.set_session_id("sess-A")
+        d = self._make_dispatcher()
+        helper_mock = MagicMock()
+        self._record_kill(d, helper_mock)
+        pc.set_session_id("sess-B")
+        self._record_kill(d, helper_mock)
+        assert not any(t.endswith(REPEATED_FREEZE_HINT)
+                       for t in self._notice_texts(helper_mock))
+        pc.set_session_id("sess-B")
+        self._record_kill(d, helper_mock)
+        assert self._notice_texts(helper_mock)[2].endswith(REPEATED_FREEZE_HINT)
+
+    def test_interrupted_turn_does_not_touch_the_streak(self):
+        from landline.claude.failure_notices import REPEATED_FREEZE_HINT
+        from landline.claude import _get_persistent_claude
+        _get_persistent_claude().set_session_id("sess-A")
+        d = self._make_dispatcher()
+        helper_mock = MagicMock()
+        self._record_kill(d, helper_mock)
+        r = ClaudeStreamResult()
+        r.interrupted = True
+        d._record_outcome(r, "123")
+        self._record_kill(d, helper_mock)
+        assert self._notice_texts(helper_mock)[1].endswith(REPEATED_FREEZE_HINT)
+
     # ----- exclusions -----
 
     def test_interrupted_turn_sends_nothing(self):

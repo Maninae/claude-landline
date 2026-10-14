@@ -37,6 +37,11 @@ SILENCE_KILL_NOTICE_TEMPLATE = (
     "happening, the Mac itself is probably struggling."
 )
 
+# Appended to either freeze notice from the 2nd consecutive watchdog kill on
+# the same session: a session that keeps freezing on resume is often the
+# culprit, and /new is the user's own way out.
+REPEATED_FREEZE_HINT = " If it keeps freezing, send /new to start a fresh session."
+
 FAILED_TURN_NOTICE = (
     "(That one failed before I could reply, so your last message wasn't "
     "handled. Please resend it.)"
@@ -65,16 +70,29 @@ def silence_kill_minutes(result: ClaudeStreamResult) -> int:
     return max(1, int(round(seconds / 60.0)))
 
 
-def failed_turn_notice_text(result: ClaudeStreamResult) -> Optional[str]:
+def failed_turn_notice_text(
+    result: ClaudeStreamResult, repeated_freeze: bool = False,
+) -> Optional[str]:
     """The in-band line this failed turn earns, or None if streaming already
-    sent one. See the module docstring for precedence."""
+    sent one. See the module docstring for precedence.
+
+    Args:
+        repeated_freeze: 2nd+ consecutive watchdog kill on the same session;
+            appends ``REPEATED_FREEZE_HINT`` to the freeze notice.
+    """
     if result.killed_by_silence_watchdog:
-        return SILENCE_KILL_NOTICE_TEMPLATE.format(
+        notice = SILENCE_KILL_NOTICE_TEMPLATE.format(
             minutes=silence_kill_minutes(result),
         )
+        return notice + REPEATED_FREEZE_HINT if repeated_freeze else notice
     if result.failure_notice_sent:
         return None
     return FAILED_TURN_NOTICE
+
+
+def partial_freeze_notice_text(repeated_freeze: bool = False) -> str:
+    """The success-shaped freeze line, with the /new hint on a repeat."""
+    return PARTIAL_FREEZE_NOTICE + REPEATED_FREEZE_HINT if repeated_freeze else PARTIAL_FREEZE_NOTICE
 
 
 def silence_kill_alert_body(result: ClaudeStreamResult, hostname: str) -> str:

@@ -4,9 +4,11 @@ from landline import config as daemon_config
 from landline.claude.failure_notices import (
     FAILED_TURN_NOTICE,
     PARTIAL_FREEZE_NOTICE,
+    REPEATED_FREEZE_HINT,
     SILENCE_KILL_ALERT_SUBJECT,
     SILENCE_KILL_NOTICE_TEMPLATE,
     failed_turn_notice_text,
+    partial_freeze_notice_text,
     silence_kill_alert_body,
     silence_kill_minutes,
 )
@@ -43,6 +45,14 @@ class TestFailedTurnNoticeText:
     def test_generic_failure_gets_resend_notice(self):
         assert failed_turn_notice_text(ClaudeStreamResult()) == FAILED_TURN_NOTICE
 
+    def test_repeated_freeze_appends_new_hint_to_both_freeze_lines(self):
+        r = _silence_kill(600)
+        assert failed_turn_notice_text(r, repeated_freeze=True).endswith(REPEATED_FREEZE_HINT)
+        assert partial_freeze_notice_text(repeated_freeze=True) == (
+            PARTIAL_FREEZE_NOTICE + REPEATED_FREEZE_HINT
+        )
+        assert partial_freeze_notice_text() == PARTIAL_FREEZE_NOTICE
+
     def test_none_when_streaming_already_notified(self):
         r = ClaudeStreamResult()
         r.failure_notice_sent = True
@@ -55,6 +65,7 @@ class TestStrings:
             SILENCE_KILL_NOTICE_TEMPLATE,
             FAILED_TURN_NOTICE,
             PARTIAL_FREEZE_NOTICE,
+            REPEATED_FREEZE_HINT,
             silence_kill_alert_body(_silence_kill(600), "host"),
         ):
             assert "—" not in s

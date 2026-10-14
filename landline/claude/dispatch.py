@@ -21,9 +21,9 @@ from landline.config import (
     STILL_WORKING_NOTICE_SCHEDULE_SECONDS,
 )
 from landline.claude.failure_notices import (
-    PARTIAL_FREEZE_NOTICE,
     SILENCE_KILL_ALERT_SUBJECT,
     failed_turn_notice_text,
+    partial_freeze_notice_text,
     silence_kill_alert_body,
 )
 from landline.runtime.inject import commit_inject_queue
@@ -95,6 +95,11 @@ class ClaudeDispatcher:
         # Rate floor for the out-of-band "claude-silence-kill" iMessage; the
         # in-band freeze notice to the user is per-turn and not latched.
         self._last_silence_kill_alert_at: float = 0.0
+        # Consecutive watchdog kills on ONE session (keyed by pc's session id
+        # at kill time); reset by any non-kill outcome or a session change.
+        # From the 2nd kill the freeze notice adds the /new hint.
+        self._consecutive_silence_kills: int = 0
+        self._silence_kill_session_id: Optional[str] = None
         # Per-call scratch for the message_ids that earned 👀 at classify time;
         # _finalize_response fires 👌 on the same ids on a successful turn.
         self._pending_ack_message_ids: List[int] = []
@@ -595,6 +600,7 @@ class ClaudeDispatcher:
         """
         if result.interrupted:
             return
+        repeated_freeze = self._note_silence_kill_streak(result)
         if is_result_successful(result):
             self._failure_tracker.record_success()
             # Successful stream proves auth is back; reset the alert latch
@@ -602,7 +608,9 @@ class ClaudeDispatcher:
             self._auth_alert_sent = False
             if result.killed_by_silence_watchdog:
                 # Ordered behind the partial bubbles so it reads as a tail.
-                self._enqueue_turn_notice(chat_id, PARTIAL_FREEZE_NOTICE)
+                self._enqueue_turn_notice(
+                    chat_id, partial_freeze_notice_text(repeated_freeze),
+                )
                 self._maybe_send_silence_kill_alert(result)
             return
 
@@ -637,7 +645,7 @@ class ClaudeDispatcher:
             except Exception as alert_error:
                 log(f"Failed to send Claude-unavailable alert: {alert_error}")
         else:
-            self._notify_user_of_failed_turn(result, chat_id)
+            self._notify_user_of_failed_turn(result, chat_id, repeated_freeze)
 
         if result.killed_by_silence_watchdog:
             self._maybe_send_silence_kill_alert(result)
@@ -650,15 +658,39 @@ class ClaudeDispatcher:
         if _stderr_looks_like_auth_failure(result.stderr_tail):
             self._maybe_send_auth_expiry_alert()
 
+    def _note_silence_kill_streak(self, result: ClaudeStreamResult) -> bool:
+        """Track consecutive watchdog kills on the current session.
+
+        Returns:
+            True iff this result is the 2nd+ consecutive kill on the same
+            session (the freeze notice then carries the /new hint).
+
+        - Keyed by pc's session id at kill time: a resume after a kill keeps
+          the id (streak continues); ``/new`` changes it (streak resets).
+        - Any non-kill, non-interrupted outcome resets the streak.
+        """
+        if not result.killed_by_silence_watchdog:
+            self._consecutive_silence_kills = 0
+            self._silence_kill_session_id = None
+            return False
+        from landline.claude import _get_persistent_claude
+        current_session_id = _get_persistent_claude().get_session_id()
+        if current_session_id != self._silence_kill_session_id:
+            self._consecutive_silence_kills = 0
+            self._silence_kill_session_id = current_session_id
+        self._consecutive_silence_kills += 1
+        return self._consecutive_silence_kills >= 2
+
     def _notify_user_of_failed_turn(
         self, result: ClaudeStreamResult, chat_id: str,
+        repeated_freeze: bool = False,
     ) -> None:
         """Enqueue the per-turn failure line chosen by ``failed_turn_notice_text``.
 
         Ordered behind any bubbles the turn did stream; direct-send fallback
         when no live sender exists. Never raises into finalize.
         """
-        notice = failed_turn_notice_text(result)
+        notice = failed_turn_notice_text(result, repeated_freeze)
         if notice is None:
             return
         self._enqueue_turn_notice(chat_id, notice)
