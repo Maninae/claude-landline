@@ -625,9 +625,10 @@ in the chat the turn came from. Policy lives in
 | Failed turn | What the user gets |
 |---|---|
 | Streak hits `alert_threshold` (10th) | Existing "Claude is unavailable right now ..." alert, nothing else |
-| Killed by the silence watchdog (any-event `CLAUDE_TIMEOUT` or owned-progress cap) | "I froze for N minutes with no output and had to restart, so your last message wasn't handled. Please resend it. ..." (N from the cap that fired) |
+| Killed by the silence watchdog (any-event `CLAUDE_TIMEOUT` or owned-progress cap), no reply text, ANY exit code incl. 143 / -15 / None | "I froze for N minutes with no output and had to restart, so your last message wasn't handled. Please resend it. ..." (N from the cap that fired) |
+| Killed by the silence watchdog AFTER partial reply text (success-shaped: tracker reset, session reconciled) | "(I froze partway through and had to restart. The reply above may be incomplete; resend if anything is missing.)" behind the partial bubbles |
 | Any other failure | "(That one failed before I could reply, so your last message wasn't handled. Please resend it.)" unless streaming already enqueued its "(Empty response ...)" / "(Claude returned no response ...)" line (`result.failure_notice_sent`) |
-| Interrupted, or exit 143/130/-15/-2 (shutdown) | Nothing |
+| Interrupted, or exit 143/130/-15/-2 (shutdown) WITHOUT the watchdog stamp | Nothing |
 
 - Per-turn, not first-of-streak: the daemon never retries on its own, so
   each failed turn is a message the user just sent. A first-only latch
@@ -637,6 +638,17 @@ in the chat the turn came from. Policy lives in
   `silence_timeout_seconds` on the result BEFORE `pc.kill()`; streaming
   skips its generic no-response line on that turn so the freeze notice
   is the single line.
+- The stamp is checked BEFORE the shutdown-exit test and vetoes
+  `looks_like_stale_session`: `pc.kill()` escalates SIGTERM → SIGKILL, so
+  a frozen Claude usually dies with exit 143 / -15 (the shutdown codes),
+  and one that survives SIGKILL leaves exit None + no content (the stale
+  shape, which would wipe the session on top of the freeze).
+- A child that survives SIGKILL is ABANDONED by
+  `_terminate_with_escalation` (handle cleared with an `ERROR:
+  abandoning unkillable Claude PID` line, session id kept) so the next
+  turn spawns a fresh process instead of failing fast on the old closed
+  stdin until the kernel reaps it. `kill()` closes the captured proc's
+  pipes, not `self._proc`'s, so the fds are still freed.
 - Ordering: `_invoke_with_stale_retry`'s `finally` cancels the
   still-working notifier before `_finalize_response` runs, so no
   "(Still working...)" can land after the failure notice.

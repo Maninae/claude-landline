@@ -191,7 +191,11 @@ same bot. The lock is in `cache/telegram-daemon.pid` via
 If the shutdown handler kills Claude (exit 143 = 128 + 15), the empty
 result looks like a pruned session. `looks_like_stale_session` excludes
 exit code 143 and interrupted results. `_record_outcome` skips
-interrupted results so they don't trip the failure counter.
+interrupted results so they don't trip the failure counter. The
+exception is a result stamped `killed_by_silence_watchdog`: `pc.kill()`
+escalates from SIGTERM, so a frozen Claude usually dies with the SAME
+143 / -15, and that IS a failure (notice + alert), never stale, never
+shutdown.
 
 ### Dedup set must NOT be pruned on cursor advance
 
@@ -238,8 +242,12 @@ it fires, else the silence-watchdog freeze notice, else the resend
 notice (skipped when streaming already sent its own empty/no-response
 line via `result.failure_notice_sent`). Strings + precedence live in
 `claude/failure_notices.py`; the watchdog must stamp
-`killed_by_silence_watchdog` BEFORE `pc.kill()`. A watchdog kill also
-fires the `claude-silence-kill` iMessage (1 h floor). See
+`killed_by_silence_watchdog` BEFORE `pc.kill()`. A watchdog kill after
+partial reply text stays success-shaped but gets the "reply above may be
+incomplete" line. Every watchdog kill also fires the
+`claude-silence-kill` iMessage (1 h floor). A child that survives
+SIGKILL is abandoned (`pc._proc` cleared, session id kept) so the next
+turn spawns fresh. See
 [ARCHITECTURE → Failed-turn notices](docs/ARCHITECTURE.md#failed-turn-notices--one-line-per-failed-turn).
 
 ### Never `os.umask`
@@ -357,7 +365,7 @@ Before ANY change, run the full suite and verify it passes:
 cd claude-landline && /usr/bin/python3 -m pytest landline/tests/ -q
 ```
 
-The suite is 1 319 tests covering unit / integration / regression paths
+The suite is 1 330 tests covering unit / integration / regression paths
 for every subsystem, including the desync-regression tests that make
 `StreamPump` load-bearing. Test isolation (autouse fixtures that
 redirect the workspace, log path, Keychain, and network) is itself
