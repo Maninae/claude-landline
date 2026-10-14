@@ -2672,3 +2672,81 @@ class TestStreamingFailureNoticeSentFlag:
         result, helper_mock = self._run(returncode=1, is_new=False)
         assert helper_mock.call_count == 0
         assert result.failure_notice_sent is False
+
+
+class TestUnkillableProcessIsAbandoned:
+    """A Claude that survives SIGKILL (stuck in a kernel syscall, e.g. the
+    Oct-2026 tccd wedge) must not stay as ``pc._proc``: every later turn
+    would fail fast on its closed stdin until the kernel reaps it. After a
+    failed escalation the handle is cleared so the next turn spawns fresh,
+    and the session id survives for ``--resume``."""
+
+    def _proc(self, wait_side_effects, pid=777):
+        proc = MagicMock()
+        proc.pid = pid
+        proc.poll.return_value = None
+        proc.wait.side_effect = wait_side_effects
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.stderr = MagicMock()
+        return proc
+
+    def test_escalation_reports_exit(self):
+        pc = PersistentClaude()
+        assert pc._terminate_with_escalation(
+            self._proc([0]), term_grace=0.05, kill_grace=0.05) is True
+        assert pc._terminate_with_escalation(
+            self._proc([Exception("t"), 0]), term_grace=0.05, kill_grace=0.05) is True
+        assert pc._terminate_with_escalation(
+            self._proc([Exception("t"), Exception("k")]),
+            term_grace=0.05, kill_grace=0.05) is False
+
+    def test_survivor_that_is_current_proc_is_abandoned(self):
+        pc = PersistentClaude()
+        pc.set_session_id("sess-keep")
+        proc = self._proc([Exception("t"), Exception("k")])
+        pc._proc = proc
+        with patch("landline.claude.persistent.log") as mock_log:
+            pc._terminate_with_escalation(proc, term_grace=0.05, kill_grace=0.05)
+        assert pc._proc is None
+        assert pc.get_session_id() == "sess-keep"
+        abandon_lines = [
+            c.args[0] for c in mock_log.mock_calls
+            if c.args and "abandoning unkillable" in c.args[0]
+        ]
+        assert len(abandon_lines) == 1 and "777" in abandon_lines[0]
+
+    def test_survivor_that_is_not_current_proc_leaves_handle_alone(self):
+        """streaming.py's interrupt branch may escalate a proc the pc has
+        already replaced; never clear someone else's live handle."""
+        pc = PersistentClaude()
+        live = self._proc([0], pid=1)
+        pc._proc = live
+        stale = self._proc([Exception("t"), Exception("k")], pid=2)
+        with patch("landline.claude.persistent.log"):
+            pc._terminate_with_escalation(stale, term_grace=0.05, kill_grace=0.05)
+        assert pc._proc is live
+
+    def test_kill_closes_pipes_and_abandons_then_ensure_alive_spawns_fresh(self):
+        pc = PersistentClaude()
+        pc.set_session_id("sess-keep")
+        proc = self._proc([Exception("t"), Exception("k")])
+        pc._proc = proc
+        # Mock ``wait`` raises immediately, so the real grace windows never
+        # sleep here.
+        with patch("landline.claude.persistent.log"):
+            pc.kill()
+        # Old process's fds freed even though the handle is gone.
+        proc.stdin.close.assert_called_once()
+        proc.stdout.close.assert_called_once()
+        proc.stderr.close.assert_called_once()
+        assert pc._proc is None
+        assert pc.is_alive is False
+
+        fresh = MagicMock()
+        fresh.poll.return_value = None
+        with patch.object(pc, "_spawn", return_value=fresh) as mock_spawn, \
+             patch("landline.claude.persistent.log"):
+            assert pc.ensure_alive() is fresh
+        # Resumes the kept session rather than starting a new one.
+        assert mock_spawn.call_args.kwargs.get("session_id") == "sess-keep"

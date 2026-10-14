@@ -260,18 +260,26 @@ class PersistentClaude:
         proc: subprocess.Popen,
         term_grace: float = _TERM_GRACE_SECONDS,
         kill_grace: float = _KILL_GRACE_SECONDS,
-    ) -> None:
-        """Escalate SIGTERM -> wait -> SIGKILL -> wait; LOUD ERROR if alive.
+    ) -> bool:
+        """Escalate SIGTERM -> wait -> SIGKILL -> wait; LOUD ERROR + abandon if alive.
 
         A child stuck in a C-level syscall (hung MCP socket, runaway subagent
-        holding fds) can survive SIGTERM and SIGKILL both. Two bounded waits
-        with a final ERROR log make that pathology visible instead of
-        silently swallowed under a bare ``except: pass``. Never raises: every
-        step's exception is logged and the escalation continues to the next.
+        holding fds, a wedged tccd) can survive SIGTERM and SIGKILL both. Two
+        bounded waits with a final ERROR log make that pathology visible
+        instead of silently swallowed under a bare ``except: pass``. Never
+        raises: every step's exception is logged and the escalation continues.
 
-        Called by ``kill()`` and by ``streaming.py``'s interrupt-branch
-        SIGKILL escalation — one dialect across both call sites so an
-        operator greps a single wording for this class of failure.
+        Returns:
+            True iff the process exited within the grace windows.
+
+        - If the child is still alive at the end and it is the current
+          ``self._proc``, the handle is ABANDONED (cleared) so ``ensure_alive``
+          spawns a fresh process on the next turn. Keeping the handle would
+          make every later turn fail fast on the closed stdin until the
+          kernel finally reaps it. The session id is kept for ``--resume``.
+        - Called by ``kill()`` and by ``streaming.py``'s interrupt-branch
+          SIGKILL escalation — one dialect across both call sites so an
+          operator greps a single wording for this class of failure.
         """
         start = time.time()
         try:
@@ -280,7 +288,7 @@ class PersistentClaude:
             log(f"SIGTERM failed: {term_err}")
         try:
             proc.wait(timeout=term_grace)
-            return
+            return True
         except Exception:
             # SIGTERM did not land within ``term_grace`` — escalate.
             pass
@@ -290,7 +298,7 @@ class PersistentClaude:
             log(f"SIGKILL failed: {kill_err}")
         try:
             proc.wait(timeout=kill_grace)
-            return
+            return True
         except Exception:
             # Still alive after SIGKILL escalation — this is a loud
             # operational event, so a single ERROR line names pid, poll()
@@ -305,20 +313,35 @@ class PersistentClaude:
                     elapsed,
                 )
             )
+            if self._proc is proc:
+                log(
+                    "ERROR: abandoning unkillable Claude PID %s — handle "
+                    "cleared, next turn spawns a fresh process (session id "
+                    "kept)" % getattr(proc, "pid", "?")
+                )
+                self._proc = None
+            return False
 
     def kill(self) -> None:
-        if self._proc is not None:
-            self._terminate_with_escalation(self._proc)
-            self._close_pipes()
+        # Capture first: a failed escalation abandons ``self._proc``, and the
+        # old process's pipes still have to be closed to free the fds.
+        proc = self._proc
+        if proc is not None:
+            self._terminate_with_escalation(proc)
+            self._close_proc_pipes(proc)
 
     def _close_pipes(self) -> None:
         if self._proc is not None:
-            for stream in (self._proc.stdin, self._proc.stdout, self._proc.stderr):
-                if stream is not None:
-                    try:
-                        stream.close()
-                    except Exception:
-                        pass
+            self._close_proc_pipes(self._proc)
+
+    @staticmethod
+    def _close_proc_pipes(proc: subprocess.Popen) -> None:
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
 
     def get_stderr_tail(self) -> str:
         with self._stderr_lock:
