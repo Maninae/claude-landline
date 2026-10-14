@@ -1183,3 +1183,87 @@ class TestF24EventErrorSurfacesOnHandle(_PumpTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _zero_turn_result(session_id="sess-1"):
+    """CC's injected background-task notification pseudo-turn: an immediate
+    empty result with num_turns=0 (observed on --resume of a session that
+    left background tasks behind, CC 2.1.284 and 2.1.296)."""
+    return {"type": "result", "subtype": "success", "result": "",
+            "num_turns": 0, "duration_ms": 48, "is_error": False,
+            "session_id": session_id}
+
+
+class TestZeroTurnNotificationResult(_PumpTestCase):
+    """Oct-2026 session wipes: on --resume with orphaned background tasks CC
+    emits init -> result(num_turns=0, '') -> init -> <real turn>. The first
+    pair must NOT complete the dispatched handle (that read as a stale
+    session and killed the healthy process)."""
+
+    def test_dispatched_handle_survives_zero_turn_result_and_gets_real_reply(self):
+        sender = _FakeSender()
+        handle = TurnHandle()
+        self.pump.register_turn(handle, sender)
+
+        self.proc.stdout.feed_event(_init_event("sess-r"))
+        self.proc.stdout.feed_event(_zero_turn_result("sess-r"))
+        self._settle()
+        self.assertFalse(handle.done.is_set(), "zero-turn result completed the handle")
+        self.assertFalse(handle.saw_result)
+
+        self.proc.stdout.feed_event(_init_event("sess-r"))
+        self.proc.stdout.feed_event(_assistant_text("m1", "PONG"))
+        self.proc.stdout.feed_event({"type": "result", "subtype": "success",
+                                     "result": "PONG", "num_turns": 1,
+                                     "session_id": "sess-r"})
+
+        self.assertTrue(handle.done.wait(2))
+        self.assertEqual(handle.final_result, "PONG")
+        self.assertEqual(handle.result_num_turns, 1)
+        self.assertIn("PONG", "".join(handle.streamed_parts))
+        self.assertIsNone(handle.error)
+        ops = sender.snapshot()
+        self.assertIn(("text", "PONG"), ops)
+        # One bubble boundary for the real turn; the skipped pseudo-turn
+        # must not flush an empty bubble.
+        self.assertEqual([op for op in ops if op[0] == "flush"], [("flush", None)])
+
+    def test_zero_turn_result_with_no_pending_handle_closes_unsolicited_block(self):
+        """No dispatched turn: the pseudo-turn is an ordinary unsolicited
+        block and closes exactly as before (idle route, bubble boundary,
+        no text)."""
+        idle_sender = _FakeSender()
+        with patch("landline.claude._get_or_create_sender",
+                   return_value=idle_sender):
+            self.pump.set_idle_route("chat1", "tok", lambda *a: None,
+                                     lambda *a: None)
+            self.proc.stdout.feed_event(_notification_event())
+            self.proc.stdout.feed_event(_init_event())
+            self.proc.stdout.feed_event(_zero_turn_result())
+            self.assertTrue(idle_sender.wait_for(("flush", None)))
+            self.assertEqual(
+                [op for op in idle_sender.snapshot() if op[0] == "text"], [])
+
+            # A dispatched turn afterwards is unaffected.
+            sender = _FakeSender()
+            handle = TurnHandle()
+            self.pump.register_turn(handle, sender)
+            self.proc.stdout.feed_event(_init_event())
+            self.proc.stdout.feed_event(_assistant_text("m2", "later"))
+            self.proc.stdout.feed_event(_result_event("later"))
+            self.assertTrue(handle.done.wait(2))
+            self.assertEqual(handle.final_result, "later")
+
+    def test_zero_turn_result_after_routed_text_completes_normally(self):
+        """Defensive: once the dispatched turn has streamed text, a result
+        with num_turns=0 is not the notification shape and closes the turn
+        as any result would."""
+        sender = _FakeSender()
+        handle = TurnHandle()
+        self.pump.register_turn(handle, sender)
+        self.proc.stdout.feed_event(_init_event())
+        self.proc.stdout.feed_event(_assistant_text("m1", "partial"))
+        self.proc.stdout.feed_event(_zero_turn_result())
+        self.assertTrue(handle.done.wait(2))
+        self.assertTrue(handle.saw_result)
+        self.assertEqual(handle.result_num_turns, 0)

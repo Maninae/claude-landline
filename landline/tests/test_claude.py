@@ -2825,3 +2825,96 @@ class TestStderrBufferIsBoundToItsProcess:
             assert pc.get_stderr_tail() == ""
         finally:
             second_stderr.close()
+
+
+class TestZeroTurnResultThroughStreaming:
+    """End-to-end over run_claude_streaming: CC's notification pseudo-turn on
+    --resume must not end the dispatched turn, and if a zero-turn result is
+    ever all CC sends, the any-event watchdog still bounds the wait."""
+
+    @staticmethod
+    def _event(d):
+        return json.dumps(d) + "\n"
+
+    def test_dispatched_result_is_the_real_reply_not_the_zero_turn_pseudo_turn(self):
+        from landline.claude.predicates import looks_like_stale_session
+        events = [
+            {"type": "system", "subtype": "task_notification", "task_id": "bg", "status": "stopped"},
+            {"type": "system", "subtype": "init", "session_id": "sess-1"},
+            {"type": "result", "subtype": "success", "result": "", "num_turns": 0,
+             "duration_ms": 48, "is_error": False, "session_id": "sess-1"},
+            {"type": "system", "subtype": "init", "session_id": "sess-1"},
+            {"type": "assistant", "parent_tool_use_id": None,
+             "message": {"id": "m1", "content": [{"type": "text", "text": "PONG"}]}},
+            {"type": "result", "subtype": "success", "result": "PONG", "num_turns": 1,
+             "duration_ms": 5517, "is_error": False, "session_id": "sess-1"},
+        ]
+        fake_proc = MagicMock()
+        fake_proc.stdout = iter([self._event(e) for e in events])
+        fake_proc.stderr = iter([])
+        fake_proc.poll.return_value = None  # process stays alive
+        fake_pc = MagicMock()
+        fake_pc.ensure_alive.return_value = fake_proc
+        fake_pc.session_id = "sess-1"
+        fake_pc.get_stderr_tail.return_value = ""
+        helper_mock = MagicMock()
+        with patch("landline.claude._get_persistent_claude", return_value=fake_pc), \
+             patch("landline.claude._get_or_create_sender", return_value=MagicMock()), \
+             patch("landline.claude.try_enqueue_or_send", helper_mock):
+            result = run_claude_streaming(
+                token="tok", chat_id="chatZ", message="ping",
+                session_id="sess-1", is_new=False,
+                suppress_empty_response_notice=True,
+                send_response_fn=MagicMock(), send_typing_fn=MagicMock(),
+            )
+        assert result.final_result == "PONG"
+        assert result.result_num_turns == 1
+        assert result.has_content
+        assert result.exit_code is None
+        assert looks_like_stale_session(result) is False
+        helper_mock.assert_not_called()
+
+    def test_watchdog_still_bounds_a_turn_that_only_yields_a_zero_turn_result(self):
+        """Hypothetical: CC answers a real message with ONLY num_turns=0 and
+        nothing else. The handle stays pending by design; the any-event
+        silence cap must end the turn (as a watchdog kill), never hang."""
+        from landline.tests.test_stream_pump import _FakeProc
+        import landline.claude.streaming as streaming_mod
+        proc = _FakeProc()
+        fake_pc = MagicMock()
+        fake_pc.ensure_alive.return_value = proc
+        fake_pc.session_id = "sess-1"
+        fake_pc.get_stderr_tail.return_value = ""
+        kill_called = threading.Event()
+
+        def _kill():
+            kill_called.set()
+            proc._returncode = -9
+            proc.returncode = -9
+            proc.stdout.close()
+        fake_pc.kill.side_effect = _kill
+
+        def _feed(_msg):
+            proc.stdout.feed_event({"type": "system", "subtype": "init", "session_id": "sess-1"})
+            proc.stdout.feed_event({"type": "result", "subtype": "success", "result": "",
+                                    "num_turns": 0, "duration_ms": 40, "session_id": "sess-1"})
+        fake_pc.send_message.side_effect = _feed
+        try:
+            with patch("landline.claude._get_persistent_claude", return_value=fake_pc), \
+                 patch("landline.claude._get_or_create_sender", return_value=MagicMock()), \
+                 patch("landline.claude.try_enqueue_or_send", MagicMock()), \
+                 patch.object(streaming_mod, "CLAUDE_TIMEOUT", 0.3), \
+                 patch.object(streaming_mod, "CLAUDE_OWNED_SILENCE_TIMEOUT_SECONDS", 60):
+                t0 = time.time()
+                result = run_claude_streaming(
+                    token="tok", chat_id="chatZ2", message="ping",
+                    session_id="sess-1", is_new=False,
+                    send_response_fn=MagicMock(), send_typing_fn=MagicMock(),
+                )
+                elapsed = time.time() - t0
+        finally:
+            proc.stdout.close()
+        assert kill_called.wait(2.0)
+        assert elapsed < 10.0
+        assert result.killed_by_silence_watchdog is True
+        assert result.has_content is False

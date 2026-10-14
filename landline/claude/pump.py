@@ -463,6 +463,17 @@ class StreamPump:
 
         handle = block.handle
         if handle is not None:
+            if self._is_notification_result(block, handle, event):
+                # No model turn happened; the real answer follows under its
+                # own init. Leave the handle pending so that init
+                # re-attributes to it (``_attribute_block``). Completing here
+                # read as "stale session" and wiped a healthy resume.
+                log(
+                    "StreamPump: zero-turn empty result on the dispatched turn "
+                    "(CC background-task notification) — keeping the handle "
+                    "pending (duration_ms=%s)" % event.get("duration_ms")
+                )
+                return None
             handle.final_result = event.get("result", "") or ""
             sid = event.get("session_id")
             if sid:
@@ -508,6 +519,23 @@ class StreamPump:
         # Lazy import + fully swallowed — fire-and-forget from the pump.
         self._record_unsolicited_usage(event)
         return None
+
+    @staticmethod
+    def _is_notification_result(block: _Block, handle: TurnHandle,
+                                event: Dict) -> bool:
+        """True for CC's injected notification turn: ``num_turns == 0``,
+        empty result text, and nothing of the dispatched turn routed yet.
+
+        CC emits this immediately on ``--resume`` when the previous process
+        left background tasks behind (it enqueues a ``<task-notification>``
+        user message and closes that pseudo-turn with an empty result before
+        processing stdin). Only an unsolicited block may be closed by it.
+        """
+        if event.get("num_turns") != 0:
+            return False
+        if (event.get("result") or "").strip():
+            return False
+        return not block.routed_any_text and not handle.streamed_parts
 
     @staticmethod
     def _capture_usage_fields(event: Dict, handle: TurnHandle) -> None:
