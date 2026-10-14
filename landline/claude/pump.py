@@ -533,6 +533,10 @@ class StreamPump:
         """
         if event.get("num_turns") != 0:
             return False
+        if event.get("is_error") is True:
+            # An error result always completes the handle, so a dead or
+            # pruned session is classified and wiped instead of left pending.
+            return False
         if (event.get("result") or "").strip():
             return False
         return not block.routed_any_text and not handle.streamed_parts

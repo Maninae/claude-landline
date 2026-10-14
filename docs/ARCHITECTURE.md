@@ -274,7 +274,9 @@ wiped the session (3 times on 2026-10-13).
   for the dispatched turn as the notification shape: it logs once and
   returns without touching the handle, which stays `_pending`; the next
   `init` re-attributes to it. A zero-turn result after streamed text,
-  or on an unsolicited block, closes the block exactly as before.
+  with `is_error: true`, or on an unsolicited block, closes the block
+  exactly as before (an error result must always complete the handle
+  so a dead session is classified and wiped, never left pending).
 - Bound: if CC ever answered a real message with only a zero-turn
   result, the handle would wait for the any-event cap
   (`CLAUDE_TIMEOUT`, 600 s), surface as a watchdog kill, and the user

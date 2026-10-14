@@ -1267,3 +1267,23 @@ class TestZeroTurnNotificationResult(_PumpTestCase):
         self.assertTrue(handle.done.wait(2))
         self.assertTrue(handle.saw_result)
         self.assertEqual(handle.result_num_turns, 0)
+
+    def test_zero_turn_error_result_still_completes_the_handle(self):
+        """Hardening: is_error=True is never the notification shape. A future
+        CC that emits init BEFORE a pruned-session error result must still
+        complete the handle with the error fields so the dispatcher can
+        classify (and wipe) the dead session instead of waiting on it."""
+        sender = _FakeSender()
+        handle = TurnHandle()
+        self.pump.register_turn(handle, sender)
+        self.proc.stdout.feed_event(_init_event("sess-dead"))
+        self.proc.stdout.feed_event({"type": "result", "subtype": "error_during_execution",
+                                     "is_error": True, "result": "", "num_turns": 0,
+                                     "session_id": "sess-dead"})
+        self.assertTrue(handle.done.wait(2))
+        self.assertTrue(handle.saw_result)
+        self.assertTrue(handle.result_is_error)
+        self.assertEqual(handle.result_subtype, "error_during_execution")
+        self.assertTrue(handle.saw_init)
+        self.assertEqual(handle.final_result, "")
+        self.assertIsNone(handle.error)

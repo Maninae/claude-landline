@@ -3237,3 +3237,32 @@ class TestResumeFallbackObservability:
         assert "exit=-9" in kill_lines[0] and "watchdog_kill=True" in kill_lines[0]
         assert "streamed_chars=%d" % len(r.streamed_text) in kill_lines[0]
         assert all("user-visible partial text" not in l for l in lines)
+
+
+class TestZeroTurnErrorResultClassification:
+    """A zero-turn is_error result completes the handle (pump hardening); what
+    the dispatcher does with it follows the existing saw_init discriminator."""
+
+    @staticmethod
+    def _error_result(saw_init):
+        r = ClaudeStreamResult()
+        r.exit_code = 1
+        r.result_is_error = True
+        r.result_subtype = "error_during_execution"
+        r.result_num_turns = 0
+        r.saw_init = saw_init
+        r.stderr_tail = "No conversation found with session ID: abc"
+        return r
+
+    def test_no_init_plus_marker_is_pruned_resume_fallback(self):
+        r = self._error_result(saw_init=False)
+        assert looks_like_pruned_resume(r) is True
+        assert looks_like_stale_session(r) is False
+
+    def test_init_present_is_mid_session_error_not_a_wipe(self):
+        """init on the same turn = the session loaded; the error is a
+        mid-session failure that earns a failure notice, never a wipe."""
+        r = self._error_result(saw_init=True)
+        assert looks_like_pruned_resume(r) is False
+        assert looks_like_stale_session(r) is False
+        assert is_result_successful(r) is False

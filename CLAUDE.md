@@ -377,7 +377,7 @@ Before ANY change, run the full suite and verify it passes:
 cd claude-landline && /usr/bin/python3 -m pytest landline/tests/ -q
 ```
 
-The suite is 1 347 tests covering unit / integration / regression paths
+The suite is 1 350 tests covering unit / integration / regression paths
 for every subsystem, including the desync-regression tests that make
 `StreamPump` load-bearing. Test isolation (autouse fixtures that
 redirect the workspace, log path, Keychain, and network) is itself
