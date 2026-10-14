@@ -181,10 +181,13 @@ def run_claude_streaming(
                 proc.stdout.close()
         except Exception:
             pass
+        # Close THIS proc's pipes, not ``pc._proc``'s: a failed SIGKILL
+        # escalation abandons the handle, and the old child's stdin/stderr
+        # (and its stderr drain thread) must still be released.
         try:
-            pc._close_pipes()
+            pc._close_proc_pipes(proc)
         except Exception as close_err:
-            log("watchdog _close_pipes failed: %s" % close_err)
+            log("watchdog _close_proc_pipes failed: %s" % close_err)
 
     pause_waker: Optional[threading.Event] = None
     pause_waker_thread: Optional[threading.Thread] = None
@@ -398,7 +401,7 @@ def run_claude_streaming(
 
     if proc.poll() is not None:
         result.exit_code = proc.returncode
-        pc._close_pipes()
+        pc._close_proc_pipes(proc)
 
     # Sole-producer contract — see module docstring. ``streamed_parts``
     # already includes the pump-appended final-result tail.

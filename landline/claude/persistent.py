@@ -68,7 +68,6 @@ class PersistentClaude:
         self._session_id: Optional[str] = None
         self._stderr_thread: Optional[threading.Thread] = None
         self._stderr_buf: Deque[str] = collections.deque()
-        self._stderr_total_len: int = 0
         self._stderr_lock = threading.Lock()
         self._lock = threading.Lock()
 
@@ -117,25 +116,30 @@ class PersistentClaude:
             cwd=str(WORKSPACE),
         )
 
-        self._stderr_buf = collections.deque()
-        self._stderr_total_len = 0
+        # Each process gets its own buffer and its drainer holds THAT deque,
+        # so an abandoned child that wakes up later can't land stderr lines
+        # (auth / pruned-resume markers) in the live process's buffer.
+        stderr_buf: Deque[str] = collections.deque()
+        self._stderr_buf = stderr_buf
         self._stderr_thread = threading.Thread(
-            target=self._drain_stderr, args=(proc,), daemon=True,
+            target=self._drain_stderr, args=(proc, stderr_buf), daemon=True,
         )
         self._stderr_thread.start()
 
         return proc
 
-    def _drain_stderr(self, proc: subprocess.Popen) -> None:
+    def _drain_stderr(self, proc: subprocess.Popen, stderr_buf: Deque[str]) -> None:
+        """Drain ``proc.stderr`` into ``stderr_buf`` (the deque bound to THIS
+        process at spawn), trimmed to ``STDERR_BUFFER_MAX`` chars."""
+        total_len = 0
         try:
             assert proc.stderr is not None
             for line in proc.stderr:
                 with self._stderr_lock:
-                    self._stderr_buf.append(line)
-                    self._stderr_total_len += len(line)
-                    while self._stderr_total_len > STDERR_BUFFER_MAX and len(self._stderr_buf) > 1:
-                        dropped = self._stderr_buf.popleft()
-                        self._stderr_total_len -= len(dropped)
+                    stderr_buf.append(line)
+                    total_len += len(line)
+                    while total_len > STDERR_BUFFER_MAX and len(stderr_buf) > 1:
+                        total_len -= len(stderr_buf.popleft())
         except Exception as e:
             # Log before exiting so a silently-broken drainer isn't invisible.
             # Common benign cause: watchdog closed stderr after process died.

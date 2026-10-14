@@ -803,7 +803,6 @@ class TestPersistentClaude:
         pc = PersistentClaude()
         pc._stderr_buf.append("line 1\n")
         pc._stderr_buf.append("line 2\n")
-        pc._stderr_total_len = 14
         tail = pc.get_stderr_tail()
         assert "line 1" in tail
         assert "line 2" in tail
@@ -971,7 +970,6 @@ class TestPersistentClaude:
         # Build a payload larger than the cap.
         big_line = "x" * (STDERR_BUFFER_MAX + 1000)
         pc._stderr_buf.append(big_line)
-        pc._stderr_total_len = len(big_line)
         tail = pc.get_stderr_tail()
         assert len(tail) <= STDERR_BUFFER_MAX
 
@@ -2566,6 +2564,8 @@ class TestSilenceWatchdogKillStamps:
         finally:
             proc.stdout.close()
         assert kill_called.wait(2.0), "watchdog never killed the process"
+        self._last_fake_pc = fake_pc
+        self._last_proc = proc
         return result, helper_mock
 
     def test_any_event_silence_kill_is_stamped_on_result(self):
@@ -2599,6 +2599,17 @@ class TestSilenceWatchdogKillStamps:
         assert result.killed_by_silence_watchdog is True
         assert helper_mock.call_count == 0
         assert result.failure_notice_sent is False
+
+    def test_watchdog_kill_closes_the_killed_procs_pipes(self):
+        """The watchdog must release the KILLED proc's pipes via
+        ``pc._close_proc_pipes(proc)``, not ``pc._close_pipes()``: a failed
+        SIGKILL escalation abandons ``pc._proc``, which would turn the
+        latter into a no-op and leave the old child's stdin/stderr fds
+        (and its stderr drain thread) hanging."""
+        self._run_until_killed(any_event_cap=0.15, owned_cap=60, is_new=False)
+        fake_pc, proc = self._last_fake_pc, self._last_proc
+        fake_pc._close_proc_pipes.assert_any_call(proc)
+        fake_pc._close_pipes.assert_not_called()
 
     def test_plain_failure_stamps_nothing(self):
         """A non-watchdog failure (process already dead, exit 1) must not
@@ -2750,3 +2761,67 @@ class TestUnkillableProcessIsAbandoned:
             assert pc.ensure_alive() is fresh
         # Resumes the kept session rather than starting a new one.
         assert mock_spawn.call_args.kwargs.get("session_id") == "sess-keep"
+
+
+class TestStderrBufferIsBoundToItsProcess:
+    """An abandoned child that wakes up later must not write stderr into
+    the NEW process's buffer: auth / pruned-resume markers from the dead
+    process could otherwise false-match against the live turn. The drain
+    thread holds the deque created for ITS process at spawn."""
+
+    def test_drain_writes_only_into_the_deque_it_was_given(self):
+        import collections
+        pc = PersistentClaude()
+        old_buf = collections.deque()
+        old_proc = MagicMock()
+        old_proc.stderr = iter(["HTTP 401 Invalid authentication\n"])
+        # Simulate _spawn of a replacement: pc now points at a fresh deque.
+        pc._stderr_buf = collections.deque()
+        pc._drain_stderr(old_proc, old_buf)
+        assert "".join(old_buf) == "HTTP 401 Invalid authentication\n"
+        assert pc.get_stderr_tail() == ""
+
+    def test_spawn_binds_each_drainer_to_its_own_buffer(self, no_subprocess):
+        """Two spawns: the first process's stderr lands in the first
+        buffer even when it arrives after the second spawn replaced
+        ``pc._stderr_buf``."""
+        import collections
+        import queue as _queue
+
+        class _BlockingStderr:
+            def __init__(self):
+                self._q = _queue.Queue()
+            def feed(self, line):
+                self._q.put(line)
+            def close(self):
+                self._q.put(None)
+            def __iter__(self):
+                return self
+            def __next__(self):
+                item = self._q.get()
+                if item is None:
+                    raise StopIteration
+                return item
+
+        first_stderr, second_stderr = _BlockingStderr(), _BlockingStderr()
+        first_proc = MagicMock(); first_proc.stderr = first_stderr
+        second_proc = MagicMock(); second_proc.stderr = second_stderr
+        no_subprocess["popen"].side_effect = [first_proc, second_proc]
+        pc = PersistentClaude()
+        try:
+            with patch("landline.claude.persistent.log"):
+                pc._spawn(is_new=True)
+                first_buf = pc._stderr_buf
+                pc._spawn(is_new=True)
+                second_buf = pc._stderr_buf
+            assert first_buf is not second_buf
+            # The abandoned first child wakes up and writes.
+            first_stderr.feed("late line from dead child\n")
+            first_stderr.close()
+            deadline = time.time() + 2.0
+            while time.time() < deadline and not first_buf:
+                time.sleep(0.01)
+            assert "".join(first_buf) == "late line from dead child\n"
+            assert pc.get_stderr_tail() == ""
+        finally:
+            second_stderr.close()
