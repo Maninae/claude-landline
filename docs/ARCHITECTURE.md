@@ -643,12 +643,22 @@ in the chat the turn came from. Policy lives in
   a frozen Claude usually dies with exit 143 / -15 (the shutdown codes),
   and one that survives SIGKILL leaves exit None + no content (the stale
   shape, which would wipe the session on top of the freeze).
+- From the 2nd consecutive watchdog kill on the same session (keyed by
+  pc's session id at kill time; any non-kill outcome or `/new` resets),
+  both freeze lines end with "If it keeps freezing, send /new to start a
+  fresh session."
 - A child that survives SIGKILL is ABANDONED by
   `_terminate_with_escalation` (handle cleared with an `ERROR:
   abandoning unkillable Claude PID` line, session id kept) so the next
   turn spawns a fresh process instead of failing fast on the old closed
-  stdin until the kernel reaps it. `kill()` closes the captured proc's
-  pipes, not `self._proc`'s, so the fds are still freed.
+  stdin until the kernel reaps it. Every pipe-close on the kill paths
+  (`kill()`, the streaming watchdog's `_unblock_reader`, end of turn)
+  goes through `_close_proc_pipes(<captured proc>)`, never
+  `self._proc`, so the abandoned child's fds are still freed.
+- Each spawn creates its own stderr deque and hands it to that process's
+  drain thread, so a dead-but-unreaped child that wakes and writes
+  stderr cannot land auth / pruned-resume markers in the live process's
+  `get_stderr_tail()`.
 - Ordering: `_invoke_with_stale_retry`'s `finally` cancels the
   still-working notifier before `_finalize_response` runs, so no
   "(Still working...)" can land after the failure notice.

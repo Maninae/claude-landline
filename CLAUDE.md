@@ -245,9 +245,12 @@ line via `result.failure_notice_sent`). Strings + precedence live in
 `killed_by_silence_watchdog` BEFORE `pc.kill()`. A watchdog kill after
 partial reply text stays success-shaped but gets the "reply above may be
 incomplete" line. Every watchdog kill also fires the
-`claude-silence-kill` iMessage (1 h floor). A child that survives
+`claude-silence-kill` iMessage (1 h floor); the 2nd+ consecutive kill
+on one session appends the "send /new" hint. A child that survives
 SIGKILL is abandoned (`pc._proc` cleared, session id kept) so the next
-turn spawns fresh. See
+turn spawns fresh; close pipes via `_close_proc_pipes(<captured proc>)`,
+never `self._proc`, and each spawn's stderr drainer owns its own deque.
+See
 [ARCHITECTURE → Failed-turn notices](docs/ARCHITECTURE.md#failed-turn-notices--one-line-per-failed-turn).
 
 ### Never `os.umask`
@@ -365,7 +368,7 @@ Before ANY change, run the full suite and verify it passes:
 cd claude-landline && /usr/bin/python3 -m pytest landline/tests/ -q
 ```
 
-The suite is 1 330 tests covering unit / integration / regression paths
+The suite is 1 339 tests covering unit / integration / regression paths
 for every subsystem, including the desync-regression tests that make
 `StreamPump` load-bearing. Test isolation (autouse fixtures that
 redirect the workspace, log path, Keychain, and network) is itself
