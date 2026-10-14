@@ -80,9 +80,19 @@ class TestIsResultSuccessful:
 
 
 class TestLooksLikeStaleSession:
-    def test_stale_no_content_no_error(self):
+    def test_stale_no_content_no_error_clean_exit(self):
         r = ClaudeStreamResult()
+        r.exit_code = 0
         assert looks_like_stale_session(r) is True
+
+    def test_live_process_empty_result_is_not_stale(self):
+        """exit None = the process is still alive and returned an empty
+        result. That is an empty reply, not a dead session: treating it as
+        stale killed a healthy resumed process and wiped its session
+        (Oct 2026, CC's zero-turn notification result on --resume)."""
+        r = ClaudeStreamResult()
+        assert r.exit_code is None
+        assert looks_like_stale_session(r) is False
 
     def test_not_stale_with_content(self):
         r = ClaudeStreamResult()
@@ -349,7 +359,8 @@ class TestClaudeDispatcher:
             calls_seen.append({"is_new": kwargs["is_new"], "session_id": kwargs["session_id"]})
             r = ClaudeStreamResult()
             if call_count[0] == 1:
-                # Empty result = looks_like_stale_session True.
+                # Clean exit + empty = looks_like_stale_session True.
+                r.exit_code = 0
                 return r
             r.session_id = "fresh-session"
             r.streamed_text = "fresh response"
@@ -1091,7 +1102,8 @@ class TestSessionIdSingleSource:
             })
             r = ClaudeStreamResult()
             if call_count[0] == 1:
-                return r  # empty -> looks_like_stale_session True
+                r.exit_code = 0  # clean exit + empty -> stale True
+                return r
             r.session_id = "fresh-session"
             r.streamed_text = "fresh response"
             r.final_result = "fresh response"
@@ -1644,7 +1656,8 @@ class TestLooksLikePrunedResume:
         clean-empty shape unchanged — pruned-resume is additive, not a
         replacement."""
         r = ClaudeStreamResult()
-        # No content, no error, exit 0/None, not interrupted.
+        r.exit_code = 0
+        # No content, no error, clean exit, not interrupted.
         assert looks_like_stale_session(r) is True
 
         r2 = ClaudeStreamResult()

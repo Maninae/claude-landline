@@ -19,12 +19,13 @@ def is_result_successful(result: ClaudeStreamResult) -> bool:
 def looks_like_stale_session(result: ClaudeStreamResult) -> bool:
     """True if the result suggests --resume hit a dead session.
 
-    Stale = clean exit (0 or None) with no content. ANY nonzero exit means
-    the process died — misclassifying a crash as stale silently wipes the
-    conversation. A silence-watchdog kill is never stale either: a child
-    that survives SIGKILL leaves exit_code None with no content, which
-    would otherwise match this shape and wipe the session on top of the
-    freeze.
+    Stale = the process EXITED cleanly (exit 0) with no content. ANY nonzero
+    exit means the process died — misclassifying a crash as stale silently
+    wipes the conversation. exit None means the process is still alive and
+    merely returned an empty result: that is an empty reply, not a dead
+    session (Oct 2026: a healthy resumed process was killed and its session
+    wiped on exactly this shape). A silence-watchdog kill is never stale
+    either.
     """
     if result.error:
         return False
@@ -32,7 +33,7 @@ def looks_like_stale_session(result: ClaudeStreamResult) -> bool:
         return False
     if result.killed_by_silence_watchdog:
         return False
-    if result.exit_code is not None and result.exit_code != 0:
+    if result.exit_code != 0:
         return False
     return not result.has_content
 
