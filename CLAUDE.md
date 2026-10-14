@@ -93,6 +93,11 @@ sole-producer contract, usage-stats fsync hazard). The rules:
 - Do NOT "fix" the sub-second attribution race with task-notification
   counting — a miscount can orphan a dispatched turn (a hang), strictly
   worse than cosmetic skew.
+- A `result` with `num_turns == 0`, empty text, and nothing routed for
+  the dispatched turn is CC's background-task notification pseudo-turn
+  (emitted on `--resume` with orphaned tasks); it must NEVER complete
+  the dispatched handle. See
+  [ARCHITECTURE → Zero-turn results](docs/ARCHITECTURE.md#zero-turn-results-never-complete-a-dispatched-turn).
 
 ### StreamSender — long-lived, per-chat, unified queue
 
@@ -140,7 +145,11 @@ stderr "No conversation found") routes into `_retry_with_fresh_session`.
 Mid-session API errors must NOT match this shape — mark `saw_init`
 BEFORE `session_id` in `_open_block`, and demand the stderr marker
 before nuking a session. Auth-failure stderr is detected FIRST so it
-routes to the auth-alert path unmolested. See
+routes to the auth-alert path unmolested. `looks_like_stale_session`
+requires `exit_code == 0`: a live process (exit None) with an empty
+result is an empty reply, never a dead session. The fallback decision
+logs `--resume fallback trigger` + `result.summary_for_log()` (metadata
+and stderr tail only, never message text). See
 [ARCHITECTURE → Stale-resume discriminator](docs/ARCHITECTURE.md#stale-resume-vs-mid-session-error-discriminator).
 
 ### Outbound spool is at-least-once, never at-most-once
@@ -368,7 +377,7 @@ Before ANY change, run the full suite and verify it passes:
 cd claude-landline && /usr/bin/python3 -m pytest landline/tests/ -q
 ```
 
-The suite is 1 339 tests covering unit / integration / regression paths
+The suite is 1 347 tests covering unit / integration / regression paths
 for every subsystem, including the desync-regression tests that make
 `StreamPump` load-bearing. Test isolation (autouse fixtures that
 redirect the workspace, log path, Keychain, and network) is itself

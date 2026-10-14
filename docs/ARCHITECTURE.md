@@ -257,6 +257,38 @@ bubble and orphaning the tail into the next one. Reproduced 100% with
 back-to-back events. As a consequence, `run_claude_streaming` must not
 touch the sender after `handle.done.wait()` returns.
 
+### Zero-turn results never complete a dispatched turn
+
+On `--resume` of a session whose previous process left background
+tasks behind (a `run_in_background` Bash, an `Agent`), CC first injects
+a `<task-notification>` pseudo-turn and emits `system/init` → `result`
+with `num_turns=0`, empty text, ~40 ms, BEFORE it processes the message
+on stdin; the real answer follows under its own `init`. Verified on CC
+2.1.284 and 2.1.296. Because the dispatched handle is registered before
+the stdin write, that first pair used to be attributed to it: the turn
+completed empty with the process alive, `looks_like_stale_session`
+fired, and `_retry_with_fresh_session` killed the healthy process and
+wiped the session (3 times on 2026-10-13).
+
+- `_close_block` treats `num_turns == 0` + empty text + nothing routed
+  for the dispatched turn as the notification shape: it logs once and
+  returns without touching the handle, which stays `_pending`; the next
+  `init` re-attributes to it. A zero-turn result after streamed text,
+  or on an unsolicited block, closes the block exactly as before.
+- Bound: if CC ever answered a real message with only a zero-turn
+  result, the handle would wait for the any-event cap
+  (`CLAUDE_TIMEOUT`, 600 s), surface as a watchdog kill, and the user
+  would get the freeze notice. Never observed; accepted over the
+  alternative of wiping sessions.
+- `looks_like_stale_session` additionally requires `exit_code == 0`: a
+  live process (exit None) that returned an empty result is an empty
+  reply, not a dead session.
+- The fallback decision logs `--resume fallback trigger: stale=… pruned=…`
+  plus `ClaudeStreamResult.summary_for_log()` (exit, num_turns,
+  duration, saw_init, is_error, subtype, content lengths, stderr tail;
+  never message text). Every silence-watchdog kill logs the same
+  summary as `silence-kill result:`.
+
 ### The watchdog must close stdout if the process dies
 
 If the Claude subprocess dies while a grandchild process still holds
@@ -406,6 +438,11 @@ the auth-alert path unmolested.
 
 **Pump ordering.** In `_open_block`, mark `saw_init` BEFORE recording
 `session_id` — so the ordering matches the load-bearing distinguisher.
+
+**Stale requires a clean EXIT.** `looks_like_stale_session` matches only
+`exit_code == 0` with no content; `exit_code None` (process alive) is
+never stale. See [Zero-turn results never complete a dispatched
+turn](#zero-turn-results-never-complete-a-dispatched-turn).
 
 ---
 
