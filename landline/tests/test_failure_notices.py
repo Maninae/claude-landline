@@ -3,6 +3,7 @@
 from landline import config as daemon_config
 from landline.claude.failure_notices import (
     FAILED_TURN_NOTICE,
+    PARTIAL_FREEZE_NOTICE,
     SILENCE_KILL_ALERT_SUBJECT,
     SILENCE_KILL_NOTICE_TEMPLATE,
     failed_turn_notice_text,
@@ -53,6 +54,7 @@ class TestStrings:
         for s in (
             SILENCE_KILL_NOTICE_TEMPLATE,
             FAILED_TURN_NOTICE,
+            PARTIAL_FREEZE_NOTICE,
             silence_kill_alert_body(_silence_kill(600), "host"),
         ):
             assert "—" not in s

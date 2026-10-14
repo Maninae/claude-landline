@@ -21,6 +21,7 @@ from landline.config import (
     STILL_WORKING_NOTICE_SCHEDULE_SECONDS,
 )
 from landline.claude.failure_notices import (
+    PARTIAL_FREEZE_NOTICE,
     SILENCE_KILL_ALERT_SUBJECT,
     failed_turn_notice_text,
     silence_kill_alert_body,
@@ -574,12 +575,18 @@ class ClaudeDispatcher:
         Failure-notice policy (one in-band line per failed turn, at most):
         - Threshold turn (``should_send_alert_now``): the existing "Claude is
           unavailable" alert is the line; no per-turn notice on top of it.
-        - Silence-watchdog kill: the freeze notice, every time.
+        - Silence-watchdog kill: the freeze notice, every time. Checked
+          BEFORE the shutdown-exit test: ``pc.kill()`` escalates from
+          SIGTERM, so a frozen Claude usually dies with 143 / -15, the
+          same codes a real shutdown produces.
+        - Silence-watchdog kill AFTER partial reply text: success-shaped
+          (tracker not tripped, session reconciled), but the user gets the
+          "reply above may be incomplete" line and the operator alert fires.
         - Any other failure: the short resend notice, unless streaming
           already enqueued its own empty/no-response line for this turn.
         - Interrupted turns and shutdown exits get nothing (not failures).
-        - A silence kill ALSO fires the out-of-band ``claude-silence-kill``
-          health alert, floored to once per
+        - Every silence kill ALSO fires the out-of-band
+          ``claude-silence-kill`` health alert, floored to once per
           ``CLAUDE_SILENCE_KILL_ALERT_MIN_INTERVAL_SECONDS``.
 
         Runs after ``_invoke_with_stale_retry``'s ``finally`` has cancelled
@@ -593,12 +600,20 @@ class ClaudeDispatcher:
             # Successful stream proves auth is back; reset the alert latch
             # so a fresh incident triggers a new alert.
             self._auth_alert_sent = False
+            if result.killed_by_silence_watchdog:
+                # Ordered behind the partial bubbles so it reads as a tail.
+                self._enqueue_turn_notice(chat_id, PARTIAL_FREEZE_NOTICE)
+                self._maybe_send_silence_kill_alert(result)
             return
 
         # SIGTERM/SIGINT (daemon restart / launchctl bootout) exit codes:
         # 143/130 (shell 128+sig) or -15/-2 (subprocess "killed-by-signal").
         # Shutdown, not failure — recording would trigger false backoff.
-        if result.exit_code in (143, 130, -15, -2):
+        # A watchdog kill produces the same codes and IS a failure.
+        if (
+            result.exit_code in (143, 130, -15, -2)
+            and not result.killed_by_silence_watchdog
+        ):
             log(
                 "Claude exited via signal (exit %s) — treating as shutdown, "
                 "not a failure" % result.exit_code
@@ -646,6 +661,13 @@ class ClaudeDispatcher:
         notice = failed_turn_notice_text(result)
         if notice is None:
             return
+        self._enqueue_turn_notice(chat_id, notice)
+        if result.killed_by_silence_watchdog:
+            log("Sent silence-kill freeze notice to user")
+
+    def _enqueue_turn_notice(self, chat_id: str, notice: str) -> None:
+        """Route one daemon notice through the chat's ordered queue (direct-send
+        fallback when no live sender exists). Never raises into finalize."""
         try:
             from landline.claude import try_enqueue_or_send
             token = self._token
@@ -655,10 +677,8 @@ class ClaudeDispatcher:
                 text=notice,
                 direct_fn=lambda body: send_response(token, chat_id, body),
             )
-            if result.killed_by_silence_watchdog:
-                log("Sent silence-kill freeze notice to user")
         except Exception as notice_error:
-            log(f"Failed to send failed-turn notice: {notice_error}")
+            log(f"Failed to send turn notice: {notice_error}")
 
     def _maybe_send_silence_kill_alert(self, result: ClaudeStreamResult) -> None:
         """Fire the out-of-band ``claude-silence-kill`` iMessage, at most once

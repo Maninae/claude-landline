@@ -17,7 +17,12 @@ and does the sending; this module stays a leaf next to ``types.py``.
   bounded by the user; a first-only latch would re-create silent drops on
   failures 2..alert_threshold-1 that land between backoff windows.
 - Shutdown exits and interrupted turns never reach this policy
-  (``_record_outcome`` returns before consulting it).
+  (``_record_outcome`` returns before consulting it), EXCEPT that a
+  watchdog kill is checked before the shutdown-exit test: ``pc.kill()``
+  sends SIGTERM first, so a frozen Claude often dies with exit 143 / -15,
+  the same codes a real shutdown produces.
+- A watchdog kill after partial reply text is success-shaped (content
+  arrived) and gets ``PARTIAL_FREEZE_NOTICE`` instead of a failure line.
 """
 
 from typing import Optional
@@ -35,6 +40,14 @@ SILENCE_KILL_NOTICE_TEMPLATE = (
 FAILED_TURN_NOTICE = (
     "(That one failed before I could reply, so your last message wasn't "
     "handled. Please resend it.)"
+)
+
+# Watchdog kill AFTER some reply text streamed. The turn stays success-shaped
+# (the user has a partial answer, the tracker is not tripped), but they must
+# know the tail is missing.
+PARTIAL_FREEZE_NOTICE = (
+    "(I froze partway through and had to restart. The reply above may be "
+    "incomplete; resend if anything is missing.)"
 )
 
 SILENCE_KILL_ALERT_SUBJECT = "claude-silence-kill"

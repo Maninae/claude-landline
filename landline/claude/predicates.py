@@ -21,11 +21,16 @@ def looks_like_stale_session(result: ClaudeStreamResult) -> bool:
 
     Stale = clean exit (0 or None) with no content. ANY nonzero exit means
     the process died — misclassifying a crash as stale silently wipes the
-    conversation.
+    conversation. A silence-watchdog kill is never stale either: a child
+    that survives SIGKILL leaves exit_code None with no content, which
+    would otherwise match this shape and wipe the session on top of the
+    freeze.
     """
     if result.error:
         return False
     if result.interrupted:
+        return False
+    if result.killed_by_silence_watchdog:
         return False
     if result.exit_code is not None and result.exit_code != 0:
         return False

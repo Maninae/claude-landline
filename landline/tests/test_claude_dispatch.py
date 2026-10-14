@@ -117,6 +117,14 @@ class TestLooksLikeStaleSession:
         r.exit_code = 137
         assert looks_like_stale_session(r) is False
 
+    def test_silence_watchdog_kill_is_not_stale(self):
+        """A child that survives SIGKILL leaves exit_code None and no
+        content, the stale shape. Retrying fresh would wipe the session on
+        top of the freeze; the watchdog stamp vetoes it."""
+        r = ClaudeStreamResult()
+        r.killed_by_silence_watchdog = True
+        assert looks_like_stale_session(r) is False
+
 
 class TestClaudeStreamResultLocation:
     """E2 regression tests — ClaudeStreamResult lives in landline.claude.types so the
@@ -2829,6 +2837,75 @@ class TestFailedTurnUserNotice:
             for _ in range(4):
                 d._record_outcome(self._generic_failure_result(), "123")
         assert helper_mock.call_count == 4
+
+    # ----- watchdog kill that ends in a shutdown-looking exit code -----
+
+    @pytest.mark.parametrize("exit_code", [143, -15, None])
+    def test_silence_kill_with_shutdown_exit_code_is_still_a_failure(self, exit_code):
+        """pc.kill() escalates from SIGTERM, so a frozen Claude usually dies
+        with 143 / -15 (real case: daemon.log 2026-09-24 16:47, "silent for
+        600s" -> "exit 143" -> "treating as shutdown"). None models a child
+        that survived SIGKILL. All three must still produce the freeze
+        notice, the operator alert, and a recorded failure."""
+        d = self._make_dispatcher()
+        r = self._silence_kill_result()
+        r.exit_code = exit_code
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock), \
+             patch("landline.runtime.notifications.send_health_alert",
+                   return_value=True) as mock_alert:
+            d._record_outcome(r, "123")
+        texts = self._notice_texts(helper_mock)
+        assert len(texts) == 1 and "10 minutes" in texts[0]
+        assert mock_alert.call_count == 1
+        assert d._failure_tracker.consecutive_failure_count == 1
+
+    def test_real_shutdown_exit_143_without_flag_sends_nothing(self):
+        d = self._make_dispatcher()
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock), \
+             patch("landline.runtime.notifications.send_health_alert",
+                   return_value=True) as mock_alert:
+            d._record_outcome(self._generic_failure_result(exit_code=143), "123")
+        helper_mock.assert_not_called()
+        mock_alert.assert_not_called()
+        assert d._failure_tracker.consecutive_failure_count == 0
+
+    # ----- watchdog kill after partial reply text -----
+
+    def test_partial_text_then_freeze_stays_success_but_notifies(self):
+        """5 of 9 real kills had streamed some text first. The turn is
+        success-shaped (tracker reset, no resend demand) but the user gets
+        the incomplete-reply line, ordered behind the partial bubbles, and
+        the operator alert fires."""
+        from landline.claude.failure_notices import PARTIAL_FREEZE_NOTICE
+        ft = ClaudeFailureTracker()
+        ft.consecutive_failure_count = 2
+        d = self._make_dispatcher(failure_tracker=ft)
+        r = self._silence_kill_result()
+        r.streamed_text = "Here is the first half of the answer"
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock), \
+             patch("landline.runtime.notifications.send_health_alert",
+                   return_value=True) as mock_alert:
+            d._record_outcome(r, "123")
+        assert self._notice_texts(helper_mock) == [PARTIAL_FREEZE_NOTICE]
+        assert "\u2014" not in PARTIAL_FREEZE_NOTICE
+        assert mock_alert.call_count == 1
+        assert ft.consecutive_failure_count == 0
+
+    def test_partial_text_without_kill_sends_nothing(self):
+        d = self._make_dispatcher()
+        r = ClaudeStreamResult()
+        r.streamed_text = "complete answer"
+        r.exit_code = 0
+        helper_mock = MagicMock()
+        with patch("landline.claude.try_enqueue_or_send", helper_mock), \
+             patch("landline.runtime.notifications.send_health_alert",
+                   return_value=True) as mock_alert:
+            d._record_outcome(r, "123")
+        helper_mock.assert_not_called()
+        mock_alert.assert_not_called()
 
     # ----- exclusions -----
 
