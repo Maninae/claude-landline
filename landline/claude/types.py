@@ -56,3 +56,22 @@ class ClaudeStreamResult:
         has_streamed = bool(self.streamed_text.strip())
         has_final = bool((self.final_result or "").strip())
         return has_streamed or has_final
+
+    def summary_for_log(self, stderr_tail_chars: int = 500) -> str:
+        """One-line metadata summary for daemon log lines (no message text).
+
+        Content is reported as lengths only; the stderr tail is CC's own
+        diagnostics and is the one free-text field included.
+        """
+        tail = (self.stderr_tail or "")[-stderr_tail_chars:]
+        return (
+            "exit=%s num_turns=%s duration_ms=%s saw_init=%s is_error=%s "
+            "subtype=%s streamed_chars=%d final_chars=%d interrupted=%s "
+            "watchdog_kill=%s error=%r stderr_tail=%r" % (
+                self.exit_code, self.result_num_turns, self.result_duration_ms,
+                self.saw_init, self.result_is_error, self.result_subtype,
+                len(self.streamed_text), len(self.final_result or ""),
+                self.interrupted, self.killed_by_silence_watchdog,
+                self.error, tail,
+            )
+        )

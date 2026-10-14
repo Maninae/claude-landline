@@ -310,15 +310,17 @@ class ClaudeDispatcher:
                 suppress_empty=(not is_new_session),
             )
 
-            if (
-                not is_new_session
-                and self.running
-                and (
-                    looks_like_stale_session(result)
-                    or looks_like_pruned_resume(result)
-                )
-            ):
-                result = self._retry_with_fresh_session(text, chat_id)
+            if not is_new_session and self.running:
+                stale = looks_like_stale_session(result)
+                pruned = looks_like_pruned_resume(result)
+                if stale or pruned:
+                    # Metadata only (no message text) — the one place the
+                    # evidence for a session wipe gets recorded.
+                    log(
+                        "--resume fallback trigger: stale=%s pruned=%s %s"
+                        % (stale, pruned, result.summary_for_log())
+                    )
+                    result = self._retry_with_fresh_session(text, chat_id)
 
             return result
         finally:
@@ -600,6 +602,8 @@ class ClaudeDispatcher:
         """
         if result.interrupted:
             return
+        if result.killed_by_silence_watchdog:
+            log("silence-kill result: " + result.summary_for_log())
         repeated_freeze = self._note_silence_kill_streak(result)
         if is_result_successful(result):
             self._failure_tracker.record_success()

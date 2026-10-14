@@ -3169,3 +3169,71 @@ class TestSilenceKillHealthAlert:
                    side_effect=RuntimeError("osascript exploded")):
             d._record_outcome(self._silence_kill_result(), "123")
         assert d._failure_tracker.consecutive_failure_count == 1
+
+
+class TestResumeFallbackObservability:
+    """C: the one place a session wipe is decided must leave metadata in the
+    log (exit code, num_turns, duration, stderr tail) and never message text."""
+
+    def _make_dispatcher(self, run_claude_fn):
+        return ClaudeDispatcher(
+            token="fake-token",
+            state={"session_id": "old-session", "turn_count": 3},
+            failure_tracker=ClaudeFailureTracker(),
+            shutdown_hook=MagicMock(),
+            run_claude_fn=run_claude_fn,
+            send_response_fn=MagicMock(),
+            send_typing_fn=MagicMock(),
+            pause_flag=PauseFlag(),
+        )
+
+    def test_fallback_logs_metadata_and_stderr_tail_but_no_message_text(self):
+        secret = "hello-this-is-the-users-private-message"
+        calls = [0]
+
+        def stale_then_fresh(**kwargs):
+            calls[0] += 1
+            r = ClaudeStreamResult()
+            if calls[0] == 1:
+                r.exit_code = 0
+                r.result_num_turns = 0
+                r.result_duration_ms = 48
+                r.saw_init = True
+                r.stderr_tail = "cc-stderr-diagnostic-line"
+                return r
+            r.session_id = "fresh"; r.streamed_text = "ok"; r.final_result = "ok"
+            return r
+
+        d = self._make_dispatcher(MagicMock(side_effect=stale_then_fresh))
+        with patch("landline.claude.dispatch.log") as mock_log, \
+             patch("landline.claude.dispatch.save_state"), \
+             patch("landline.claude.dispatch.log_conversation"), \
+             patch("landline.claude.dispatch.get_context_percent", return_value=None), \
+             patch("landline.claude.dispatch.read_recent_conversation_history", return_value=""):
+            d.send_to_claude(secret, "123")
+        lines = [c.args[0] for c in mock_log.mock_calls if c.args]
+        trigger = [l for l in lines if "--resume fallback trigger" in l]
+        assert len(trigger) == 1
+        line = trigger[0]
+        for needle in ("stale=True", "pruned=False", "exit=0", "num_turns=0",
+                       "duration_ms=48", "saw_init=True", "cc-stderr-diagnostic-line"):
+            assert needle in line, (needle, line)
+        assert all(secret not in l for l in lines)
+
+    def test_silence_kill_logs_result_metadata(self):
+        d = self._make_dispatcher(MagicMock())
+        r = ClaudeStreamResult()
+        r.exit_code = -9
+        r.killed_by_silence_watchdog = True
+        r.silence_timeout_seconds = 600
+        r.streamed_text = "user-visible partial text that must not be logged"
+        with patch("landline.claude.dispatch.log") as mock_log, \
+             patch("landline.claude.try_enqueue_or_send", MagicMock()), \
+             patch("landline.runtime.notifications.send_health_alert", return_value=True):
+            d._record_outcome(r, "123")
+        lines = [c.args[0] for c in mock_log.mock_calls if c.args]
+        kill_lines = [l for l in lines if l.startswith("silence-kill result:")]
+        assert len(kill_lines) == 1
+        assert "exit=-9" in kill_lines[0] and "watchdog_kill=True" in kill_lines[0]
+        assert "streamed_chars=%d" % len(r.streamed_text) in kill_lines[0]
+        assert all("user-visible partial text" not in l for l in lines)
